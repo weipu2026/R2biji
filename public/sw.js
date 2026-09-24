@@ -4,10 +4,11 @@
  *   1. 新增/删除 js 模块 → 同步改下面的 ASSETS 清单,否则离线时那个模块拉不到。
  *      (tests/assets.test.mjs 会自动核对清单与实际文件,漏了会变红。)
  *   2. **改完任何被缓存的资源,必须把 CACHE 版本号 +1。**
- *      本 SW 是 cache-first 的,而浏览器只在 sw.js 这个文件本身变化时才重新安装;
+ *      静态 js/css 是 cache-first,而浏览器只在 sw.js 这个文件本身变化时才重新安装;
  *      不升版本号 → 老用户永远拿到旧缓存里的 js,表现为「部署了但界面没变」。
+ *      页面 HTML 已是 network-first(2026-09-24),普通刷新即可拿到新外壳。
  */
-const CACHE = 'jmbiji-v12';
+const CACHE = 'jmbiji-v14';
 const ASSETS = [
   './',
   './index.html',
@@ -47,6 +48,18 @@ self.addEventListener('fetch', (e) => {
   // 目前 ASSETS 清单里没有 API 路径,这行是防止将来有人往里加。
   const url = new URL(e.request.url);
   if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) return;
+  // 页面本体(导航请求)network-first:部署新版后普通刷新一次就能拿到新外壳,
+  // 不再依赖「新 SW install 完成 → 自动刷新」的时序;断网才回退缓存,离线可用性不丢。
+  // 其余静态资源仍 cache-first:内容随 CACHE 版本整体更替,命中缓存最省往返。
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      fetch(e.request).catch(() =>
+        caches.match(e.request, { ignoreSearch: true })
+          .then((h) => h || caches.match('./index.html')),
+      ),
+    );
+    return;
+  }
   e.respondWith(
     caches.match(e.request, { ignoreSearch: true }).then((hit) => hit || fetch(e.request)),
   );

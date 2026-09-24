@@ -92,6 +92,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+  box-shadow: 0 1px 3px rgba(37, 99, 235, .35); /* 主按钮微投影,更有按钮感 */
 }
 .btn.primary:hover { background: #1d4ed8; }
 .btn.ghost { border-color: transparent; background: transparent; }
@@ -148,7 +149,15 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   margin-bottom: 22px;
 }
 .lock-brand img { border-radius: 10px; }
-.lock-brand h1 { margin: 0; font-size: 22px; letter-spacing: .5px; }
+.lock-brand h1 {
+  margin: 0;
+  font-size: 22px;
+  letter-spacing: .5px;
+  background: linear-gradient(120deg, var(--accent), #7c3aed);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
 .lock-brand p { margin: 2px 0 0; color: var(--muted); font-size: 12px; }
 
 .lock-lib {
@@ -243,23 +252,29 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .ed-tools {
   display: flex;
   align-items: center;
-  gap: 3px;
+  gap: 5px;
   flex-wrap: wrap;
-  padding: 6px 0 8px;
-  border-bottom: 1px dashed var(--border); /* 与正文区分隔 */
-  margin-bottom: 4px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--border); /* 与正文区分隔 */
+  margin-bottom: 6px;
 }
+/* 实体按钮:浅底+边框,绝不隐形;悬停变强调色 */
 .ed-btn {
-  border: 1px solid transparent;
-  background: transparent;
-  border-radius: 6px;
-  min-width: 30px;
-  height: 28px;
-  padding: 0 7px;
-  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  background: var(--bg);
+  border-radius: 7px;
+  min-width: 34px;
+  height: 30px;
+  padding: 0 9px;
+  color: var(--text);
   font-size: 13.5px;
+  transition: border-color .15s, color .15s, background .15s;
 }
-.ed-btn:hover { background: var(--hover-weak); color: var(--text); border-color: var(--border); }
+.ed-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-weak);
+}
 /* 按钮字形即功能示意:B 粗、I 斜、S 删除线、H1-3 字重递减(=md 标题层级) */
 .ed-btn[data-wrap="**"] { font-weight: 700; }
 .ed-btn[data-wrap="*"] { font-style: italic; font-family: Georgia, serif; }
@@ -281,6 +296,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding: 10px 16px;
   background: var(--panel);
   border-bottom: 1px solid var(--edge);
+  box-shadow: 0 1px 3px rgba(16, 24, 40, .04); /* 轻投影,顶栏与内容分层 */
 }
 .brand-mini {
   font-weight: 700;
@@ -381,7 +397,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   gap: 8px;
 }
 .cat-item:hover { background: var(--bg); }
-.cat-item.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+.cat-item.active {
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-weight: 600;
+  box-shadow: inset 3px 0 0 var(--accent); /* 左侧强调条,选中态更醒目 */
+}
 .cat-item.warn .cat-name { color: var(--warn); }
 .cat-item.broken .cat-name { color: var(--danger); }
 .cat-item.none, .note-item.none { color: var(--muted); cursor: default; font-size: 12.5px; }
@@ -395,7 +416,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   cursor: pointer;
 }
 .note-item:hover { background: var(--bg); }
-.note-item.active { background: var(--accent-weak); }
+.note-item.active {
+  background: var(--accent-weak);
+  box-shadow: inset 3px 0 0 var(--accent); /* 左侧强调条,与分类选中态呼应 */
+}
 .note-main { flex: 1; min-width: 0; }
 .note-title {
   font-weight: 500;
@@ -441,6 +465,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   color: var(--muted);
   font-size: 14px;
 }
+.empty::before {
+  content: "✦";
+  font-size: 34px;
+  color: var(--accent);
+  opacity: .5;
+  line-height: 1;
+}
 
 /* 写作/阅读面板:带边框的「纸面」卡片,纵向撑满内容区(只留呼吸边距),
    编辑区不再缩在屏幕中间;内部超出时卡片自滚。明暗两套都成立 */
@@ -463,7 +494,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .read-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
 }
-#readTitle { margin: 0; font-size: 24px; line-height: 1.3; word-break: break-all; }
+#readTitle { margin: 0; font-size: 26px; line-height: 1.3; word-break: break-all; letter-spacing: .2px; }
 .read-actions { display: flex; gap: 6px; flex-shrink: 0; }
 .read-meta { color: var(--muted); font-size: 12.5px; margin: 8px 0 20px; }
 
@@ -471,6 +502,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 .read-body .md { line-height: 1.75; }
 .read-body h1, .read-body h2, .read-body h3 { margin: 22px 0 10px; line-height: 1.35; }
+.read-body h2 { border-bottom: 1px solid var(--border); padding-bottom: 6px; } /* h2 下细线,文档排版惯例 */
 .read-body h1 { font-size: 20px; }
 .read-body h2 { font-size: 17px; }
 .read-body h3 { font-size: 15px; color: var(--muted); }
