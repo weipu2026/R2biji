@@ -61,7 +61,7 @@ JMbiji/
 | `BUCKET_NAME` | Variables | | R2 桶名,默认 `jmbiji-vault` |
 | `KEEP_WORKERS_DEV` | Variables | | 设为 `1` 时,配了自定义域也保留 workers.dev 入口(默认只留一个入口) |
 
-流水线 5 步都是**硬性**的,任一不通过就整体失败:
+工作流共 8 个步骤,其中下列 5 个是**硬性校验/验收**,任一不通过就整体失败:
 
 | 顺序 | 步骤 | 作用 |
 |---|---|---|
@@ -173,8 +173,8 @@ npm run deploy                        # = gen-config(注入域名/桶名)→ wra
 ## 开发
 
 ```bash
-npm test                # 离线单测 68 项(加密/格式/库/渲染/Worker/端到端/部署配置),Node ≥ 22
-npm run test:falsify    # 鉴伪:逐条破坏 21 个守卫 → 确认对应用例真的会变红 → 自动还原
+npm test                # 离线单测 69 项(加密/格式/库/渲染/Worker/端到端/部署配置),Node ≥ 22
+npm run test:falsify    # 鉴伪:逐条破坏 22 个守卫 → 确认对应用例真的会变红 → 自动还原
 npx wrangler dev        # 本地真实 Worker + R2 模拟
 ```
 

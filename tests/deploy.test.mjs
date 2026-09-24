@@ -107,6 +107,53 @@ test('部署守卫:上线验收 —— 工作流必须真的断言门的三态�
   );
 });
 
+test('部署守卫:工作流里的赋值管道必须有兜底 —— set -e 下非零退出会中止整步', () => {
+  // 规则:`X=$(A | B | C)` 这种赋值,在 `set -euo pipefail` 的步骤里,
+  // 只要管道里有任何一个环节非零退出(典型:grep 没匹配到、curl 4xx/5xx),
+  // 赋值本身就失败 → set -e 立刻中止 → 后面自己写的提示语全成了死代码。
+  // 实测踩过两次:① 取 workers.dev 子域时 curl -f 失败,友好提示永远打不出来;
+  //              ② 桶没有任何自定义域(最常见也最正确的情形)时 grep -o 没匹配 → 步骤中止,
+  //                 于是「桶配置完全正确」反而让流水线永远变红。
+  // 判据:管道里有非「安全命令」时,必须用 `|| true` 兜住。
+  // 判据:管道里有非「安全命令」时,必须用 `|| 兜底` 接住(通常写 `|| true`)。
+  // 两个必须避开的自伤(都真踩过):
+  //   · 拆管道要防住 `sed -n 's/a\|b/p'` 里的**转义竖线** —— 那是 sed 的模式分隔符,不是 shell 管道,
+  //     按 `|` 硬拆会把 `printf|sed` 误判成含 unknown 命令(`(?<!\\)\|` 才是对的);
+  //   · 兜底形式不止 `|| true`, `|| echo '{}'` 之类同样能阻止中止,不能只认字面量 `|| true`。
+  const SAFE = new Set(['printf', 'echo', 'cat', 'wc', 'tr', 'tail', 'head', 'sed', 'sort', 'uniq', 'cut', 'awk', 'true']);
+
+  const lines = workflow.split('\n');
+  const blocks = [];
+  let cur = null;
+  let runIndent = 0;
+  for (const line of lines) {
+    const open = /^(\s*)run: \|\s*$/.exec(line);
+    if (open) { runIndent = open[1].length; cur = []; blocks.push(cur); continue; }
+    if (!cur) continue;
+    if (line.trim() === '') { cur.push(line); continue; }
+    const ind = line.match(/^\s*/)[0].length;
+    if (ind > runIndent) cur.push(line);
+    else cur = null;
+  }
+
+  const offenders = [];
+  for (const block of blocks) {
+    const text = block.join('\n');
+    if (!/set -e/.test(text)) continue; // 没开 set -e 的步骤不受这条规则约束
+    for (const line of block) {
+      const m = /^\s*[A-Za-z_][A-Za-z0-9_]*=\$\((.+)\)\s*$/.exec(line);
+      if (!m) continue;
+      const rhs = m[1];
+      if (!rhs.includes('|')) continue;
+      if (/\|\|/.test(rhs)) continue; // 已有兜底命令,失败时它接管退出码
+      const stages = rhs.split(/(?<!\\)\|(?!\|)/).map((s) => s.trim().split(/[\s(]+/)[0]);
+      const unsafe = stages.filter((c) => c && !SAFE.has(c));
+      if (unsafe.length) offenders.push(`${line.trim()}  ← 管道里有 ${unsafe.join(' / ')},需加兜底(\`|| true\` 或 \`|| echo\`)`);
+    }
+  }
+  assert.deepEqual(offenders, [], `以下赋值在管道失败时会中止步骤:\n${offenders.join('\n')}`);
+});
+
 test('部署守卫:gitignore 必须忽略生成物与本地密钥文件', () => {
   for (const p of ['wrangler.deploy.toml', '.dev.vars', 'node_modules/']) {
     assert.ok(

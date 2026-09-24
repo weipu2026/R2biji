@@ -169,6 +169,13 @@ const MUTANTS = [
     to: '          no_key=$(code "$URL/")\n          yes_key=$(code "$URL/")  # MUTANT:不再带密钥去请求',
     expect: '上线验收',
   },
+  {
+    label: '去掉赋值管道的 || true 兜底(set -e 下会中止步骤)',
+    file: '.github/workflows/deploy.yml',
+    from: "| tr -d ' ' || true)",
+    to: "| tr -d ' ')",
+    expect: '赋值管道必须有兜底',
+  },
 ];
 
 const TEST_FILES = ['crypto', 'format', 'vault', 'render', 'worker', 'e2e', 'deploy']

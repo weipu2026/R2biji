@@ -144,7 +144,7 @@ jobs:
           # 与部署读同一份配置:拿模板 wrangler.toml 当「当前部署的配置」会引入隐性偏差
           CFG=""
           [ -f wrangler.deploy.toml ] && CFG="--config wrangler.deploy.toml"
-          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml | head -1)
+          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml 2>/dev/null | head -1 || true)
           [ -n "$NAME" ] || { echo "✗ 未能从生成物读出 worker 名"; exit 1; }
 
           for attempt in 1 2 3; do
@@ -176,16 +176,20 @@ jobs:
           ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
         run: |
           set -euo pipefail
-          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml | head -1)
+          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml 2>/dev/null | head -1 || true)
+          [ -n "$NAME" ] || { echo "✗ 未能从 wrangler.deploy.toml 读出 worker 名(生成物缺失或格式变了?)"; exit 1; }
 
           if [ -n "${WORKER_DOMAIN:-}" ]; then
             URL="https://${WORKER_DOMAIN}"
           else
             # workers.dev 的完整地址含账户子域,只有 API 才知道;查不到就失败,
             # 不静默跳过 —— 「跳过验收」等于把「可能没装好门」当成功。
+            # 注意 `|| true`:本步骤开了 set -e,而 `curl -f` 在 4xx/5xx 时非零退出。
+            # 不兜住的话赋值会直接中止脚本,下面那句自己写的提示就成了永远执行不到的死代码
+            # (这条是干跑时抓出来的:探针给 403,本来该看到友好提示,结果只看到 set -e 的中止)。
             SUB=$(curl -fsS -m 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
-              | sed -n 's/.*"subdomain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+              2>/dev/null | sed -n 's/.*"subdomain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
             if [ -z "$SUB" ]; then
               echo "✗ 未能从 API 取到 workers.dev 子域,无法确定部署地址。"
               echo "  请在 Variables 里显式配置 WORKER_DOMAIN,或确认 API Token 含 Workers Scripts:Read。"
@@ -273,12 +277,13 @@ jobs:
           API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET"
           auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
-          body=$(curl -sS -m 20 -w '\n%{http_code}' "${auth[@]}" "$API/domains/managed")
+          # `|| true` 同上:curl 失败时不让 set -e 把步骤掀掉,而是走到下面的「无法判定」分支
+          body=$(curl -sS -m 20 -w '\n%{http_code}' "${auth[@]}" "$API/domains/managed" || true)
           hcode=$(printf '%s' "$body" | tail -1)
           json=$(printf '%s' "$body" | sed '$d')
 
           if [ "$hcode" != "200" ]; then
-            echo "::warning::无法判定桶 $BUCKET 的公开访问状态(HTTP $hcode)。"
+            echo "::warning::未能判定桶 $BUCKET 的公开访问状态(HTTP $hcode)。"
             echo "  · 可能是 API Token 缺 R2 只读权限。请自行确认:Cloudflare 控制台 → R2 → $BUCKET → Settings,"
             echo "    「Public access / R2.dev subdomain」必须处于 Disabled,且没有绑定自定义域。"
             echo "| 桶公开访问 | 未能判定(HTTP $hcode) |" >> "$GITHUB_STEP_SUMMARY"
@@ -289,7 +294,11 @@ jobs:
           r2dev=$(printf '%s' "$json" | sed -n 's/.*"domain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
 
           custom=$(curl -sS -m 20 "${auth[@]}" "$API/domains/custom" || echo '{}')
-          n_custom=$(printf '%s' "$custom" | grep -o '"domain"[[:space:]]*:[[:space:]]*"' | wc -l | tr -d ' ')
+          # ⚠️ `|| true` 不能省:grep -o 在「一个都没匹配到」时退出码是 1,
+          # 而本步骤开着 set -o pipefail → 整条管道失败 → 赋值失败 → 步骤中止。
+          # 后果是「桶配置完全正确」(没有自定义域,即最常见的情形)时流水线反而永远变红。
+          # 干跑时抓到的:预期的通过场景 rc=1 且输出为空,中止点就在这一行。
+          n_custom=$(printf '%s' "$custom" | grep -o '"domain"[[:space:]]*:[[:space:]]*"' | wc -l | tr -d ' ' || true)
 
           bad=0
           if [ "$enabled" = "true" ]; then
@@ -298,7 +307,7 @@ jobs:
             echo "  修复:npx wrangler r2 bucket dev-url disable $BUCKET"
             bad=1
           else
-            echo "  ✓ r2.dev 公开访问未开启($r2dev,enabled=$enabled)"
+            echo "  ✓ 桶 $BUCKET 的 r2.dev 公开访问未开启($r2dev,enabled=$enabled)"
           fi
 
           if [ "$n_custom" != "0" ]; then
@@ -306,7 +315,7 @@ jobs:
             printf '%s\n' "$custom" | grep -o '"domain"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/^/      /'
             bad=1
           else
-            echo "  ✓ 未绑定自定义域"
+            echo "  ✓ 桶 $BUCKET 未绑定自定义域"
           fi
 
           echo "| 桶 r2.dev 公开访问 | $([ "$bad" = 0 ] && echo '已确认关闭' || echo '**已开启(危险)**') |" >> "$GITHUB_STEP_SUMMARY"
