@@ -229,21 +229,36 @@ function shortRand() {
   return s;
 }
 
-/** 写入一份备份并滚动轮换。oldBytes 由调用方在覆盖/删除前读好。 */
+/** 写入一份备份并滚动轮换。oldBytes 由调用方在覆盖/删除前读好。
+ *  ★ 备份是尽力而为的安全层,失败**绝不连累主操作**:主数据 CAS 已成功,
+ *    这里若把异常抛上去,客户端会拿着请求失败前的旧 etag 反复重试 →
+ *    每次都撞 412,陷入「保存成功却报错」的死循环(上层还只会看到裸错误页)。
+ *    所以失败只记日志,主流程照常返回成功。 */
 async function writeBackup(env, backupBase, oldBytes) {
-  const basePrefix = `${BACKUP_PREFIX}${backupBase}/`;
-  await env.VAULT.put(`${basePrefix}${backupFileName(backupBase, Date.now(), shortRand())}`, oldBytes);
-  const names = (await listAll(env.VAULT, basePrefix)).map((o) => o.key.slice(basePrefix.length));
-  for (const fname of planBackupRotation(names, KEEP_BACKUPS_PER_CATEGORY)) {
-    try { await env.VAULT.delete(basePrefix + fname); } catch { /* 轮换失败可容忍 */ }
+  try {
+    const basePrefix = `${BACKUP_PREFIX}${backupBase}/`;
+    await env.VAULT.put(`${basePrefix}${backupFileName(backupBase, Date.now(), shortRand())}`, oldBytes);
+    const names = (await listAll(env.VAULT, basePrefix)).map((o) => o.key.slice(basePrefix.length));
+    for (const fname of planBackupRotation(names, KEEP_BACKUPS_PER_CATEGORY)) {
+      try { await env.VAULT.delete(basePrefix + fname); } catch { /* 轮换失败可容忍 */ }
+    }
+  } catch (e) {
+    console.error(`[jmbiji] 写备份失败(${backupBase}),主数据不受影响:`, e);
   }
 }
 
 /* ---------------- 路由处理 ---------------- */
 
+/** body 可能是「惰性取体」函数(见 handleApiRequest):在鉴权门之前绝不物化,
+ *  未认证的大请求体不再进 isolate 内存。纯字节入参(测试/dev 直连)原样返回。 */
+async function bodyBytes(body) {
+  return typeof body === 'function' ? body() : body;
+}
+
 async function putCategory(method, headers, body, env, name) {
   if (method !== 'PUT') return fail(405, 'method', '不支持的请求方法');
-  if (!body || body.length > MAX_CAT_BYTES) return fail(413, 'too-large', `分类文件上限 ${MAX_CAT_BYTES / 1024 / 1024}MB`);
+  const raw = await bodyBytes(body);
+  if (!raw || raw.length > MAX_CAT_BYTES) return fail(413, 'too-large', `分类文件上限 ${MAX_CAT_BYTES / 1024 / 1024}MB`);
   const r2key = `${CAT_PREFIX}${name}.enc`;
 
   const createOnly = (headers['if-none-match'] || '').trim() === '*';
@@ -253,7 +268,7 @@ async function putCategory(method, headers, body, env, name) {
     // 「仅新建」用官方条件写:R2PutOptions.onlyIf 支持 Headers,按 RFC 7232
     // 语义处理 If-None-Match: *(对象不存在才写入);条件失败 put() 返回 null。
     // ⚠️ 只能走 onlyIf —— 传不存在的选项名会被静默忽略(等于无条件写)。
-    const res = await env.VAULT.put(r2key, body, { onlyIf: onlyIfNoneMatchStar() });
+    const res = await env.VAULT.put(r2key, raw, { onlyIf: onlyIfNoneMatchStar() });
     if (!res) return fail(409, 'exists', '分类已存在');
     return json({ ok: true, etag: res.etag }, 201);
   }
@@ -262,17 +277,24 @@ async function putCategory(method, headers, body, env, name) {
   const current = await env.VAULT.get(r2key);
   if (!current) return fail(404, 'missing', '分类已被其他设备删除');
   const oldBytes = current instanceof Uint8Array ? current : new Uint8Array(await current.arrayBuffer());
-  const res = await env.VAULT.put(r2key, body, { onlyIf: { etagMatches: ifMatch } });
+  const res = await env.VAULT.put(r2key, raw, { onlyIf: { etagMatches: ifMatch } });
   if (!res) return fail(412, 'conflict', '服务器上的版本已变化(其他设备刚保存),请刷新后重试');
   // CAS 成功 → 立即备份被替换的旧版(拒绝写入不产生备份)
   await writeBackup(env, name, oldBytes);
   return json({ ok: true, etag: res.etag });
 }
 
-async function deleteCategory(env, name) {
+async function deleteCategory(headers, env, name) {
   const r2key = `${CAT_PREFIX}${name}.enc`;
   const existing = await env.VAULT.head(r2key);
   if (!existing) return fail(404, 'missing', '分类不存在');
+  // 条件删除:带 If-Match 时与 head 比对,不符 → 412。此前删除无任何条件,
+  // 设备 A 的删除(或改名的删除半程)会把设备 B 刚保存的新版一并删掉。
+  // R2 的 delete 不支持条件参数,head 比对是纯函数核心能做的最强校验。
+  const ifMatch = unquote(headers['if-match']);
+  if (ifMatch && existing.etag !== ifMatch) {
+    return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
+  }
   const old = await env.VAULT.get(r2key);
   if (old) {
     const oldBytes = old instanceof Uint8Array ? old : new Uint8Array(await old.arrayBuffer());
@@ -288,7 +310,7 @@ async function deleteCategory(env, name) {
  * @param {string} method
  * @param {string} url 完整 URL(用 URL 解析查询参数)
  * @param {Record<string,string>} headers 全小写键名
- * @param {Uint8Array|null} body
+ * @param {Uint8Array|null|(() => Promise<Uint8Array|null>)} body 字节,或惰性取体函数(鉴权通过后才物化)
  * @param {object} env { VAULT: R2 绑定, ACCESS_KEY?: string }
  * @returns {{status:number, headers:object, body:Uint8Array|string|null}}
  */
@@ -335,10 +357,11 @@ export async function handleApi(method, url, headers, body, env) {
       };
     }
     if (method === 'PUT') {
-      if (!body || body.length > MAX_VAULT_BYTES) return fail(413, 'too-large', 'vault.json 过大或为空');
+      const raw = await bodyBytes(body);
+      if (!raw || raw.length > MAX_VAULT_BYTES) return fail(413, 'too-large', 'vault.json 过大或为空');
       let parsed;
       try {
-        parsed = JSON.parse(new TextDecoder().decode(body));
+        parsed = JSON.parse(new TextDecoder().decode(raw));
       } catch {
         return fail(400, 'bad-json', 'vault.json 不是合法 JSON');
       }
@@ -352,12 +375,12 @@ export async function handleApi(method, url, headers, body, env) {
         // 真正的不存在/被改由 R2 的条件写兜底(返回 null → 412)。
         const ifMatch = unquote(headers['if-match']);
         if (!ifMatch) return fail(428, 'need-if-match', '缺少 If-Match');
-        const res = await env.VAULT.put(VAULT_KEY, body, { onlyIf: { etagMatches: ifMatch } });
+        const res = await env.VAULT.put(VAULT_KEY, raw, { onlyIf: { etagMatches: ifMatch } });
         if (!res) return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
         return json({ ok: true, etag: res.etag });
       }
       // 建库:只允许创建一次
-      const created = await env.VAULT.put(VAULT_KEY, body, { onlyIf: onlyIfNoneMatchStar() });
+      const created = await env.VAULT.put(VAULT_KEY, raw, { onlyIf: onlyIfNoneMatchStar() });
       if (!created) return fail(409, 'exists', '库已存在,请直接解锁');
       return json({ ok: true, etag: created.etag }, 201);
     }
@@ -391,7 +414,7 @@ export async function handleApi(method, url, headers, body, env) {
       return binary(buf, { etag: quote(obj.etag) });
     }
     if (method === 'PUT') return putCategory(method, headers, body, env, name);
-    if (method === 'DELETE') return deleteCategory(env, name);
+    if (method === 'DELETE') return deleteCategory(headers, env, name);
     return fail(405, 'method', '不支持的请求方法');
   }
 
@@ -417,8 +440,9 @@ export async function handleApi(method, url, headers, body, env) {
       return binary(buf);
     }
     if (method === 'PUT') {
-      if (!body || body.length > MAX_BLOB_BYTES) return fail(413, 'too-large', `附件上限 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
-      const res = await env.VAULT.put(key, body, { onlyIf: onlyIfNoneMatchStar() });
+      const raw = await bodyBytes(body);
+      if (!raw || raw.length > MAX_BLOB_BYTES) return fail(413, 'too-large', `附件上限 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
+      const res = await env.VAULT.put(key, raw, { onlyIf: onlyIfNoneMatchStar() });
       return json({ ok: true, existed: !res }, res ? 201 : 200);
     }
     if (method === 'DELETE') {
@@ -441,23 +465,45 @@ export function declaredTooLarge(contentLength) {
   return Number.isFinite(n) && n > MAX_REQUEST_BYTES;
 }
 
+/** PUT/POST 必须声明长度:chunked(无 Content-Length)会绕过长度预检,
+ *  让未认证流量把超大请求体灌进 isolate 内存 → 一律 411 拒收。
+ *  抽成纯函数:受限环境构造不了真 Request,单测直接钉这条判据。 */
+export function missingDeclaredLength(method, contentLength) {
+  if (method !== 'PUT' && method !== 'POST') return false;
+  return !/^\d+$/.test(String(contentLength ?? '').trim());
+}
+
+const errorResponse = (status, code, message) => new Response(
+  JSON.stringify({ error: code, message }),
+  { status, headers: { 'content-type': 'application/json; charset=utf-8', ...SEC_HEADERS } },
+);
+
 /** Request → 纯函数核心(测试与本地 dev-server 也用这个入口) */
 export async function handleApiRequest(request, env) {
-  // 先看声明长度再决定要不要读:不预检的话,平台不会替你拦住大 body
-  if (declaredTooLarge(request.headers.get('content-length'))) {
-    return new Response(
-      JSON.stringify({ error: 'too-large', message: '请求体过大' }),
-      { status: 413, headers: { 'content-type': 'application/json; charset=utf-8', ...SEC_HEADERS } },
-    );
+  try {
+    // 先看声明长度再决定要不要读:不预检的话,平台不会替你拦住大 body
+    if (missingDeclaredLength(request.method, request.headers.get('content-length'))) {
+      return errorResponse(411, 'length-required', '缺少 Content-Length');
+    }
+    if (declaredTooLarge(request.headers.get('content-length'))) {
+      return errorResponse(413, 'too-large', '请求体过大');
+    }
+    const headers = {};
+    for (const [k, v] of request.headers.entries()) headers[k] = v;
+    let body = null;
+    if (request.method === 'PUT' || request.method === 'POST') {
+      // ★ 惰性取体:handleApi 内部先过访问密钥门与 Bearer 鉴权,通过后才真正读。
+      //   以前是进门之前先 arrayBuffer() 全量读入 —— 未认证请求也能打满 isolate 内存。
+      body = () => request.arrayBuffer().then((b) => new Uint8Array(b));
+    }
+    const out = await handleApi(request.method, request.url, headers, body, env);
+    return new Response(out.body, { status: out.status, headers: out.headers });
+  } catch (e) {
+    // 顶层兜底:任何未捕获异常(典型:vault.json 损坏导致 JSON.parse 抛错)
+    // 都必须返回结构化错误,而不是让平台吐出无法诊断的裸 1101 错误页
+    console.error('[jmbiji] 请求处理未捕获异常:', e);
+    return errorResponse(500, 'internal', '服务器内部错误,请稍后重试');
   }
-  const headers = {};
-  for (const [k, v] of request.headers.entries()) headers[k] = v;
-  let body = null;
-  if (request.method !== 'GET' && request.method !== 'HEAD') {
-    body = new Uint8Array(await request.arrayBuffer());
-  }
-  const out = await handleApi(request.method, request.url, headers, body, env);
-  return new Response(out.body, { status: out.status, headers: out.headers });
 }
 
 export default {

@@ -400,3 +400,39 @@ test('全库备份:恢复时已存在的分类一律跳过,绝不覆盖', async 
   const still = await a.loadCategory('秘钥');
   assert.equal(still.notes[0].title, '服务器上的新版本', '服务器上的较新版本绝不能被旧备份覆盖');
 });
+
+/* ---------- 本轮审计修复的回归:条件删除 ---------- */
+
+test('条件删除:A 打开后 B 保存,A 再删 → 必须 412,不能静默删掉 B 的新版', async () => {
+  freshEnv();
+  API.clearToken();
+  const PW = '条件删除测试密码a';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('秘钥');
+  await a.loadCategory('秘钥'); // 拿到 etag
+
+  const b = await unlockAs(PW);
+  await b.rescan();
+  const bCat = await b.loadCategory('秘钥');
+  bCat.notes.push({
+    id: 'nB', title: 'B 的新笔记', content: 'b',
+    order: 2000, createdAt: 2, updatedAt: 2, attachments: [],
+  });
+  assert.deepEqual(await b.saveCategory('秘钥'), { ok: true });
+
+  await assert.rejects(
+    () => a.deleteCategory('秘钥'),
+    (e) => e.status === 412,
+    'A 手里是旧 etag,删除必须被拒 —— 以前无条件删,会把 B 刚存的新版一并删掉',
+  );
+
+  // B 的版本必须毫发无伤
+  const after = await unlockAs(PW);
+  await after.rescan();
+  const notes = await after.loadCategory('秘钥');
+  assert.ok(notes.notes.some((n) => n.id === 'nB'), 'B 刚保存的新笔记必须还在');
+});

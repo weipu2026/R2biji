@@ -1,7 +1,7 @@
 /* Worker 单测:内存 mock R2,覆盖鉴权 / CAS / 建库守卫 / 备份轮换 / 大小上限 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleApi, declaredTooLarge, MAX_REQUEST_BYTES } from '../worker/worker.js';
+import { handleApi, declaredTooLarge, missingDeclaredLength, MAX_REQUEST_BYTES } from '../worker/worker.js';
 import { MemoryR2 } from '../worker/memory-r2.mjs';
 import { createVault } from '../public/js/vaultlib.js';
 
@@ -426,4 +426,101 @@ test('改主密码:authed PUT vault 走 CAS;旧 etag → 412', async () => {
   // 再用旧 etag → 412
   const res2 = await call(env, 'PUT', '/api/vault', { body: JSON.stringify(json), headers: { ...h, 'if-match': etag } });
   assert.equal(res2.status, 412);
+});
+
+/* ---------- 本轮审计修复的回归:惰性取体 / 条件删除 / 备份容错 ---------- */
+
+test('411:PUT/POST 缺 Content-Length 一律拒收(chunked 绕过预检的口子)', () => {
+  assert.equal(missingDeclaredLength('PUT', null), true);
+  assert.equal(missingDeclaredLength('PUT', ''), true);
+  assert.equal(missingDeclaredLength('PUT', '  '), true);
+  assert.equal(missingDeclaredLength('PUT', 'abc'), true);
+  assert.equal(missingDeclaredLength('PUT', '123'), false);
+  assert.equal(missingDeclaredLength('POST', '0'), false);
+  // 无主体的方法不要求声明长度(浏览器对 bodyless DELETE 不带 content-length)
+  assert.equal(missingDeclaredLength('DELETE', null), false);
+  assert.equal(missingDeclaredLength('GET', null), false);
+});
+
+test('惰性取体:鉴权失败时请求体函数绝不能被调用(未认证不得打内存)', async () => {
+  const { env } = await setup();
+  let reads = 0;
+  const res = await call(env, 'PUT', '/api/cat?key=lazy', {
+    body: () => { reads += 1; return Promise.resolve(new Uint8Array([1])); },
+    headers: auth('f'.repeat(64)), // 错误令牌 → 401
+  });
+  assert.equal(res.status, 401);
+  assert.equal(reads, 0, '鉴权失败路径不得物化请求体(以前进门之前就 arrayBuffer 全量读入)');
+});
+
+test('惰性取体:鉴权通过后正常取体入库,往返一致', async () => {
+  const { env, token } = await setup();
+  const name = `${'A'.repeat(43)}.png`;
+  const bytes = new Uint8Array([9, 8, 7]);
+  const put = await call(env, 'PUT', `/api/blob?key=${name}`, {
+    body: () => Promise.resolve(bytes),
+    headers: auth(token),
+  });
+  assert.equal(put.status, 201);
+  const got = await call(env, 'GET', `/api/blob?key=${name}`, { headers: auth(token) });
+  assert.deepEqual(new Uint8Array(await got.arrayBuffer()), bytes);
+});
+
+test('条件删除:If-Match 不符 → 412 且对象还在;相符 → 204', async () => {
+  const { env, token } = await setup();
+  const put = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    body: new Uint8Array([1]), headers: { ...auth(token), 'if-none-match': '*' },
+  });
+  assert.equal(put.status, 201);
+  const etag = (await put.json()).etag;
+
+  const stale = await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    headers: { ...auth(token), 'if-match': '"stale-etag"' },
+  });
+  assert.equal(stale.status, 412, '旧 etag 删除必须被拒(否则会把别的设备刚存的新版删掉)');
+  assert.equal(
+    (await call(env, 'GET', `/api/cat?key=${encodeURIComponent('测试')}`, { headers: auth(token) })).status,
+    200,
+    '412 之后对象必须还在',
+  );
+
+  const ok = await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    headers: { ...auth(token), 'if-match': `"${etag}"` },
+  });
+  assert.equal(ok.status, 204);
+  assert.equal(
+    (await call(env, 'GET', `/api/cat?key=${encodeURIComponent('测试')}`, { headers: auth(token) })).status,
+    404,
+  );
+});
+
+test('备份写失败不连累主保存:主数据 200、后续 CAS 正常(不再 1101 死循环)', async () => {
+  const { env, token } = await setup();
+  const put1 = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    body: new Uint8Array([1]), headers: { ...auth(token), 'if-none-match': '*' },
+  });
+  assert.equal(put1.status, 201);
+  const etag1 = (await put1.json()).etag;
+
+  // 换一个「backup/ 前缀写入必炸」的 R2 代理
+  const real = env.VAULT;
+  env.VAULT = {
+    get: real.get.bind(real), head: real.head.bind(real), list: real.list.bind(real), delete: real.delete.bind(real),
+    put: async (k, b, o) => {
+      if (String(k).startsWith('backup/')) throw new Error('磁盘着火了');
+      return real.put(k, b, o);
+    },
+  };
+
+  const res = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    body: new Uint8Array([2]), headers: { ...auth(token), 'if-match': `"${etag1}"` },
+  });
+  assert.equal(res.status, 200, '主数据 CAS 已成功,备份失败绝不能把整个请求拖垮');
+
+  // 且客户端拿到新 etag 后能继续正常保存(以前这里会陷入 412 死循环)
+  const etag2 = (await res.json()).etag;
+  const res2 = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('测试')}`, {
+    body: new Uint8Array([3]), headers: { ...auth(token), 'if-match': `"${etag2}"` },
+  });
+  assert.equal(res2.status, 200);
 });
