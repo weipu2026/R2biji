@@ -416,12 +416,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* ---------- 内容区 ---------- */
 
 .content {
-  flex: 1; min-width: 0; overflow-y: auto; position: relative;
+  flex: 1; min-width: 0; position: relative;
+  display: flex; flex-direction: column; /* 写作/阅读卡片纵向撑满,不再缩在中间 */
   border-left: 1px solid var(--edge); /* 与侧栏之间补一道结构分界,浅色下清晰可辨 */
 }
 
 .empty {
-  height: 100%;
+  flex: 1; min-height: 0;
   display: flex; flex-direction: column; gap: 14px;
   align-items: center; justify-content: center;
   text-align: center;
@@ -430,16 +431,23 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   font-size: 14px;
 }
 
-/* 写作/阅读面板:做成带边框的「纸面」卡片,写作栏边界一眼可辨(明暗两套都成立) */
+/* 写作/阅读面板:带边框的「纸面」卡片,纵向撑满内容区(只留呼吸边距),
+   编辑区不再缩在屏幕中间;内部超出时卡片自滚。明暗两套都成立 */
 #readView, #editView {
-  max-width: 860px;
-  margin: 22px auto 44px;
-  padding: 26px 34px 34px;
+  flex: 1; min-height: 0;
+  width: 100%;
+  max-width: 980px;
+  margin: 16px auto 18px;
+  padding: 26px 36px 28px;
+  overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--edge);
   border-radius: 12px;
   box-shadow: var(--shadow);
 }
+/* 编辑视图内部纵向排布:标题/工具栏/附件/底栏各占一行,正文 textarea 吃掉剩余高度 */
+#editView { display: flex; flex-direction: column; }
+#editView > * { flex-shrink: 0; }
 
 .read-head {
   display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
@@ -541,26 +549,28 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 .edit-title {
   width: 100%;
-  font-size: 22px;
+  font-size: 24px;
   font-weight: 650;
+  letter-spacing: .2px;
   border: none;
   border-bottom: 1px solid var(--border);
   background: transparent;
-  padding: 4px 0 10px;
+  padding: 2px 0 12px;
   outline: none;
 }
 .edit-title:focus { border-color: var(--accent); }
 .edit-body {
   width: 100%;
-  min-height: 46vh;
+  flex: 1 1 auto; /* 正文吃掉卡片剩余高度:写作区即整屏 */
+  min-height: 280px;
   border: none;
   outline: none;
-  resize: vertical;
+  resize: none;
   background: transparent;
   padding: 14px 0;
-  line-height: 1.7;
+  line-height: 1.8;
   font-family: var(--mono);
-  font-size: 13.5px;
+  font-size: 14px;
 }
 .edit-foot {
   display: flex; align-items: center; gap: 12px;
@@ -692,9 +702,9 @@ mark { background: var(--mark-bg); border-radius: 3px; padding: 0 2px; }
     z-index: 70;
   }
 
-  .read-body { padding: 16px 14px; }
-  .edit-body { min-height: 40vh; }
-  #readView, #editView { margin: 12px 10px 26px; padding: 18px 16px 24px; }
+  /* 卡片自带内边距,移动端不再给 .read-body 二次缩进 */
+  #readView, #editView { margin: 10px 10px 14px; padding: 18px 16px 20px; }
+  .edit-body { min-height: 220px; }
   .lock-card { margin: 16px; padding: 22px 18px; }
   .toast { left: 12px; right: 12px; transform: none; }
 }
