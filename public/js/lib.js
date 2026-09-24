@@ -240,6 +240,10 @@ export class Library {
       for (const note of cat.data.notes) {
         for (const att of note.attachments) refs.add(att.file);
       }
+      // 回收站里的笔记仍引用着图片:不数进去,恢复回来就是一排裂图
+      for (const note of (cat.data.trash || [])) {
+        for (const att of (note.attachments || [])) refs.add(att.file);
+      }
     }
     if (unreadable.length) {
       throw new LibraryError(

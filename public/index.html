@@ -88,6 +88,7 @@
               <option value="30">30 分钟</option>
             </select>
           </label>
+          <button id="btnTrash" class="btn ghost tiny block side-trash" title="查看最近删除的笔记(保留 30 天)">♻ 最近删除</button>
           <div class="foot-icons">
             <button id="btnChangePw" class="icon-btn foot-icon" title="修改主密码" aria-label="修改主密码"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg></button>
             <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg></button>
@@ -107,6 +108,7 @@
             <h1 id="readTitle"></h1>
             <div class="read-actions">
               <button id="btnCopyAll" class="btn ghost small">⧉ 复制全文</button>
+              <button id="btnExportMd" class="btn ghost small" title="下载为 .md 文件">.md</button>
               <button id="btnEdit" class="btn primary small">编辑</button>
               <button id="btnDelNote" class="btn ghost small danger">删除</button>
             </div>
@@ -130,6 +132,8 @@
             <button type="button" class="ed-btn" data-wrap="==" title="高亮" aria-label="高亮">H</button>
             <button type="button" class="ed-btn" data-wrap="`" title="行内代码" aria-label="行内代码">‹›</button>
             <button type="button" class="ed-btn" data-prefix="- " title="列表行" aria-label="列表行">≡</button>
+            <span class="ed-sep" aria-hidden="true"></span>
+            <button type="button" class="ed-btn" data-genpw title="随机密码生成器" aria-label="随机密码生成器">pw</button>
           </div>
           <textarea id="editBody" class="edit-body" spellcheck="false" aria-label="笔记正文"
             placeholder="正文…&#10;Markdown:# 标题 · **加粗** · *斜体* · ~~删除线~~ · ==高亮== · `代码` · - 列表"></textarea>

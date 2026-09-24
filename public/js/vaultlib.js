@@ -2,6 +2,7 @@
  * JMbiji 库级操作 —— vault.json / 笔记数据 / 附件(纯模块)
  * ============================================================ */
 
+import { TRASH_DAYS, TRASH_MAX } from './format.js';
 import {
   PBKDF2_ITERATIONS_DEFAULT, PBKDF2_ITERATIONS_MIN, PBKDF2_ITERATIONS_MAX, MAGIC, FORMAT_VERSION,
   clampIterations,
@@ -155,7 +156,25 @@ export function normalizeNoteData(raw) {
         .map((a) => ({ file: a.file, name: typeof a.name === 'string' ? a.name : a.file }))
       : [],
   }));
-  return { notes };
+
+  // 回收站:同一密文文件内的延期删除区(trash 数组,条目 = 笔记 + deletedAt)。
+  // 读取时统一归一并清除过期项(TRASH_DAYS 天),条目超上限丢最旧的 ——
+  // 集中在 normalize 里做,「解密 → 保存」的任何路径都会顺带完成清理,
+  // 不需要单独的清理任务,多端之间也自然一致。
+  const dayMs = TRASH_DAYS * 86400000;
+  const trash = (Array.isArray(raw.trash) ? raw.trash : [])
+    .map((t) => {
+      if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
+      const deletedAt = Number.isFinite(t.deletedAt) ? t.deletedAt
+        : (Number.isFinite(t.updatedAt) ? t.updatedAt : now); // 缺日期的兜底,再一起参与过期判定
+      return { ...t, deletedAt };
+    })
+    .filter(Boolean)
+    .filter((t) => now - t.deletedAt < dayMs)
+    .sort((a, b) => b.deletedAt - a.deletedAt)
+    .slice(0, TRASH_MAX);
+
+  return { notes, trash };
 }
 
 /* ---------- 分类文件(密文) ---------- */

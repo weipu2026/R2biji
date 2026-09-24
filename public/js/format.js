@@ -139,6 +139,53 @@ export function relTime(ts, now = Date.now()) {
   return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
 }
 
+/* ---------- 回收站 ---------- */
+
+/** 回收站保留天数:到期由 normalizeNoteData 在读取时自动清除(之前有 30 天反悔期) */
+export const TRASH_DAYS = 30;
+/** 回收站条目上限:防极端情况无界膨胀,超出时丢最旧的 */
+export const TRASH_MAX = 500;
+
+/* ---------- 随机密码生成 ---------- */
+
+/** 生成池刻意剔除易混淆字符(0/O/o、1/l/I):抄写密码时少一次看错的风险 */
+const GEN_BASE = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const GEN_SYMBOLS = '!@#$%^&*()-_=+[]{}:,.?';
+
+/**
+ * 随机密码生成(纯函数,Node/浏览器双端可测)。
+ * crypto.getRandomValues + 拒绝采样 —— 不用 Math.random(它不是密码学安全的)。
+ * 保底:小写/大写/数字各至少一个(要求符号时符号也至少一个),其余位置均匀分布。
+ * @param {number} [len=16] 实际长度收敛到 8~64
+ * @param {{symbols?:boolean}} [opt]
+ * @returns {string}
+ */
+export function genPassword(len = 16, { symbols = true } = {}) {
+  const n = Math.min(64, Math.max(8, Math.round(Number(len) || 16)));
+  const pool = GEN_BASE + (symbols ? GEN_SYMBOLS : '');
+  const limit = Math.floor(0x100000000 / pool.length) * pool.length; // 拒绝采样上界,消除取模偏差
+  const buf = crypto.getRandomValues(new Uint32Array(n + 16));
+  let i = 0;
+  const next = () => {
+    let v;
+    do {
+      if (i >= buf.length) { crypto.getRandomValues(buf); i = 0; }
+      v = buf[i];
+      i += 1;
+    } while (v >= limit);
+    return pool[v % pool.length];
+  };
+  const out = Array.from({ length: n }, next);
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, ...(symbols ? [/[^a-zA-Z0-9]/] : [])];
+  for (const re of classes) {
+    if (!re.test(out.join(''))) {
+      const at = crypto.getRandomValues(new Uint32Array(1))[0] % n;
+      out[at] = next();
+    }
+  }
+  return out.join('');
+}
+
 /* ---------- 主密码强度 ---------- */
 
 /** 主密码最短长度。它是唯一同时决定「记不记得住」与「破不破得动」的参数。 */

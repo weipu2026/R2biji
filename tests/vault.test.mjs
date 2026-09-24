@@ -146,6 +146,35 @@ test('dekMatchesVault:只认与这份 vault.json 配对的 DEK', async () => {
   assert.equal(await dekMatchesVault(a.json, new Uint8Array(8)), false);
 });
 
+test('回收站字段:归一 / 过期清除 / 上限裁剪 / 旧数据兼容', () => {
+  const now = Date.now();
+  const day = 86400000;
+  const raw = {
+    notes: [{ id: 'a', title: '活的' }],
+    trash: [
+      { id: 't1', title: '刚删', deletedAt: now - day },
+      { id: 't2', title: '过期', deletedAt: now - 31 * day },
+      { id: 't3', title: '无日期', updatedAt: now - 2 * day },
+      '垃圾数据',
+    ],
+  };
+  const out = normalizeNoteData(raw);
+  assert.equal(out.notes.length, 1, 'notes 不受影响');
+  assert.equal(out.trash.length, 2, '过期项清除,非对象丢弃');
+  assert.equal(out.trash[0].id, 't1');
+  assert.ok(Number.isFinite(out.trash[1].deletedAt), '无 deletedAt 的用 updatedAt 兜底');
+
+  // 超上限:按删除时间丢最旧的
+  const many = {
+    notes: [],
+    trash: Array.from({ length: 510 }, (_, i) => ({ id: `x${i}`, deletedAt: now - i * 1000 })),
+  };
+  assert.equal(normalizeNoteData(many).trash.length, 500, '上限 500,丢最旧的');
+
+  // 旧版分类文件没有 trash 字段 → 空数组,不抛错
+  assert.deepEqual(normalizeNoteData({ notes: [] }).trash, []);
+});
+
 /* ---------- 本轮审计修复的回归 ---------- */
 
 test('改主密码:迭代次数只加码不降级 —— 偏弱库升到默认,更高的保留', async () => {

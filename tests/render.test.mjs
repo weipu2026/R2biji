@@ -1,7 +1,7 @@
 /* 渲染器单测:Node 环境用最小 DOM 桩(renderMarkdown 只用 createElement/textContent/classList/dataset) */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderMarkdown, renderInline, highlightInto } from '../public/js/render.js';
+import { renderMarkdown, renderInline, highlightInto, splitSecretLine } from '../public/js/render.js';
 
 class FakeNode {
   constructor(tag) {
@@ -91,6 +91,31 @@ test('renderInline:相邻标记、无标记纯文本', () => withDom(() => {
   renderInline(parent, 'a**b**c==d==e`f`g');
   assert.deepEqual(parent.children.map((c) => c.tag || c._text),
     ['a', 'strong', 'c', 'mark', 'e', 'code', 'g']);
+}));
+
+test('splitSecretLine:赋值形态拆出前缀与敏感值,普通句子不命中', () => {
+  assert.deepEqual(splitSecretLine('root 密码:Jm8#vQ2x'), { prefix: 'root 密码:', secret: 'Jm8#vQ2x' });
+  assert.deepEqual(splitSecretLine('数据库密码：abc 123'), { prefix: '数据库密码：', secret: 'abc 123' });
+  assert.deepEqual(splitSecretLine('API_KEY=sk-abcdef'), { prefix: 'API_KEY=', secret: 'sk-abcdef' });
+  assert.deepEqual(splitSecretLine('GitHub token: ghp_123'), { prefix: 'GitHub token: ', secret: 'ghp_123' });
+  assert.equal(splitSecretLine('今天天气不错'), null);
+  assert.equal(splitSecretLine(null), null);
+  // 复合词不误遮:关键字必须紧邻冒号,「密码学:」里的「密码」后面不是分隔符
+  assert.equal(splitSecretLine('密码学:研究加密的一门学科'), null);
+  // 但「密码:」(冒号前有空格)命中
+  assert.deepEqual(splitSecretLine('git 密码 : abc'), { prefix: 'git 密码 : ', secret: 'abc' });
+});
+
+test('renderInline:敏感值进 .secret.masked,值完整留在 DOM(显形/复制靠它)', () => withDom(() => {
+  const parent = new FakeNode('p');
+  renderInline(parent, 'root 密码:Jm8#vQ2x');
+  const span = parent.children.find((c) => c.className === 'secret masked');
+  assert.ok(span, '应有打码 span');
+  assert.equal(span.textContent, 'Jm8#vQ2x', '值必须原样在 DOM 里,视觉遮蔽由 CSS 负责');
+  // 普通行完全不受影响
+  const plain = new FakeNode('p');
+  renderInline(plain, '**加粗**的普通段落');
+  assert.equal(plain.children.find((c) => c.className === 'secret masked'), undefined);
 }));
 
 test('renderMarkdown:斜体与删除线(单星/双波浪)', () => withDom(() => {

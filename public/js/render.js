@@ -12,8 +12,39 @@
  * 故意不做 _下划线_ 斜体 —— 中文语境下划线常见于 snake_case,误伤面太大 */
 const INLINE_RE = /(\*\*([^*\n]+)\*\*)|(==([^=\n]+)==)|(`([^`\n]+)`)|(~~([^~\n]+)~~)|(\*([^*\n]+)\*)/g;
 
+/**
+ * 敏感行识别:密码/口令/密钥/token 等赋值行,拆成「前缀 + 敏感值」。
+ * 阅读视图里敏感值默认打码、点击显形 —— 防的是旁人瞟屏,不是本机攻击者
+ * (值本来就完整存在于浏览器内存里,这点 SECURITY.md 的威胁模型讲得很清楚)。
+ * 只认「关键字后跟 :/=/：」的赋值形态;「密码学:一门学科」这类也会命中 ——
+ * 宁遮勿漏,点一下就显形,误遮的代价远小于漏遮。
+ */
+const SECRET_RE = /^([^:：=\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\s*[:：=]\s*)([^\s].*)$/i;
+
+/** 纯函数,导出供单测:命中返回 {prefix, secret},否则 null */
+export function splitSecretLine(text) {
+  if (typeof text !== 'string') return null;
+  const m = SECRET_RE.exec(text);
+  return m ? { prefix: m[1], secret: m[2] } : null;
+}
+
 /** 行内标记:把一段文本按 **粗** / ==高亮== / `码` 切分并构建节点 */
 export function renderInline(parent, text) {
+  const sec = splitSecretLine(text);
+  if (sec) {
+    // 敏感值原样进 DOM(块复制、点击显形都靠它),视觉遮蔽交给 .masked 的 CSS
+    renderInlineCore(parent, sec.prefix);
+    const span = document.createElement('span');
+    span.className = 'secret masked';
+    span.textContent = sec.secret;
+    span.title = '点击显示 / 再点隐藏(30 秒无操作自动遮回)';
+    parent.appendChild(span);
+    return;
+  }
+  renderInlineCore(parent, text);
+}
+
+function renderInlineCore(parent, text) {
   INLINE_RE.lastIndex = 0;
   let last = 0;
   let m;

@@ -417,6 +417,16 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .foot-icon svg { display: block; margin: 0 auto; }
 /* 危险类图标(删除当前分类):悬停才变红,平时与普通图标无异,不勾引误碰 */
 .foot-icon.danger:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-weak); }
+/* 导出备份到期提醒:图标右上角小红点,导出成功后消失 */
+.foot-icon { position: relative; }
+.foot-icon.due::after {
+  content: '';
+  position: absolute;
+  top: -3px; right: -3px;
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
 
 /* ---------- 分类 / 笔记列表 ---------- */
 
@@ -594,6 +604,20 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .read-body strong { font-weight: 650; }
 .read-empty { color: var(--muted); }
 
+/* 敏感行打码:值完整留在 DOM 里(块复制/显形靠它),视觉用模糊 + 底色遮蔽 */
+.secret { border-radius: 2px; cursor: pointer; }
+.secret.masked { background: var(--border-strong); filter: blur(6px); user-select: none; }
+
+/* 随机密码生成器弹窗 */
+.gen-opts { display: flex; gap: 16px; align-items: center; margin-bottom: 10px; }
+.gen-opt { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+.gen-opt select {
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 3px 6px;
+  background: var(--panel);
+}
+
 /* 块级复制按钮:悬停浮现 */
 .blk { position: relative; }
 .blk-copy {
@@ -721,6 +745,19 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .search-item-cat { font-size: 11px; color: var(--accent); margin-top: 3px; }
 mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
+
+/* 最近删除 */
+.side-trash { font-size: 12px; }
+.trash-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 2px;
+  border-bottom: 1px solid var(--border);
+}
+.trash-row:last-of-type { border-bottom: none; }
+.trash-info { flex: 1; min-width: 0; }
+.trash-title { font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trash-meta { color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.trash-ops { display: flex; gap: 6px; flex-shrink: 0; }
 
 /* ---------- 对话框 / 提示 ---------- */
 

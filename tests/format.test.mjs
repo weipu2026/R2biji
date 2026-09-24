@@ -6,7 +6,7 @@ import {
   looksLikeConflictCopy, backupFileName, parseBackupFileName,
   planBackupRotation, blobDisplayName, sortNotes, orderBetween,
   stripEnc, isEncryptedName, SEAFILE_IGNORE_CONTENT,
-  assessPassword, PASSWORD_MIN_LEN, relTime,
+  assessPassword, PASSWORD_MIN_LEN, relTime, genPassword,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -135,6 +135,23 @@ test('密码强度:合格与优秀的分档', () => {
   assert.equal(assessPassword('x'.repeat(20)).ok, false, '整串同字符仍应拒');
   assert.equal(assessPassword('qwrtpldkfjghsnmxbvz').ok, true, '20 位纯字母应放行');
   assert.equal(assessPassword('abc1234567').ok, false, '顺序串应拒');
+});
+
+test('genPassword:长度 / 字符集 / 易混淆剔除 / 类别保底 / 随机性', () => {
+  for (const [len, sym] of [[8, true], [16, true], [32, false], [64, true]]) {
+    const pw = genPassword(len, { symbols: sym });
+    assert.equal(pw.length, len, `长度应为 ${len}`);
+    assert.ok(!/[0O1lIo]/.test(pw), '易混淆字符(0/O/1/l/I/o)必须剔除');
+    if (!sym) assert.ok(!/[!@#$%^&*()\-_=+[\]{}:,.?]/.test(pw), '关掉符号后不应出现符号');
+  }
+  const pw = genPassword(16);
+  assert.ok(/[a-z]/.test(pw) && /[A-Z]/.test(pw) && /[0-9]/.test(pw), '三类字符各至少一个');
+  const seen = new Set();
+  for (let i = 0; i < 50; i++) seen.add(genPassword(16));
+  assert.ok(seen.size > 45, '50 次生成几乎不应重复');
+  assert.equal(genPassword(3).length, 8, '低于下限按 8 处理');
+  assert.equal(genPassword(999).length, 64, '高于上限按 64 处理');
+  assert.equal(genPassword('垃圾').length, 16, '非法输入按默认 16 处理');
 });
 
 /* ---------- 相对时间 ---------- */
