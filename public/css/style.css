@@ -198,7 +198,8 @@ input, textarea, select { font: inherit; color: inherit; }
 
 /* ---------- 顶栏 ---------- */
 
-#app { display: flex; flex-direction: column; height: 100vh; }
+/* 100dvh:移动端浏览器工具栏收展时 100vh 会 taller than viewport,底部被顶出屏幕 */
+#app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
 
 .topbar {
   display: flex;
@@ -259,6 +260,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .side-foot {
   border-top: 1px solid var(--border);
   padding: 10px 12px;
+  padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); /* iOS/PWA 小白条会遮住底部按钮 */
   display: grid;
   gap: 8px;
 }
@@ -530,7 +532,8 @@ mark { background: var(--mark-bg); border-radius: 3px; padding: 0 2px; }
 
 #toasts {
   position: fixed;
-  bottom: 22px;
+  /* env(safe-area-inset-*):iOS/PWA 里给小白条让位,否则最后一条 toast 被遮住 */
+  bottom: calc(22px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -577,4 +580,10 @@ mark { background: var(--mark-bg); border-radius: 3px; padding: 0 2px; }
   .edit-body { min-height: 40vh; }
   .lock-card { margin: 16px; padding: 22px 18px; }
   .toast { left: 12px; right: 12px; transform: none; }
+}
+
+/* 触屏设备没有 hover:操作按钮常显,否则永远点不到 */
+@media (hover: none) {
+  .note-btns { opacity: 1; }
+  .blk-copy { opacity: .55; }
 }

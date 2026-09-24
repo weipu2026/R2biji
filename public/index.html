@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <meta name="referrer" content="no-referrer">
   <meta name="description" content="JMbiji —— 端到端加密笔记本,多端云同步">
   <meta name="theme-color" content="#2563eb">
@@ -26,9 +26,9 @@
 
       <div id="lockForm">
         <div class="field" id="pwConfirmField" hidden>
-          <input type="password" id="pwConfirm" placeholder="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
+          <input type="password" id="pwConfirm" placeholder="再输一遍主密码" aria-label="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
         </div>
-        <input type="password" id="pwInput" placeholder="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false">
+        <input type="password" id="pwInput" placeholder="主密码" aria-label="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false">
         <div id="pwHint" class="pw-hint" hidden></div>
         <label class="remember-row">
           <input type="checkbox" id="rememberDevice" checked>
@@ -49,7 +49,7 @@
     <header class="topbar">
       <div class="brand-mini">JMbiji</div>
       <div class="search-wrap">
-        <input id="searchBox" type="search" placeholder="搜索标题与正文…" autocomplete="off">
+        <input id="searchBox" type="search" placeholder="搜索标题与正文…" aria-label="搜索标题与正文" autocomplete="off">
       </div>
       <span id="saveStatus" class="save-status" data-kind="ok">–</span>
       <button id="btnLock" class="btn ghost small">锁定</button>
@@ -60,7 +60,7 @@
         <div class="side-sec">
           <div class="side-head">
             <span>分类</span>
-            <button id="btnAddCat" class="icon-btn" title="新建分类">＋</button>
+            <button id="btnAddCat" class="icon-btn" title="新建分类" aria-label="新建分类">＋</button>
           </div>
           <ul id="catList" class="cat-list"></ul>
         </div>
@@ -69,9 +69,9 @@
           <div class="side-head">
             <span id="activeCatName">未选择分类</span>
             <span class="side-head-btns">
-              <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)">✎</button>
-              <button id="btnDelCat" class="icon-btn danger" title="删除分类">✕</button>
-              <button id="btnAddNote" class="icon-btn primary" title="新建笔记">＋</button>
+              <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)" aria-label="重命名分类">✎</button>
+              <button id="btnDelCat" class="icon-btn danger" title="删除分类" aria-label="删除分类">✕</button>
+              <button id="btnAddNote" class="icon-btn primary" title="新建笔记" aria-label="新建笔记">＋</button>
             </span>
           </div>
           <ul id="noteList" class="note-list"></ul>
@@ -111,8 +111,8 @@
         </article>
 
         <section id="editView" hidden>
-          <input id="editTitle" class="edit-title" placeholder="标题" autocomplete="off">
-          <textarea id="editBody" class="edit-body" spellcheck="false"
+          <input id="editTitle" class="edit-title" placeholder="标题" aria-label="笔记标题" autocomplete="off">
+          <textarea id="editBody" class="edit-body" spellcheck="false" aria-label="笔记正文"
             placeholder="正文…&#10;支持:# 标题 · **加粗** · ==高亮== · `行内代码` · 三个反引号代码块 · - 列表"></textarea>
           <div class="edit-foot">
             <button id="btnAddAtt" class="btn ghost small">添加图片</button>
