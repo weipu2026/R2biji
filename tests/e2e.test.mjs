@@ -11,8 +11,20 @@ import * as API from '../public/js/api.js';
 import { Library } from '../public/js/lib.js';
 import * as V from '../public/js/vaultlib.js';
 import { hexToBytes, sha256Hex } from '../public/js/crypto.js';
+import { saveSession, loadSession } from '../public/js/session.js';
 
 const ITER = 1000;
+
+/* Node 没有 localStorage,给个 Map 版替身(session.js 与 api.js 都按「不可用就降级」写,
+ * 这里提供可用版本,才能测到真实路径) */
+globalThis.localStorage = (() => {
+  const map = new Map();
+  return {
+    getItem: (k) => (map.has(k) ? map.get(k) : null),
+    setItem: (k, v) => map.set(k, String(v)),
+    removeItem: (k) => map.delete(k),
+  };
+})();
 
 /* 把浏览器 fetch 桥接到纯函数核心 handleApi。
  * 刻意不构造 undici 的 Request/Response(受限沙箱里其内部惰性 WASM 必然
@@ -20,8 +32,12 @@ const ITER = 1000;
  * - 头部键统一小写(真实 HTTP 传输语义);
  * - 字符串体编码为字节(handleApi 只收 Uint8Array/null);
  * - 响应提供 api.js 用到的最小面(ok/status/headers.get/json/arrayBuffer)。 */
-const env = { VAULT: new MemoryR2(), ALLOW_NO_ACCESS_KEY: '1' };
+let env = { VAULT: new MemoryR2(), ALLOW_NO_ACCESS_KEY: '1' };
 const te = new TextEncoder();
+
+/** 每个用例开头调用:换一个全新的内存桶。
+ *  共用同一个桶会让用例之间互相污染(建库会 409),而这类污染恰好会掩盖真 bug。 */
+function freshEnv() { env = { VAULT: new MemoryR2(), ALLOW_NO_ACCESS_KEY: '1' }; }
 
 function fakeRes(out) {
   const raw = out.body;
@@ -58,6 +74,7 @@ async function unlockAs(password, prevEtag = null) {
 }
 
 test('全生命周期:建库 → 写读 → 多端 CAS 冲突 → 改密码换令牌 → 旧令牌失效', async () => {
+  freshEnv();
   API.clearToken();
 
   /* ---- 建库(设备 A) ---- */
@@ -128,4 +145,258 @@ test('全生命周期:建库 → 写读 → 多端 CAS 冲突 → 改密码换�
   await c.saveCategory('秘钥');
   const removed = await c.cleanupOrphanBlobs();
   assert.deepEqual(removed, [att.file]);
+});
+
+/* ============================================================
+ * 孤儿清理的 fail-closed 守卫(两条都是真实数据丢失路径的回归)
+ *
+ * blobs 是全应用唯一没有备份层的东西:DELETE /api/blob 直接删对象,
+ * 不像分类那样先写 backup/ —— 误删一张图就是永久丢失。
+ * 因此「清点不全」的每种情况都必须整次中止,而不是照着删。
+ * ============================================================ */
+
+test('孤儿清理:分类读不出来时必须整次中止,一张图片都不许删', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('清理守卫密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  /* 设备 A:建分类 + 放一张图 + 保存 */
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('攻略');
+  const img = new Uint8Array([137, 80, 78, 71, 7, 7, 7]);
+  const att = await a.addAttachment(img, '重要截图.png');
+  a.categoryInfo('攻略').data.notes.push({
+    id: 'n1', title: '攻略', content: '看图', order: 1000,
+    createdAt: 1, updatedAt: 1, attachments: [{ file: att.file, name: '重要截图.png' }],
+  });
+  assert.deepEqual(await a.saveCategory('攻略'), { ok: true });
+
+  /* 设备 B:全新解锁(内存里没有明文),随后该分类密文损坏 */
+  const b = await unlockAs('清理守卫密码abc');
+  await b.rescan();
+  await env.VAULT.put('cats/攻略.enc', new Uint8Array([1, 2, 3])); // 截断
+
+  const readable = await b.loadCategory('攻略').then(() => true, () => false);
+  assert.equal(readable, false, '前提:损坏的分类应当读不出来');
+  assert.ok(b.categoryInfo('攻略').error, '前提:读取失败必须被记进 error(而不是静默当成空分类)');
+
+  await assert.rejects(() => b.cleanupOrphanBlobs(), /无法清点/, '读不出来就必须中止,不能照删');
+  assert.ok(await env.VAULT.head(`blobs/${att.file}`), '图片必须原样留在 R2(blob 没有备份层)');
+});
+
+test('孤儿清理:必须先刷新分类清单,否则别的设备新建的图片会被误删', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('多端清理密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  /* 设备 A 解锁并建一个空分类 —— 它的分类清单就停在这一刻 */
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('A的分类');
+
+  /* 设备 B 随后新建另一个分类,并放一张图 */
+  const b = await unlockAs('多端清理密码abc');
+  await b.rescan();
+  await b.createCategory('B的分类');
+  const img = new Uint8Array([137, 80, 78, 71, 5, 5, 5]);
+  const att = await b.addAttachment(img, 'B的图.png');
+  b.categoryInfo('B的分类').data.notes.push({
+    id: 'n1', title: 'B 的笔记', content: '看图', order: 1000,
+    createdAt: 1, updatedAt: 1, attachments: [{ file: att.file, name: 'B的图.png' }],
+  });
+  assert.deepEqual(await b.saveCategory('B的分类'), { ok: true });
+
+  /* 回到设备 A:A 的清单里根本没有「B的分类」,若不清点就直接删,这张图就没了 */
+  const removed = await a.cleanupOrphanBlobs();
+  assert.deepEqual(removed, [], '本机清单之外的分类,其图片一张都不该被删');
+  assert.ok(await env.VAULT.head(`blobs/${att.file}`), 'B 的图片必须还在');
+});
+
+/* ============================================================
+ * 「记住本设备」:落盘的会话必须**真的能解开笔记**
+ *
+ * 这条是「打开即用」的实质判据 —— 光验证「存了几个字节、读得回来」不够,
+ * 要证明**不碰主密码**也能读到明文。所以这里刻意不调用 unlockVault。
+ * ============================================================ */
+test('记住本设备:落盘的会话足以解开笔记,全程不用主密码', async () => {
+  freshEnv();
+  API.clearToken();
+
+  /* ---- 设备 A:建库、建分类、写一条笔记 ---- */
+  const PW = '记住本设备密码abc';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('秘钥');
+  a.categoryInfo('秘钥').data.notes.push({
+    id: 'n1', title: '中转站令牌', content: '**base_url**: https://x',
+    order: 1000, createdAt: 1, updatedAt: 1, attachments: [],
+  });
+  assert.deepEqual(await a.saveCategory('秘钥'), { ok: true });
+
+  /* ---- 勾选「记住本设备」:只落盘 DEK + 令牌 ---- */
+  assert.equal(saveSession({ dek, authKeyHex }), true, '应当存得下');
+
+  /* ---- 模拟「下次打开」:清掉内存态,只用落盘的会话 ---- */
+  API.clearToken();
+  if (a) a.destroy();
+  const sess = loadSession();
+  assert.ok(sess, '应当读得回本机会话');
+
+  const vaultNow = (await API.fetchVault()).json;
+  assert.equal(await V.dekMatchesVault(vaultNow, sess.dek), true, '会话里的 DEK 必须与当前库配对');
+
+  API.setToken(sess.authKeyHex);
+  const b = new Library(await V.deriveAllKeys(sess.dek), vaultNow, sess.dek, null);
+  await b.rescan();
+  const notes = await b.loadCategory('秘钥'); // 这一步会真的解密
+  assert.equal(notes.notes[0].title, '中转站令牌', '用落盘的会话必须能读到明文');
+  assert.equal(notes.notes[0].content, '**base_url**: https://x');
+
+  /* ---- 主密码仍然有效(会话是「额外的便捷」,不是「替代品」) ---- */
+  assert.equal((await V.unlockVault(vaultNow, PW)).ok, true, '主密码不该因为记住会话而失效');
+});
+
+/* ============================================================
+ * 全库密文备份:导出 → 桶没了 → 恢复 → 数据完好
+ *
+ * 这是 ③ 的核心判据。它补的是「vault.json 单独一份副本只有钥匙、没有箱子」
+ * 那个真空 —— 桶一旦丢失或账号出问题,手上那把钥匙打不开任何东西。
+ * ============================================================ */
+test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const PW = '全库备份测试密码';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  /* ---- 造点内容:两个分类、一条笔记、两张图 ---- */
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('秘钥');
+  await a.createCategory('攻略');
+  const img1 = new Uint8Array([137, 80, 78, 71, 1, 1, 1]);
+  const img2 = new Uint8Array([137, 80, 78, 71, 2, 2, 2]);
+  const att1 = await a.addAttachment(img1, '截图.png');
+  const att2 = await a.addAttachment(img2, '另一张.png');
+  a.categoryInfo('秘钥').data.notes.push({
+    id: 'n1', title: 'CF 中转', content: '**base_url**: https://x',
+    order: 1000, createdAt: 1, updatedAt: 1,
+    attachments: [{ file: att1.file, name: '截图.png' }],
+  });
+  assert.deepEqual(await a.saveCategory('秘钥'), { ok: true });
+
+  /* ---- 导出:先给计划(总量),再打包 ---- */
+  let plan = null;
+  const exported = await a.exportBackup({
+    onPlan: (p) => { plan = p; return true; },
+  });
+  assert.ok(plan, 'exportBackup 必须先报总量');
+  assert.equal(plan.cats, 2, '两个分类');
+  assert.equal(plan.blobs, 2, '两张图片');
+  assert.ok(plan.bytes > 0, '总量应当大于 0');
+  assert.ok(exported.bytes.length > 0);
+  assert.ok(exported.bytes[0] === 0x50 && exported.bytes[1] === 0x4b, '应当是 zip(PK 开头)');
+
+  /* ---- 灾难:整个桶没了 ---- */
+  freshEnv();
+  API.setToken(authKeyHex); // 令牌还在内存里,桶本身换成了空的
+  assert.equal((await API.fetchVault()).status, 404, '前提:新桶里没有库');
+
+  /* ---- 恢复 ---- */
+  const r = await a.importBackup(exported.bytes);
+  assert.equal(r.vaultCreated, true, '空桶 → 应当把 vault.json 建出来');
+  assert.deepEqual(r.catsAdded.sort(), ['攻略', '秘钥'], '两个分类都该恢复');
+  assert.deepEqual(r.catsSkipped, []);
+  assert.equal(r.blobsAdded, 2, '两张图片都该恢复');
+  assert.deepEqual(r.failed, [], '不该有失败项');
+
+  /* ---- 关键:用**原主密码**解锁恢复出来的库,内容必须一模一样 ---- */
+  const vaultAfter = await API.fetchVault();
+  assert.equal(vaultAfter.status, 200);
+  const unlocked = await V.unlockVault(vaultAfter.json, PW);
+  assert.ok(unlocked.ok, '原主密码必须能解锁恢复出来的库');
+  assert.deepEqual(unlocked.dek, dek, 'DEK 必须与备份前一致(否则密文全废)');
+
+  API.setToken(unlocked.authKeyHex);
+  const b = new Library(await V.deriveAllKeys(unlocked.dek), vaultAfter.json, unlocked.dek, null);
+  await b.rescan();
+  assert.deepEqual(b.listCategories().sort(), ['攻略', '秘钥']);
+  const notes = await b.loadCategory('秘钥');
+  assert.equal(notes.notes[0].title, 'CF 中转', '笔记内容必须完好');
+  assert.equal(notes.notes[0].attachments[0].file, att1.file);
+  assert.deepEqual(await b.readAttachment(att1.file), img1, '附件必须能解密回原始字节');
+  assert.deepEqual(await b.readAttachment(att2.file), img2);
+});
+
+test('全库备份:目标是另一个库时必须拒绝(否则得到一堆解不开的文件)', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const A = await V.createVault('备份来源库密码', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(A.json))).status, 201);
+  API.setToken(A.authKeyHex);
+  const libA = new Library(await V.deriveAllKeys(A.dek), A.json, A.dek, null);
+  await libA.rescan();
+  await libA.createCategory('甲的机密');
+  const zipOfA = (await libA.exportBackup()).bytes;
+
+  // 换一个桶,建一个**不同的库**(另一把 DEK)
+  freshEnv();
+  const B = await V.createVault('另一个库的密码', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(B.json))).status, 201);
+  API.setToken(B.authKeyHex);
+  const libB = new Library(await V.deriveAllKeys(B.dek), B.json, B.dek, null);
+  await libB.rescan();
+
+  await assert.rejects(
+    () => libB.importBackup(zipOfA),
+    (e) => e.code === 'foreign-vault',
+    '往别的库里导必须被拒 —— 钥匙对不上,导进去只会得到解不开的密文',
+  );
+
+  // 拒绝之后,原来的库必须毫发无伤
+  await libB.rescan();
+  assert.deepEqual(libB.listCategories(), [], '拒绝导入不该在目标库里留下东西');
+  assert.equal((await API.fetchVault()).json.wrap.wrappedDek, B.json.wrap.wrappedDek, '目标库的钥匙不该被换掉');
+});
+
+test('全库备份:恢复时已存在的分类一律跳过,绝不覆盖', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const PW = '不覆盖测试密码ab';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('秘钥');
+  const zipBytes = (await a.exportBackup()).bytes;
+
+  // 服务器上的这个分类随后被改成了「新版本」
+  a.categoryInfo('秘钥').data.notes.push({
+    id: 'n9', title: '服务器上的新版本', content: '新', order: 1,
+    createdAt: 9, updatedAt: 9, attachments: [],
+  });
+  assert.deepEqual(await a.saveCategory('秘钥'), { ok: true });
+
+  // 恢复旧备份 → 该分类必须被跳过,不能把新版本盖回旧的
+  const r = await a.importBackup(zipBytes);
+  assert.equal(r.catsAdded.length, 0);
+  assert.deepEqual(r.catsSkipped, ['秘钥']);
+
+  const still = await a.loadCategory('秘钥');
+  assert.equal(still.notes[0].title, '服务器上的新版本', '服务器上的较新版本绝不能被旧备份覆盖');
 });

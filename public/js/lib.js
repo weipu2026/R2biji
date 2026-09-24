@@ -12,6 +12,9 @@ import * as C from './crypto.js';
 import * as V from './vaultlib.js';
 import * as F from './format.js';
 import * as API from './api.js';
+import { zipStore, readZipStore } from './zip.js';
+
+const td = new TextDecoder();
 
 export class LibraryError extends Error {
   constructor(msg, code) { super(msg); this.name = 'LibraryError'; this.code = code; }
@@ -206,15 +209,39 @@ export class Library {
     return V.decryptBlob(this.keys.attachKey, bytes);
   }
 
-  /** 手动清理:解密全部分类,收集引用,删除未被任何笔记引用的 blob */
+  /**
+   * 手动清理:解密全部分类,收集引用,删除未被任何笔记引用的 blob。
+   *
+   * ⚠️ 这是全应用**唯一一处不可恢复的删除** —— blobs 没有备份层
+   * (DELETE /api/blob 直接删对象,不像分类那样先写 backup/),删掉就是删掉了。
+   * 所以这里必须 fail closed:「清点不全」的每一种情况都宁可整次中止、一张不删。
+   *
+   * 两个曾经踩空的口子(都会静默删掉正在被引用的图):
+   *   1. 本机分类清单可能是**解锁时**拉的,别的设备此后新建的分类不在其中
+   *      —— 只按本地清单清点,那些分类的图片全成了「孤儿」。故先 rescan。
+   *   2. 某个分类读不出来(密文损坏,或一次瞬时 GET 失败)时,它的引用无从得知。
+   *      旧实现 `if (!cat.data) continue;` 把它跳过,等于把它引用的图全判成孤儿。
+   *
+   * 残余窗口:rescan 到删除之间(秒级)别的设备若恰好新建分类并附图,仍可能误删。
+   * 要更硬的保证得在服务端做标记-清扫或给新 blob 设冷却期,暂不引入。
+   */
   async cleanupOrphanBlobs() {
-    await this.loadAllCategories();
+    await this.rescan(); // ① 清单必须是新的:本机那份可能已经落后于别的设备
+    await this.loadAllCategories(); // ② 全部解密,才能清点引用
     const refs = new Set();
-    for (const cat of this.categories.values()) {
-      if (!cat.data) continue;
+    const unreadable = [];
+    for (const [name, cat] of this.categories) {
+      if (!cat.data) { unreadable.push(name); continue; }
       for (const note of cat.data.notes) {
         for (const att of note.attachments) refs.add(att.file);
       }
+    }
+    if (unreadable.length) {
+      throw new LibraryError(
+        `有 ${unreadable.length} 个分类无法读取(${unreadable.join('、')}),无法清点它们引用的图片;`
+        + '已中止清理,未删除任何图片。请先解决这些分类的读取问题再重试。',
+        'unreadable',
+      );
     }
     const removed = [];
     for (const name of await API.listBlobs()) {
@@ -224,6 +251,160 @@ export class Library {
       }
     }
     return removed;
+  }
+
+  /* ============ 全库备份(导出 / 恢复) ============ */
+
+  /**
+   * 导出全库:一个 zip,内含 vault.json + cats/*.enc + blobs/*。
+   *
+   * ★ 全程**不解密** —— 导出的就是密文本身。所以这个包的安全级别等同于 vault.json:
+   *   拿到它的人仍然要爆破主密码才能看到内容,但它**不受访问密钥门与限流的任何保护**,
+   *   必须放在不会外泄的位置(别丢公共网盘、别留在浏览器下载目录里当唯一副本)。
+   *
+   * 为什么必须有它:vault.json 的单独副本**只有钥匙、没有箱子** ——
+   * 桶丢了或账号出问题,手上那把钥匙打不开任何东西。这个包才是完整的一份。
+   *
+   * 不含 `backup/` 里的历史版本:那是服务器端的滚动备份,本包是「当前全量」。
+   * (Worker 也没有暴露 backup/ 的接口,这是有意的。)
+   *
+   * @param {{onPlan?:(p:{cats:number,blobs:number,bytes:number})=>boolean|Promise<boolean>,
+   *          onProgress?:(p:{done:number,total:number,label:string})=>void}} [opt]
+   *   onPlan 在真正开始拉取**之前**调用,拿到真实总量(个人库也可能上百 MB,
+   *   手机上有内存压力,得让人先看到体积再决定);返回 false 即中止。
+   * @returns {Promise<{bytes:Uint8Array, counts:{cats:number, blobs:number, bytes:number}}>}
+   */
+  async exportBackup({ onPlan, onProgress = () => {} } = {}) {
+    // vault.json 重新拉一次,不用内存里那份:导出物该是**服务器上此刻**的样子
+    const vault = await API.fetchVault();
+    if (vault.status !== 200 || !vault.json) {
+      throw new LibraryError('服务器上还没有库,没有可导出的内容', 'no-vault');
+    }
+    const cats = await API.listCats();
+    const blobs = await API.listBlobInfo();
+    const total = cats.reduce((n, c) => n + (c.size || 0), 0)
+      + blobs.reduce((n, b) => n + (b.size || 0), 0);
+
+    if (onPlan && !(await onPlan({ cats: cats.length, blobs: blobs.length, bytes: total }))) {
+      throw new LibraryError('已取消导出', 'cancelled');
+    }
+
+    const entries = [{
+      name: F.VAULT_NAME,
+      bytes: new TextEncoder().encode(JSON.stringify(vault.json, null, 2)),
+    }];
+    let done = 0;
+    const step = (label) => onProgress({ done, total, label });
+
+    for (const c of cats) {
+      const got = await API.getCat(c.name);
+      if (!got) continue; // 导出期间被别的设备删了:跳过,不编造
+      entries.push({ name: `cats/${c.name}.enc`, bytes: got.bytes });
+      done += got.bytes.length;
+      step(`cats/${c.name}.enc`);
+    }
+    for (const b of blobs) {
+      const bytes = await API.getBlob(b.name);
+      if (!bytes) continue;
+      entries.push({ name: `blobs/${b.name}`, bytes });
+      done += bytes.length;
+      step(`blobs/${b.name}`);
+    }
+
+    return { bytes: zipStore(entries), counts: { cats: cats.length, blobs: blobs.length, bytes: total } };
+  }
+
+  /**
+   * 从备份包恢复。规则刻意保守 —— 宁可不恢复,也不要把库搞成「一半新一半旧」:
+   *
+   *  · 包里必须有结构合法的 vault.json,否则直接拒绝(不是本应用的备份)
+   *  · 服务器上已有 vault.json 且**不是同一个库**(包裹的 DEK 不同)→ 拒绝:
+   *    把另一个库的密文塞进来,只会得到一堆永远解不开的文件
+   *  · 分类只做「仅新建」:已存在的一律跳过并如实报告,**绝不覆盖**
+   *    (恢复的目的是补回缺的,不是把服务器上较新的版本盖回旧的)
+   *  · 附件天然幂等(名字=内容寻址),已存在即去重,无覆盖概念
+   *
+   * @param {Uint8Array} zipBytes
+   * @param {(p:{label:string, i:number, n:number})=>void} [onProgress]
+   * @returns {Promise<{vaultCreated:boolean, catsAdded:string[], catsSkipped:string[], blobsAdded:number, blobsExisted:number, failed:string[]}>}
+   */
+  async importBackup(zipBytes, onProgress = () => {}) {
+    const entries = readZipStore(zipBytes); // 结构 / CRC 不对会在这里抛 ZipError
+    const byName = new Map(entries.map((e) => [e.name, e.bytes]));
+
+    const vaultRaw = byName.get(F.VAULT_NAME);
+    if (!vaultRaw) {
+      throw new LibraryError(`备份包里没有 ${F.VAULT_NAME},不是本应用的备份`, 'bad-backup');
+    }
+    let incoming;
+    try {
+      incoming = JSON.parse(td.decode(vaultRaw));
+    } catch {
+      throw new LibraryError('备份包里的 vault.json 不是合法 JSON', 'bad-backup');
+    }
+    if (incoming?.magic !== 'JMBIJI' || !incoming?.kdf || !incoming?.wrap
+      || !incoming?.auth?.hash || !/^[0-9a-f]{64}$/.test(incoming.auth.hash)) {
+      throw new LibraryError('备份包里的 vault.json 结构不合法', 'bad-backup');
+    }
+
+    /* ---- 先处理 vault.json:不同库绝不混 ---- */
+    const current = await API.fetchVault();
+    let vaultCreated = false;
+    if (current.status === 200) {
+      const sameDek = !!current.json?.wrap?.wrappedDek
+        && current.json.wrap.wrappedDek === incoming.wrap.wrappedDek;
+      if (!sameDek) {
+        throw new LibraryError(
+          '服务器上已有另一个库。把这份备份导进去会让钥匙与密文对不上(全是解不开的文件),已中止。'
+          + '请先确认要恢复到哪个桶。',
+          'foreign-vault',
+        );
+      }
+    } else {
+      const res = await API.createVaultJson(JSON.stringify(incoming, null, 2));
+      if (res.status === 409) throw new LibraryError('服务器上已有库,已中止', 'exists');
+      if (res.status !== 201) throw new LibraryError(`创建 vault.json 失败(HTTP ${res.status})`, 'create');
+      vaultCreated = true;
+    }
+
+    /* ---- 分类:仅新建 ---- */
+    const catEntries = entries.filter((e) => e.name.startsWith('cats/') && e.name.endsWith('.enc'));
+    const blobEntries = entries.filter((e) => e.name.startsWith('blobs/'));
+    const n = catEntries.length + blobEntries.length;
+    let i = 0;
+    const tick = (label) => onProgress({ label, i: ++i, n });
+
+    const catsAdded = [];
+    const catsSkipped = [];
+    const failed = [];
+    for (const e of catEntries) {
+      const name = e.name.slice('cats/'.length, -'.enc'.length);
+      tick(e.name);
+      try {
+        const res = await API.putCat(name, e.bytes, { createOnly: true });
+        if (res.status === 201) catsAdded.push(name);
+        else if (res.status === 409) catsSkipped.push(name);
+        else failed.push(name);
+      } catch {
+        failed.push(name);
+      }
+    }
+
+    /* ---- 附件:内容寻址,天然幂等 ---- */
+    let blobsAdded = 0;
+    let blobsExisted = 0;
+    for (const e of blobEntries) {
+      const name = e.name.slice('blobs/'.length);
+      tick(e.name);
+      try {
+        const status = await API.putBlob(name, e.bytes);
+        if (status === 201) blobsAdded += 1; else blobsExisted += 1;
+      } catch {
+        failed.push(name);
+      }
+    }
+
+    return { vaultCreated, catsAdded, catsSkipped, blobsAdded, blobsExisted, failed };
   }
 
   /** 释放密钥与明文(锁屏调用):丢弃整个实例即可,调用方置空引用 */

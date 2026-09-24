@@ -2,7 +2,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  createVault, unlockVault, rewrapVault, deriveAllKeys,
+  createVault, unlockVault, rewrapVault, deriveAllKeys, dekMatchesVault,
   encryptCategory, decryptCategory, normalizeNoteData,
   blobFileNameFor, encryptBlob, decryptBlob,
   PBKDF2_ITERATIONS_DEFAULT, PBKDF2_ITERATIONS_MIN, PBKDF2_ITERATIONS_MAX,
@@ -123,4 +123,25 @@ test('建库:非法迭代次数回落默认值,落盘值与实际派生值一致
   assert.equal((await unlockVault(a.json, '非法迭代密码123')).ok, true);
   const b = await createVault('负迭代密码1234', -5);
   assert.equal(b.json.kdf.iterations, PBKDF2_ITERATIONS_DEFAULT);
+});
+
+/* dekMatchesVault:「记住本设备」恢复会话前的配对校验。
+ * 本机存的 DEK 可能属于另一个库,不校验就会「进去了但每个分类都打不开」。 */
+test('dekMatchesVault:只认与这份 vault.json 配对的 DEK', async () => {
+  const a = await createVault('配对校验密码A', ITER);
+  const b = await createVault('配对校验密码B', ITER);
+
+  assert.equal(await dekMatchesVault(a.json, a.dek), true, '自己的 DEK 必须判定为配对');
+  assert.equal(await dekMatchesVault(a.json, b.dek), false, '另一个库的 DEK 必须被判不配对');
+  assert.equal(await dekMatchesVault(b.json, a.dek), false, '反向同样');
+
+  // 改主密码不换 DEK → 仍然配对(否则改完密码就被踢下线)
+  const { json: rewrapped } = await rewrapVault(a.json, a.dek, '换个密码abc');
+  assert.equal(await dekMatchesVault(rewrapped, a.dek), true, '改密码后 DEK 不变,应当仍配对');
+
+  // 畸形输入一律 false,不抛错
+  assert.equal(await dekMatchesVault(null, a.dek), false);
+  assert.equal(await dekMatchesVault({}, a.dek), false);
+  assert.equal(await dekMatchesVault(a.json, null), false);
+  assert.equal(await dekMatchesVault(a.json, new Uint8Array(8)), false);
 });

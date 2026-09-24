@@ -83,6 +83,13 @@ export function planBackupRotation(existingNames, keep = KEEP_BACKUPS_PER_CATEGO
 /** seafile-ignore.txt 内容:只忽略自己的临时文件与备份目录,不忽略 *.enc / vault.json */
 export const SEAFILE_IGNORE_CONTENT = '*.crswap\nbackup/\n';
 
+/** 全库备份包的文件名:带本地日期,便于在下载目录里一眼认出来 */
+export function backupArchiveName(date = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `jmbiji-backup-${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}`
+    + `-${p(date.getHours())}${p(date.getMinutes())}.zip`;
+}
+
 /* ---------- 附件(blob)命名:内容寻址 ---------- */
 
 /** HMAC 结果(base64url) + 保留原扩展名,供 Seafile 端识别图片类型 */

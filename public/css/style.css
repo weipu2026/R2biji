@@ -168,6 +168,34 @@ input, textarea, select { font: inherit; color: inherit; }
   margin: 18px 0 0;
 }
 
+/* 「记住本设备」:必须盖掉 #lockForm input 那条通栏样式(width:100% + 下边距) */
+.remember-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 0 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+#lockForm .remember-row input[type="checkbox"] {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+.remember-row span { line-height: 1.4; }
+
+.remember-hint {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.45;
+  margin: 0 0 12px;
+}
+
 /* ---------- 顶栏 ---------- */
 
 #app { display: flex; flex-direction: column; height: 100vh; }

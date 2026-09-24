@@ -243,6 +243,24 @@ test('列表翻页:对象数超过单页上限时不会只拿到前 1000 个', a
   assert.equal((await (await call(env, 'GET', '/api/blobs', { headers: h })).json()).names.length, 4);
 });
 
+/* /api/blobs 同时回 names 与带体积的 blobs:
+ * 前者是向后兼容(既有调用方在用),后者是「全库导出」用来先提示体积的。 */
+test('附件清单:names 与带体积的 blobs 必须一致且 size 真实', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  const names = ['a'.repeat(43) + '.png', 'b'.repeat(43) + '.png'];
+  for (const n of names) {
+    await call(env, 'PUT', `/api/blob?key=${n}`, { body: new Uint8Array([1, 2, 3]), headers: h });
+  }
+  const body = (await (await call(env, 'GET', '/api/blobs', { headers: h })).json());
+  assert.deepEqual([...body.names].sort(), [...names].sort(), 'names 必须保留(向后兼容)');
+  assert.deepEqual(body.blobs.map((b) => b.name).sort(), [...names].sort(), 'blobs 名单必须与 names 一致');
+  for (const b of body.blobs) {
+    assert.equal(b.size, 3, 'size 必须是对象的真实字节数,否则导出前的体积提示会撒谎');
+    assert.ok(Number.isFinite(b.uploaded), 'uploaded 必须是数字时间戳');
+  }
+});
+
 /* ---------- 可选访问密钥门 ---------- */
 
 test('设置 ACCESS_KEY 后:无密钥 → 401 access-key;带密钥正常', async () => {

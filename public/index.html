@@ -30,6 +30,11 @@
         </div>
         <input type="password" id="pwInput" placeholder="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false">
         <div id="pwHint" class="pw-hint" hidden></div>
+        <label class="remember-row">
+          <input type="checkbox" id="rememberDevice" checked>
+          <span>在此设备上记住(下次打开直接进入)</span>
+        </label>
+        <p class="remember-hint">钥匙存在本浏览器里:能打开这台电脑的人可直接看到笔记</p>
         <button id="pwBtn" class="btn primary block">解锁</button>
       </div>
 
@@ -81,6 +86,9 @@
               <option value="30">30 分钟</option>
             </select>
           </label>
+          <button id="btnExport" class="btn ghost tiny block">导出全库备份</button>
+          <button id="btnImport" class="btn ghost tiny block">从备份恢复</button>
+          <input id="importInput" type="file" accept=".zip,application/zip" hidden>
           <button id="btnCleanBlobs" class="btn ghost tiny block">清理未引用图片</button>
         </div>
       </aside>

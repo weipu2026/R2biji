@@ -56,6 +56,23 @@ export async function deriveAllKeys(dekBytes) {
 }
 
 /**
+ * 这份 vault.json 与本机存的 DEK 是否配对(校验块判定)。
+ *
+ * 「记住本设备」恢复会话时必做:本机存的 DEK 可能属于**另一个库**
+ * (桶被换过、vault.json 被别处的库覆盖、存储被手工改过)。
+ * 不校验就会「进去了,但每个分类都 ⛔ 打不开」—— 那种状态极难自查,
+ * 不如在这里一次判定,失败就回落锁屏让用户输主密码。
+ */
+export async function dekMatchesVault(json, dekBytes) {
+  try {
+    if (!json?.verifier || !(dekBytes instanceof Uint8Array)) return false;
+    return await checkVerifier(await deriveContentKey(dekBytes), json.verifier);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 解锁 vault.json。
  * @returns {{ ok:true, dek:Uint8Array, authKeyHex:string, weakKdf:boolean }
  *          | { ok:false, reason:'corrupt'|'password' }}

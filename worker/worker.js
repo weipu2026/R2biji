@@ -397,8 +397,13 @@ export async function handleApi(method, url, headers, body, env) {
 
   if (resource === 'blobs' && parts.length === 2 && method === 'GET') {
     const objects = await listAll(env.VAULT, BLOB_PREFIX);
-    const names = objects.map((o) => o.key.slice(BLOB_PREFIX.length));
-    return json({ names });
+    const blobs = objects.map((o) => ({
+      name: o.key.slice(BLOB_PREFIX.length),
+      size: o.size,
+      uploaded: o.uploaded instanceof Date ? o.uploaded.getTime() : o.uploaded,
+    }));
+    // names 保留给既有调用方;blobs 是给「全库导出」用的(要先知道总量才能提示大小)
+    return json({ names: blobs.map((b) => b.name), blobs });
   }
 
   if (resource === 'blob' && parts.length === 2) {

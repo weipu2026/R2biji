@@ -10,7 +10,7 @@
  * 每个变异体跑完必定还原原文件(即使中途断言抛错)。
  * ============================================================ */
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -133,6 +133,91 @@ const MUTANTS = [
     to: "kdf: { name: 'PBKDF2', hash: 'SHA-256', iterations: 12345, salt: bytesToB64(salt) }, // MUTANT",
     expect: '非法迭代次数回落默认值',
   },
+  /* ---- 孤儿清理的 fail-closed 守卫(tests/e2e.test.mjs)----
+   * blobs 没有备份层,误删一张图 = 永久丢失,所以这两条尤其不能是摆设。 */
+  {
+    label: '孤儿清理退回 fail-open(读不出来的分类直接跳过)',
+    file: 'public/js/lib.js',
+    from: '      if (!cat.data) { unreadable.push(name); continue; }',
+    to: '      if (!cat.data) { continue; } // MUTANT',
+    expect: '分类读不出来时必须整次中止',
+  },
+  {
+    label: '孤儿清理不再先刷新分类清单(别的设备新建的图片会被误删)',
+    file: 'public/js/lib.js',
+    from: '    await this.rescan(); // ① 清单必须是新的:本机那份可能已经落后于别的设备',
+    to: '    // MUTANT:不再刷新清单',
+    expect: '必须先刷新分类清单',
+  },
+  /* ---- 「记住本设备」的落盘边界(tests/session.test.mjs)----
+   * 这是唯一把密钥写进浏览器存储的地方,读侧不校验 = 脏数据会被拿去解密。 */
+  {
+    label: '本机会话不再校验 DEK 长度(脏数据被当成有效会话)',
+    file: 'public/js/session.js',
+    from: '    if (dek.length !== DEK_BYTES) return null;',
+    to: '    if (false && dek.length !== DEK_BYTES) return null; // MUTANT',
+    expect: '读到脏数据一律当作',
+  },
+  {
+    label: '本机会话不再校验写入参数(非法密钥也照存)',
+    file: 'public/js/session.js',
+    from: '    if (!(dek instanceof Uint8Array) || dek.length !== DEK_BYTES) return false;\n    if (!AUTH_HEX_RE.test(String(authKeyHex || \'\'))) return false;',
+    to: '    // MUTANT:入参校验被删\n',
+    expect: '拒收非法入参',
+  },
+  /* ---- 弹窗的「按钮 → 返回值」契约(tests/dialog.test.mjs)----
+   * 还原那个真实发生过的 bug:mkBtn 无条件自动 resolve,prompt 的「确定」先落地 null。 */
+  {
+    label: '弹窗按钮退回「无条件自动 resolve」(prompt 确定返回 null)',
+    file: 'public/js/ui.js',
+    from: '      if (val !== undefined) b.addEventListener(\'click\', () => { dlg.close(); resolve(val); });',
+    to: '      b.addEventListener(\'click\', () => { dlg.close(); resolve(val); }); // MUTANT',
+    expect: '点「确定」必须返回输入框里的值',
+  },
+  /* ---- 静态资源清单(tests/assets.test.mjs)---- */
+  {
+    label: 'SW 清单漏登记一个模块(离线会白屏,联网时看不出来)',
+    file: 'public/sw.js',
+    from: "  './js/session.js',\n",
+    to: '',
+    expect: 'public/js 下的每个模块都必须登记',
+  },
+  /* ---- 多标签页同步 + 全库备份 ---- */
+  {
+    label: '标签页同步退回「不管本地有没有未保存改动都刷新」',
+    file: 'public/js/tabsync.js',
+    from: "  return isDirty ? 'warn-dirty' : 'reload';",
+    to: "  return 'reload'; // MUTANT",
+    expect: '本地有未保存改动 → 只警告,不刷新',
+  },
+  {
+    label: '恢复备份时不再核对「是不是同一个库」',
+    file: 'public/js/lib.js',
+    from: '      if (!sameDek) {',
+    to: '      if (false && !sameDek) { // MUTANT',
+    expect: '目标是另一个库时必须拒绝',
+  },
+  {
+    label: '恢复备份时改成覆盖已存在的分类(而非仅新建)',
+    file: 'public/js/lib.js',
+    from: '        const res = await API.putCat(name, e.bytes, { createOnly: true });',
+    to: '        const res = await API.putCat(name, e.bytes, { createOnly: false }); // MUTANT',
+    expect: '恢复时已存在的分类一律跳过',
+  },
+  {
+    label: '附件清单不再回真实体积(导出前的体积提示会说谎)',
+    file: 'worker/worker.js',
+    from: '    const blobs = objects.map((o) => ({\n      name: o.key.slice(BLOB_PREFIX.length),\n      size: o.size,',
+    to: '    const blobs = objects.map((o) => ({\n      name: o.key.slice(BLOB_PREFIX.length),\n      size: 0, // MUTANT',
+    expect: '附件清单:names 与带体积的 blobs 必须一致且 size 真实',
+  },
+  {
+    label: 'ZIP 读侧不再校验 CRC(坏包会被当成好数据)',
+    file: 'public/js/zip.js',
+    from: '    if (crc32(data) !== crc) throw new ZipError(`条目「${name}」校验失败(内容损坏或被改过)`);',
+    to: '    // MUTANT:不再校验 CRC',
+    expect: '读到损坏的内容必须报错',
+  },
   /* ---- 部署链路守卫(tests/deploy.test.mjs)---- */
   {
     label: 'gen-config 的最短密钥长度与 Worker 改歪',
@@ -178,8 +263,14 @@ const MUTANTS = [
   },
 ];
 
-const TEST_FILES = ['crypto', 'format', 'vault', 'render', 'worker', 'e2e', 'deploy']
-  .map((n) => `tests/${n}.test.mjs`);
+/* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
+ * 新增一个 *.test.mjs 却忘了加进来,那个文件就**静默地不受变异测试覆盖**,
+ * 而 falsify 会照样打印「全部守卫具备判别力」。
+ * (同样的教训也发生在 public/sw.js 的 ASSETS 上,那边由 tests/assets.test.mjs 盯着。) */
+const TEST_FILES = readdirSync(join(ROOT, 'tests'))
+  .filter((f) => f.endsWith('.test.mjs'))
+  .sort()
+  .map((f) => `tests/${f}`);
 
 const NODE = process.execPath;
 

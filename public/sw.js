@@ -1,5 +1,13 @@
-/* JMbiji Service Worker:仅缓存应用自身(外壳),不碰任何库数据与 /api/* */
-const CACHE = 'jmbiji-v4';
+/* JMbiji Service Worker:仅缓存应用自身(外壳),不碰任何库数据与 /api/*
+ *
+ * ⚠️ 两件必须一起做的事(改了 public/ 下的代码就要想到它们):
+ *   1. 新增/删除 js 模块 → 同步改下面的 ASSETS 清单,否则离线时那个模块拉不到。
+ *      (tests/assets.test.mjs 会自动核对清单与实际文件,漏了会变红。)
+ *   2. **改完任何被缓存的资源,必须把 CACHE 版本号 +1。**
+ *      本 SW 是 cache-first 的,而浏览器只在 sw.js 这个文件本身变化时才重新安装;
+ *      不升版本号 → 老用户永远拿到旧缓存里的 js,表现为「部署了但界面没变」。
+ */
+const CACHE = 'jmbiji-v6';
 const ASSETS = [
   './',
   './index.html',
@@ -11,6 +19,9 @@ const ASSETS = [
   './js/lib.js',
   './js/render.js',
   './js/search.js',
+  './js/session.js',
+  './js/tabsync.js',
+  './js/zip.js',
   './js/ui.js',
   './js/main.js',
   './manifest.webmanifest',

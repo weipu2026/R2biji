@@ -9,12 +9,17 @@ import * as API from './api.js';
 import { Library } from './lib.js';
 import { renderMarkdown } from './render.js';
 import { findMatches, renderSearchResult } from './search.js';
+import { saveSession, loadSession, clearSession } from './session.js';
+import { TabSync, planSavedCategoryAction } from './tabsync.js';
 
 const $ = (id) => document.getElementById(id);
 
 const AUTOSAVE_MS = 5 * 60 * 1000;      // 改动停止后 5 分钟兜底
 const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
-const DEFAULT_AUTOLOCK_MIN = 15;         // 自动锁屏默认值(可关)
+/* 自动锁屏默认「关闭」。它与「记住本设备」的目的正好相反:前者要「离开就得输密码」,
+ * 后者要「打开即用」。默认给后者,想要前者自己去侧栏选 —— 选了之后空闲到点会
+ * 锁定并**忘掉本机会话**,语义一致:锁定 = 需要重新输主密码。 */
+const DEFAULT_AUTOLOCK_MIN = 0;
 
 const S = {
   lib: null,             // Library 实例(持密钥与明文;锁屏即置 null)
@@ -28,7 +33,8 @@ const S = {
   autoSaveTimer: null,
   statusTimer: null,
   idleTimer: null,
-  settings: { autoLockMinutes: DEFAULT_AUTOLOCK_MIN },
+  tabs: null,            // TabSync:同一浏览器多个标签页之间的通知(可能不可用)
+  settings: { autoLockMinutes: DEFAULT_AUTOLOCK_MIN, rememberDevice: true },
   objectUrls: new Map(), // blobName → objectURL(图片展示缓存)
 };
 
@@ -39,11 +45,17 @@ function toast(msg, kind = 'info') {
   box.className = `toast toast-${kind}`;
   box.textContent = msg;
   $('toasts').appendChild(box);
-  setTimeout(() => box.remove(), 3000);
+  // 错误提示留久一点:失败信息(尤其是「已中止」这类)通常比「已复制」更需要看清
+  setTimeout(() => box.remove(), kind === 'error' ? 8000 : 3000);
 }
 
-/** 通用对话框:返回 Promise。type: 'prompt' | 'confirm' | 'conflict' */
-function modal({ type, title, label, value = '', text = '', danger = false, password = false }) {
+/**
+ * 通用对话框:返回 Promise。type: 'prompt' | 'confirm' | 'conflict'
+ *
+ * 导出仅为了可测:这是唯一一处「按钮 → 返回值」的映射,写错了不会有任何报错,
+ * 只会静默失效(见下面 prompt 分支的注释)。tests/dialog.test.mjs 用极简 DOM 替身覆盖它。
+ */
+export function modal({ type, title, label, value = '', text = '', danger = false, password = false }) {
   return new Promise((resolve) => {
     const dlg = $('modal');
     const body = $('modalBody');
@@ -77,18 +89,25 @@ function modal({ type, title, label, value = '', text = '', danger = false, pass
     const row = document.createElement('div');
     row.className = 'modal-btns';
 
+    /** 造一个按钮。val 传 undefined = 不自动 resolve,由调用方自己接管点击。 */
     const mkBtn = (labelText, cls, val) => {
       const b = document.createElement('button');
       b.className = cls;
       b.textContent = labelText;
-      b.addEventListener('click', () => { dlg.close(); resolve(val); });
+      if (val !== undefined) b.addEventListener('click', () => { dlg.close(); resolve(val); });
       row.appendChild(b);
       return b;
     };
 
     if (type === 'prompt') {
-      const ok = mkBtn('确定', 'btn primary', null);
-      ok.addEventListener('click', () => resolve(input.value));
+      // ⚠️ 必须由**这个**监听器给出 input.value,不能靠外面再补一个覆盖。
+      // 曾经的写法是 mkBtn('确定', ..., null) + 再 addEventListener 覆盖 —— 但
+      // mkBtn 内部那个 resolve(null) 先注册就先落地(Promise 只认第一次 resolve),
+      // 于是「确定」点了等于没点:新建分类 / 重命名分类 / 修改主密码全部静默失效,
+      // 只有按回车能用。离线单测测的是 Library 层,碰不到弹窗这一层。
+      // 现在由 tests/dialog.test.mjs 钉住「点确定必须返回输入框的值」。
+      const ok = mkBtn('确定', 'btn primary');
+      ok.addEventListener('click', () => { dlg.close(); resolve(input.value); });
       mkBtn('取消', 'btn ghost', null).addEventListener('click', () => resolve(null));
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dlg.close(); resolve(input.value); } });
     } else if (type === 'confirm') {
@@ -170,6 +189,8 @@ async function saveAll() {
         await handleConflict(name);
       } else {
         S.dirty.delete(name);
+        // 通知其他标签页:这个分类的云端版本变了,它们手里的是旧数据
+        S.tabs?.send({ type: 'cat-saved', name });
       }
     } catch (e) {
       failed += 1;
@@ -190,6 +211,7 @@ async function handleConflict(name) {
   const cat = S.lib.categoryInfo(name);
   if (choice === 'mine') {
     await S.lib.saveCategory(name, { force: true });
+    S.tabs?.send({ type: 'cat-saved', name });
     toast(`「${name}」已用本地版本覆盖(云端旧版已备份)`);
   } else if (choice === 'disk') {
     // 丢弃内存改动,重读云端
@@ -204,13 +226,72 @@ async function handleConflict(name) {
   refreshSaveStatus();
 }
 
+/* ================= 多标签页同步 ================= */
+
+/**
+ * 收到别的标签页的通知。
+ * ★ 只把消息当作「去重新核对一次」的提示,绝不当权威状态 ——
+ *   所以 cats-changed 一律走 rescan()(重新问服务器),不照消息改内存;
+ *   这样即便消息是错的(或来自同源的恶意页面),最坏也只是多拉一次数据。
+ */
+function onTabMessage(msg) {
+  // 退出登录是共享的(localStorage 会话),别的标签页锁了,这里也得锁
+  if (msg.type === 'locked') { lockNow({ broadcast: false }); return; }
+  if (!S.lib) return;
+
+  if (msg.type === 'cats-changed') { rescanFromTabs(); return; }
+
+  if (msg.type === 'cat-saved') {
+    const action = planSavedCategoryAction({
+      isKnown: !!S.lib.categoryInfo(msg.name),
+      isDirty: S.dirty.has(msg.name),
+    });
+    if (action === 'ignore') return;
+    if (action === 'warn-dirty') {
+      // 本地有未保存的改动 → 绝不自动刷新(会把它丢掉),只提前说明会冲突
+      toast(`「${msg.name}」已在另一个标签页保存;你这里的改动在保存时会提示冲突`, 'warn');
+      return;
+    }
+    const cat = S.lib.categoryInfo(msg.name);
+    cat.data = null; cat.lastSeenEtag = null; cat.error = null;
+    if (S.activeCat === msg.name) openCategory(msg.name);
+    toast(`「${msg.name}」已在另一个标签页更新,已载入最新版本`);
+  }
+}
+
+/** 别的标签页增删/改名了分类 → 重新问服务器 */
+async function rescanFromTabs() {
+  try {
+    await S.lib.rescan();
+  } catch {
+    return; // 网络问题:不打扰用户,下次操作自然会重试
+  }
+  renderCategoryList();
+  if (S.activeCat && !S.lib.categoryInfo(S.activeCat)) {
+    // 本标签页正开着的分类,在别处被删了
+    S.activeCat = null; S.activeNoteId = null; S.editing = false;
+    $('activeCatName').textContent = '未选择分类';
+    renderNoteList();
+    showEmpty('该分类已在另一个标签页被删除');
+  }
+}
+
 /* ================= 锁屏 ================= */
+
+/** 恢复会话失败时要在锁屏上说明的原因,由 showLock 消费一次后清空 */
+let pendingLockMsg = null;
 
 function showLock(mode) {
   $('app').hidden = true;
   $('lock').hidden = false;
   $('lockErr').hidden = true;
+  if (pendingLockMsg) {
+    $('lockErr').textContent = pendingLockMsg;
+    $('lockErr').hidden = false;
+    pendingLockMsg = null;
+  }
   $('lockForm').hidden = false;
+  $('rememberDevice').checked = S.settings.rememberDevice !== false;
   const isSetup = mode === 'setup';
   $('pwConfirmField').hidden = !isSetup;
   $('pwBtn').textContent = isSetup ? '创建笔记库' : '解锁';
@@ -230,18 +311,43 @@ function showLock(mode) {
   S.lockMode = mode;
 }
 
-async function lockNow() {
+/**
+ * 锁定 = 退出登录。
+ * @param {{broadcast?:boolean}} [opt] 收到别的标签页的「锁定」通知时传 false,避免回声。
+ */
+async function lockNow({ broadcast = true } = {}) {
   if (S.dirty.size > 0) {
     try { await saveAll(); } catch { /* 尽力保存 */ }
   }
+  // 先通知再清:锁定会清掉共享的 localStorage 会话,不通知的话
+  // 另一个标签页还开着就等于「锁定」没生效(它的内存里还留着令牌与明文)
+  if (broadcast) S.tabs?.send({ type: 'locked' });
   if (S.lib) { S.lib.destroy(); S.lib = null; }
   API.clearToken();
+  // 锁定 = 忘掉本机记住的会话(真正的「退出登录」)。不清的话「锁定」形同虚设:
+  // 刷新一下又自动进去了。想再次免密,解锁时勾着「记住本设备」即可。
+  clearSession();
   S.activeCat = null; S.activeNoteId = null; S.editing = false;
   S.dirty.clear();
   for (const url of S.objectUrls.values()) URL.revokeObjectURL(url);
   S.objectUrls.clear();
   stopIdleTimer();
   showLock(S.vaultJson ? 'unlock' : 'setup');
+}
+
+/* ================= 「记住本设备」 ================= */
+
+/**
+ * 解锁/建库成功后,按用户意愿把会话落盘(勾选了才存)。
+ * 与 lockNow 里的 clearSession 是一对:存 → 免密进入,清 → 需要重新输主密码。
+ */
+function rememberNow(dek, authKeyHex) {
+  if (!S.settings.rememberDevice) return;
+  if (!saveSession({ dek, authKeyHex })) {
+    // 隐私模式 / 存储被禁:降级为「不记住」。必须说一声 ——
+    // 否则用户以为已经记住了,下次打开发现还要输密码,会以为程序坏了。
+    toast('本浏览器不允许保存登录状态,下次打开仍需输入主密码', 'warn');
+  }
 }
 
 /* ================= 解锁 / 建库 ================= */
@@ -271,6 +377,7 @@ async function doUnlock(password) {
     S.lib = new Library(keys, S.vaultJson, res.dek, S.vaultEtag);
     await S.lib.rescan();
     if (res.weakKdf) toast('注意:本库的密钥派生迭代次数低于当前建议值', 'warn');
+    rememberNow(res.dek, res.authKeyHex);
     await enterApp();
   } catch (e) {
     err.textContent = `打开失败:${e.message}`;
@@ -303,6 +410,7 @@ async function doCreateLibrary(password, password2) {
     S.lib = new Library(keys, json, dek, etag);
     S.vaultJson = json;
     await S.lib.rescan();
+    rememberNow(dek, authKeyHex);
     downloadVaultBackup(json);
     toast('笔记库已创建。vault.json 备份已开始下载,请妥善保存(全库钥匙的唯一载体)');
     await enterApp();
@@ -387,6 +495,7 @@ async function addCategory() {
   if (name == null) return;
   try {
     const created = await S.lib.createCategory(name);
+    S.tabs?.send({ type: 'cats-changed' });
     await openCategory(created);
   } catch (e) {
     toast(e.message, 'error');
@@ -400,6 +509,7 @@ async function renameCategory() {
   try {
     const created = await S.lib.renameCategory(S.activeCat, name);
     S.dirty.delete(S.activeCat);
+    S.tabs?.send({ type: 'cats-changed' });
     S.activeCat = created;
     renderCategoryList();
     renderNoteList();
@@ -421,6 +531,7 @@ async function deleteCategory() {
   try {
     await S.lib.deleteCategory(S.activeCat);
     S.dirty.delete(S.activeCat);
+    S.tabs?.send({ type: 'cats-changed' });
     S.activeCat = null; S.activeNoteId = null;
     renderCategoryList();
     renderNoteList();
@@ -788,11 +899,19 @@ function loadSettings() {
     if (raw) S.settings = { ...S.settings, ...JSON.parse(raw) };
   } catch { /* 忽略 */ }
   $('autoLock').value = String(S.settings.autoLockMinutes);
+  $('rememberDevice').checked = S.settings.rememberDevice !== false;
 }
 function saveSettings() {
   S.settings.autoLockMinutes = Number($('autoLock').value) || 0;
-  localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings));
+  try { localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings)); } catch { /* 忽略 */ }
   startIdleTimer();
+}
+
+/** 勾选/取消「记住本设备」。取消时立刻把已存的会话删掉,不给「取消了其实还留着」留余地。 */
+function saveRememberPref() {
+  S.settings.rememberDevice = $('rememberDevice').checked;
+  try { localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings)); } catch { /* 忽略 */ }
+  if (!S.settings.rememberDevice) clearSession();
 }
 
 /* ================= 修改主密码 ================= */
@@ -808,10 +927,110 @@ async function changePassword() {
   if (pw !== pw2) { toast('两次输入不一致', 'error'); return; }
   try {
     const json = await S.lib.changeMasterPassword(pw);
+    // 改密码换了鉴权令牌(DEK 不变)。本机记住的会话必须同步更新,
+    // 否则下次打开会拿旧令牌去请求 → 401 → 被迫重输主密码(等于白记了)。
+    rememberNow(S.lib.dek, API.getToken());
     downloadVaultBackup(json);
     toast('主密码已修改。新的 vault.json 备份已开始下载,请替换手头旧备份!', 'warn');
   } catch (e) {
     toast(`修改失败:${e.message}`, 'error');
+  }
+}
+
+/* ================= 全库备份(导出 / 恢复) ================= */
+
+/** 人类可读的体积 */
+function fmtBytes(n) {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+function downloadBytes(bytes, fileName, mime = 'application/zip') {
+  const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  a.click();
+  // 大包要给足时间让浏览器读走;提前 revoke 会得到一个空文件
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function exportFullBackup() {
+  if (!S.lib) return;
+  try {
+    const { bytes, counts } = await S.lib.exportBackup({
+      // 先把真实体积摆出来再决定 —— 个人库也可能上百 MB,手机上有内存压力
+      onPlan: (plan) => modal({
+        type: 'confirm',
+        title: '导出全库',
+        text: `${plan.cats} 个分类 · ${plan.blobs} 张图片 · 约 ${fmtBytes(plan.bytes)}\n\n`
+          + '包里是 vault.json、全部分类密文与全部附件(全程不解密,仍然是密文)。\n'
+          + '⚠️ 拿到这个包的人不受访问密钥门与限流保护,请放在不会外泄的位置。',
+      }),
+      onProgress: ({ done, total }) => {
+        setStatus(total ? `导出中 ${Math.round((done / total) * 100)}%` : '导出中…', 'busy');
+      },
+    });
+    downloadBytes(bytes, F.backupArchiveName());
+    setStatus('已导出', 'ok');
+    toast(`全库备份已下载:${counts.cats} 个分类 / ${counts.blobs} 张图片(约 ${fmtBytes(counts.bytes)})`);
+  } catch (e) {
+    refreshSaveStatus();
+    if (e.code === 'cancelled') return;
+    toast(`导出失败:${e.message}`, 'error');
+  }
+}
+
+async function importFromBackup(file) {
+  if (!S.lib) return;
+  let bytes;
+  try {
+    bytes = new Uint8Array(await file.arrayBuffer());
+  } catch (e) {
+    toast(`读取文件失败:${e.message}`, 'error');
+    return;
+  }
+  const yes = await modal({
+    type: 'confirm',
+    title: '从备份恢复',
+    text: `把「${file.name}」里的内容补进当前库:缺失的分类与图片会被恢复,`
+      + '已存在的一律跳过、绝不覆盖。继续?',
+  });
+  if (!yes) return;
+
+  setStatus('恢复中…', 'busy');
+  try {
+    const r = await S.lib.importBackup(bytes, ({ i, n }) => {
+      setStatus(n ? `恢复中 ${i}/${n}` : '恢复中…', 'busy');
+    });
+    const parts = [];
+    if (r.vaultCreated) parts.push('库钥匙已建立');
+    parts.push(`分类 +${r.catsAdded.length}`);
+    if (r.catsSkipped.length) parts.push(`跳过已存在 ${r.catsSkipped.length}`);
+    parts.push(`图片 +${r.blobsAdded}(去重 ${r.blobsExisted})`);
+    if (r.failed.length) parts.push(`失败 ${r.failed.length}`);
+
+    if (r.vaultCreated) {
+      // 恢复出来的库,钥匙来自备份包 —— 当前会话的令牌与它对不上,必须重新解锁。
+      // 且 S.vaultJson 还是旧的,得让 boot() 重新拉一次,否则解锁会读到「已损坏」。
+      S.vaultJson = null;
+      S.vaultEtag = null;
+      await lockNow({ broadcast: false });
+      await boot();
+      toast(`恢复完成(${parts.join(', ')})。请用这份备份对应的主密码解锁`, 'warn');
+      return;
+    }
+    await S.lib.rescan();
+    renderCategoryList();
+    refreshSaveStatus();
+    toast(`恢复完成:${parts.join(', ')}`);
+  } catch (e) {
+    refreshSaveStatus();
+    toast(`恢复失败:${e.message}`, 'error');
   }
 }
 
@@ -847,8 +1066,44 @@ async function boot() {
     if (res.status === 404) { showLock('setup'); return; }
     S.vaultJson = res.json;
     S.vaultEtag = res.etag;
+    // 「记住本设备」:本机有可用会话就直接进,不问主密码(失败会自己回落锁屏)
+    if (S.settings.rememberDevice && await resumeSession()) return;
     showLock('unlock');
     return;
+  }
+}
+
+/**
+ * 用本机记住的会话直接进入应用。
+ * @returns {boolean} true = 已进入;false = 回落锁屏(不可用的会话已清掉)
+ *
+ * 两种失败都要清掉会话并说明原因,不能静默:
+ *  · 钥匙与库不匹配(桶换过 / vault.json 被别的库覆盖)→ 不清就会「进去了但每个分类都打不开」
+ *  · 令牌失效(多半是别的设备改过主密码)→ 不清就会每次打开都失败一次
+ */
+async function resumeSession() {
+  const sess = loadSession();
+  if (!sess) return false;
+  try {
+    if (!(await V.dekMatchesVault(S.vaultJson, sess.dek))) {
+      clearSession();
+      pendingLockMsg = '本机记住的钥匙与这个库不匹配(可能换过桶或被别的库覆盖),已清除,请重新输入主密码';
+      return false;
+    }
+    API.setToken(sess.authKeyHex);
+    const keys = await V.deriveAllKeys(sess.dek);
+    S.lib = new Library(keys, S.vaultJson, sess.dek, S.vaultEtag);
+    await S.lib.rescan(); // 令牌过期 → 401 在这里抛出来
+    await enterApp();
+    return true;
+  } catch (e) {
+    if (S.lib) { S.lib.destroy(); S.lib = null; }
+    API.clearToken();
+    clearSession();
+    pendingLockMsg = e?.status === 401
+      ? '登录令牌已失效(可能在其他设备改过主密码),请重新输入主密码'
+      : `无法恢复上次的登录状态(${e.message}),请重新输入主密码`;
+    return false;
   }
 }
 
@@ -873,7 +1128,7 @@ function bindEvents() {
   $('pwInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pwBtn').click(); });
   $('pwConfirm').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pwBtn').click(); });
 
-  $('btnLock').addEventListener('click', lockNow);
+  $('btnLock').addEventListener('click', () => lockNow());
   $('btnAddCat').addEventListener('click', addCategory);
   $('btnRenameCat').addEventListener('click', renameCategory);
   $('btnDelCat').addEventListener('click', deleteCategory);
@@ -893,12 +1148,24 @@ function bindEvents() {
     if (!yes) return;
     try {
       const removed = await S.lib.cleanupOrphanBlobs();
+      renderCategoryList(); // 清理前会重新拉一次清单,界面跟着对齐
       toast(removed.length ? `已清理 ${removed.length} 张未引用图片` : '没有需要清理的图片');
     } catch (e) {
-      toast(`清理失败:${e.message}`, 'error');
+      // 清理是 fail closed 的:读不全就一张不删。这条提示必须看得清、看得久,
+      // 否则用户会以为「点过了就等于清干净了」。
+      toast(`清理已中止:${e.message}`, 'error');
     }
   });
+  $('btnExport').addEventListener('click', exportFullBackup);
+  $('btnImport').addEventListener('click', () => $('importInput').click());
+  $('importInput').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = '';
+    if (file) importFromBackup(file);
+  });
+
   $('autoLock').addEventListener('change', saveSettings);
+  $('rememberDevice').addEventListener('change', saveRememberPref);
 
   // 修改主密码入口:顶栏锁定按钮旁长按?不搞玄的 —— 放在 autoLock 旁边
   const pwChangeBtn = document.createElement('button');
@@ -939,5 +1206,8 @@ function bindEvents() {
 
 export async function start() {
   bindEvents();
+  // 多标签页同步:BroadcastChannel 不可用时 TabSync 会静默降级(S.tabs.enabled === false),
+  // 其余功能一律照常 —— 同步是锦上添花,不是必需品。
+  S.tabs = new TabSync({ onMessage: onTabMessage });
   await boot();
 }

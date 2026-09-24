@@ -21,6 +21,8 @@ export class ApiError extends Error {
 
 export function setToken(hex) { token = hex; }
 export function clearToken() { token = null; }
+/** 取当前令牌。改主密码会换掉它,「记住本设备」需要在换完后重新落盘。 */
+export function getToken() { return token; }
 
 const AK_STORE = 'jmbiji.accessKey';
 
@@ -144,6 +146,15 @@ export async function listBlobs() {
   const res = await req('/api/blobs');
   if (!res.ok) throw await errFrom(res);
   return (await res.json()).names;
+}
+
+/** 同 listBlobs,但带 size —— 「全库导出」要先知道总量才能提示大小。
+ *  老版本 Worker 只回 names 时退化成 size=0(仍可用,只是提示不出总量)。 */
+export async function listBlobInfo() {
+  const res = await req('/api/blobs');
+  if (!res.ok) throw await errFrom(res);
+  const j = await res.json();
+  return Array.isArray(j.blobs) ? j.blobs : (j.names || []).map((name) => ({ name, size: 0 }));
 }
 
 export async function getBlob(name) {
