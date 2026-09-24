@@ -1,0 +1,745 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R2biji 应急解密</title>
+<style>
+  :root {
+    --paper: #faf9f6;
+    --panel: #fffdf9;
+    --hair: #e8e4da;
+    --ink: #3d3a34;
+    --ink-soft: #8a857a;
+    --cinnabar: #a32d2d;
+    --ok: #3f6f4f;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 15px/1.7 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 40px 20px 60px; }
+  h1 {
+    font-family: Georgia, "Times New Roman", "Songti SC", SimSun, serif;
+    font-weight: 600; font-size: 26px; margin: 0 0 4px; letter-spacing: 1px;
+  }
+  h1 .seal { color: var(--cinnabar); }
+  .sub { color: var(--ink-soft); font-size: 13px; margin-bottom: 28px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 8px;
+    padding: 20px 22px; margin-bottom: 16px;
+  }
+  .step-title {
+    font-family: Georgia, "Songti SC", SimSun, serif;
+    font-size: 16px; margin: 0 0 10px;
+  }
+  .step-title .no {
+    display: inline-block; width: 22px; height: 22px; line-height: 22px; text-align: center;
+    border: 1px solid var(--cinnabar); color: var(--cinnabar); border-radius: 50%;
+    font-size: 13px; margin-right: 8px;
+  }
+  .hint { color: var(--ink-soft); font-size: 13px; }
+  #drop {
+    border: 1.5px dashed var(--hair); border-radius: 6px; padding: 26px 16px;
+    text-align: center; color: var(--ink-soft); cursor: pointer; transition: border-color .15s;
+  }
+  #drop.over { border-color: var(--cinnabar); color: var(--cinnabar); }
+  #zipInput { display: none; }
+  .pkg-summary { margin-top: 14px; font-size: 14px; display: none; }
+  .pkg-summary table { border-collapse: collapse; width: 100%; }
+  .pkg-summary td { padding: 3px 0; border-bottom: 1px solid var(--hair); font-size: 13.5px; }
+  .pkg-summary td:last-child { text-align: right; color: var(--ink-soft); font-variant-numeric: tabular-nums; }
+  input[type="password"] {
+    width: 100%; padding: 10px 12px; font-size: 15px;
+    border: 1px solid var(--hair); border-radius: 6px; background: #fff; color: var(--ink);
+  }
+  input[type="password"]:focus { outline: none; border-color: var(--cinnabar); }
+  .btn {
+    display: inline-block; border: 1px solid var(--cinnabar); color: var(--cinnabar);
+    background: transparent; border-radius: 6px; padding: 8px 18px;
+    font-size: 14px; cursor: pointer; transition: all .15s;
+  }
+  .btn:hover { background: var(--cinnabar); color: #fff; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn.primary { background: var(--cinnabar); color: #fff; }
+  .btn.primary:hover { background: #8c2424; }
+  .btn.primary:disabled:hover { background: var(--cinnabar); }
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .results { display: none; }
+  .cat-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 2px; border-bottom: 1px solid var(--hair);
+  }
+  .cat-row .name {
+    font-family: Georgia, "Songti SC", SimSun, serif; font-size: 16px; flex: 1;
+  }
+  .cat-row .meta { color: var(--ink-soft); font-size: 12.5px; white-space: nowrap; }
+  .cat-row .btn { padding: 4px 12px; font-size: 13px; }
+  .fail-list { margin-top: 10px; }
+  .fail-list li { color: var(--cinnabar); font-size: 13px; }
+  .warn-list { margin-top: 6px; }
+  .warn-list li { color: var(--ink-soft); font-size: 12.5px; }
+  #err { color: var(--cinnabar); font-size: 14px; margin-top: 10px; display: none; }
+  .foot { color: var(--ink-soft); font-size: 12.5px; margin-top: 26px; line-height: 1.9; }
+  .foot b { color: var(--ink); font-weight: 600; }
+  .done-tag { color: var(--ok); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>R2biji <span class="seal">·</span> 应急解密</h1>
+  <div class="sub">Cloudflare 被封 / 账号出事那天的保险丝 —— 本页完全离线运行，不发出任何网络请求</div>
+
+  <div class="card">
+    <p class="step-title"><span class="no">1</span>选择全库备份 zip</p>
+    <div id="drop">把备份包拖到这里，或点击选择文件</div>
+    <input type="file" id="zipInput" accept=".zip">
+    <div class="pkg-summary" id="pkgSummary"></div>
+  </div>
+
+  <div class="card">
+    <p class="step-title"><span class="no">2</span>输入主密码</p>
+    <input type="password" id="pwd" placeholder="主密码（就是平时解锁笔记本用的那个）" autocomplete="off">
+    <p class="hint" style="margin:8px 0 12px">密码只在本地内存里用于解密，不会离开这一页。</p>
+    <div class="btn-row">
+      <button class="btn primary" id="btnGo" disabled>解密全部</button>
+      <span id="err"></span>
+    </div>
+  </div>
+
+  <div class="card results" id="results">
+    <p class="step-title"><span class="no">3</span>导出明文 <span class="done-tag" id="doneTag"></span></p>
+    <div id="catList"></div>
+    <div class="fail-list" id="failList"></div>
+    <div class="warn-list" id="warnList"></div>
+    <div class="btn-row" style="margin-top:16px">
+      <button class="btn primary" id="btnAll">下载全部明文（zip）</button>
+      <button class="btn" id="btnReset">换一个备份包</button>
+    </div>
+  </div>
+
+  <div class="foot">
+    <b>平时怎么用：</b>把这个 HTML 文件和备份 zip 存在一起（U 盘 / 本地盘 / 网盘都行）。它不依赖任何网站，离线双击即可打开。<br>
+    <b>出事那天：</b>双击本文件 → 拖入备份包 → 输主密码 → 每个分类导出明文 .md，附件按原名导出，另有完整 JSON 备底。<br>
+    <b>记住：</b>主密码是唯一钥匙，忘了谁都打不开；备份包本身是密文，丢了没关系，泄露了别人也读不出内容（但请勿外泄）。
+  </div>
+</div>
+
+<script>
+/*RECOVER-SCRIPT-START*/
+/* ============================================================
+ * R2biji 应急解密 —— 单文件、零依赖、纯离线。
+ *
+ * 解密格式与 public/js/crypto.js、vaultlib.js 严格一致:
+ *   主密码 --PBKDF2-SHA256(salt, iterations)--> KEK
+ *   KEK --AES-KW unwrap--> DEK
+ *   DEK --HKDF(info='JMBIJI-content-v1'/'JMBIJI-attach-v1')--> 内容/附件密钥
+ *   文件封装: 魔数(4B) + 版本(1B) + nonce(12B) + AES-256-GCM, AAD = 17B 文件头
+ *
+ * 纯逻辑函数全部定义在 DOM 之前且不触碰 DOM —— tests/recover.test.mjs
+ * 会把本段脚本抽出来在 Node 里直接跑,与浏览器实现交叉验证。
+ * ============================================================ */
+'use strict';
+
+const MAGIC_CAT = 'JMB1';
+const MAGIC_BLOB = 'JMBB';
+const VERIFIER_PLAIN = 'JMBIJI-verifier-v1';
+const HEADER_LEN = 17;
+const TAG_LEN = 16;
+const ITER_MAX = 8_000_000;
+
+const te = new TextEncoder();
+const td = new TextDecoder();
+
+/* ---------- 编码工具 ---------- */
+
+function b64ToBytes(s) {
+  const bin = atob(s);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function bytesToB64(bytes) {
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return btoa(s);
+}
+
+function fmtDate(ts) {
+  if (!Number.isFinite(ts)) return '未知时间';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+function fmtBytes(n) {
+  if (n < 1024) return `${n} B`;
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / 1048576).toFixed(2)} MB`;
+}
+
+/* ---------- ZIP 读(store + deflate,容错跳坏条目) ---------- */
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[i] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+async function inflateRaw(bytes) {
+  const ds = new DecompressionStream('deflate-raw');
+  const stream = new Blob([bytes]).stream().pipeThrough(ds);
+  const buf = await new Response(stream).arrayBuffer();
+  return new Uint8Array(buf);
+}
+
+/**
+ * 解包 zip。结构性损坏 → 抛错;单个条目解压/校验失败 → 跳过并记入 warnings。
+ * 兼容:自家导出的 store 包,以及别的工具重新压缩过的包(deflate)。
+ */
+async function readZipEntries(input) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (bytes.length < 22) throw new Error('文件太小,不是 zip');
+  const dv = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+
+  let eocd = -1;
+  const from = Math.max(0, bytes.length - 22 - 0xffff);
+  for (let i = bytes.length - 22; i >= from; i--) {
+    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  }
+  if (eocd < 0) throw new Error('不是 zip 文件(找不到结尾记录)');
+
+  const count = dv.getUint16(eocd + 10, true);
+  const cdSize = dv.getUint32(eocd + 12, true);
+  const cdOffset = dv.getUint32(eocd + 16, true);
+  if (cdOffset + cdSize > bytes.length) throw new Error('zip 结构损坏(中央目录越界)');
+
+  const out = [];
+  const warnings = [];
+  let p = cdOffset;
+
+  for (let i = 0; i < count; i++) {
+    if (p + 46 > bytes.length || dv.getUint32(p, true) !== 0x02014b50) {
+      throw new Error(`zip 结构损坏(第 ${i + 1} 个条目头不对)`);
+    }
+    const method = dv.getUint16(p + 10, true);
+    const crc = dv.getUint32(p + 16, true);
+    const csize = dv.getUint32(p + 20, true);
+    const nameLen = dv.getUint16(p + 28, true);
+    const extraLen = dv.getUint16(p + 30, true);
+    const commentLen = dv.getUint16(p + 32, true);
+    const localOff = dv.getUint32(p + 42, true);
+    const name = td.decode(bytes.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+
+    if (name.endsWith('/')) continue; // 目录条目:跳过(别的工具打包时会有)
+
+    if (localOff + 30 > bytes.length || dv.getUint32(localOff, true) !== 0x04034b50) {
+      warnings.push(`条目「${name}」本地头不对,已跳过`);
+      continue;
+    }
+    const lNameLen = dv.getUint16(localOff + 26, true);
+    const lExtraLen = dv.getUint16(localOff + 28, true);
+    const dataStart = localOff + 30 + lNameLen + lExtraLen;
+    if (dataStart + csize > bytes.length) {
+      warnings.push(`条目「${name}」数据越界,已跳过`);
+      continue;
+    }
+    let data;
+    if (method === 0) {
+      data = bytes.slice(dataStart, dataStart + csize);
+    } else if (method === 8) {
+      try {
+        data = await inflateRaw(bytes.slice(dataStart, dataStart + csize));
+      } catch {
+        warnings.push(`条目「${name}」解压失败,已跳过`);
+        continue;
+      }
+    } else {
+      warnings.push(`条目「${name}」压缩方式(${method})不支持,已跳过`);
+      continue;
+    }
+    if (crc32(data) !== crc) {
+      warnings.push(`条目「${name}」校验失败(内容损坏),已跳过`);
+      continue;
+    }
+    out.push({ name, bytes: data });
+  }
+  return { entries: out, warnings };
+}
+
+/* ---------- ZIP 写(store-only,与项目 zip.js 同格式) ---------- */
+
+function zipWriteEntries(entries) {
+  const SIG_LOCAL = 0x04034b50, SIG_CENTRAL = 0x02014b50, SIG_EOCD = 0x06054b50;
+  const FLAG_UTF8 = 0x0800;
+  const d = new Date();
+  const time = (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1);
+  const dDate = ((d.getFullYear() - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate();
+
+  const blobs = [];
+  const centrals = [];
+  let offset = 0;
+
+  for (const e of entries) {
+    const nameBytes = te.encode(e.name);
+    const data = e.bytes;
+    const crc = crc32(data);
+
+    const local = new Uint8Array(30 + nameBytes.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, SIG_LOCAL, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, FLAG_UTF8, true);
+    lv.setUint16(8, 0, true);
+    lv.setUint16(10, time, true);
+    lv.setUint16(12, dDate, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true);
+    lv.setUint32(22, data.length, true);
+    lv.setUint16(26, nameBytes.length, true);
+    lv.setUint16(28, 0, true);
+    local.set(nameBytes, 30);
+
+    const central = new Uint8Array(46 + nameBytes.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, SIG_CENTRAL, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, FLAG_UTF8, true);
+    cv.setUint16(10, 0, true);
+    cv.setUint16(12, time, true);
+    cv.setUint16(14, dDate, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, nameBytes.length, true);
+    cv.setUint16(42, offset, true);
+    central.set(nameBytes, 46);
+
+    blobs.push(local, data);
+    centrals.push(central);
+    offset += local.length + data.length;
+  }
+
+  const cdSize = centrals.reduce((n, c) => n + c.length, 0);
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, SIG_EOCD, true);
+  ev.setUint16(8, entries.length, true);
+  ev.setUint16(10, entries.length, true);
+  ev.setUint32(12, cdSize, true);
+  ev.setUint32(16, offset, true);
+
+  const total = offset + cdSize + 22;
+  const outBuf = new Uint8Array(total);
+  let off = 0;
+  for (const b of [...blobs, ...centrals, eocd]) { outBuf.set(b, off); off += b.length; }
+  return outBuf;
+}
+
+/* ---------- 加密原语 ---------- */
+
+async function deriveKekBytes(password, salt, iterations) {
+  const iters = Math.min(Math.max(1, Math.floor(iterations) || 1_000_000), ITER_MAX);
+  const base = await crypto.subtle.importKey('raw', te.encode(String(password)), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iters }, base, 256,
+  ));
+}
+
+function deriveSubkey(dekBytes, info) {
+  return crypto.subtle.importKey('raw', dekBytes, 'HKDF', false, ['deriveKey']).then((base) =>
+    crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: te.encode(info) },
+      base, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+    ));
+}
+
+function deriveContentKey(dekBytes) { return deriveSubkey(dekBytes, 'JMBIJI-content-v1'); }
+function deriveAttachKey(dekBytes) { return deriveSubkey(dekBytes, 'JMBIJI-attach-v1'); }
+
+async function openJmb(key, magic, fileBytes) {
+  if (!(fileBytes instanceof Uint8Array) || fileBytes.length < HEADER_LEN + TAG_LEN) {
+    throw new Error('文件过短或已截断');
+  }
+  const header = fileBytes.slice(0, HEADER_LEN);
+  if (td.decode(header.slice(0, 4)) !== magic) throw new Error('魔数不符(不是本应用的加密文件)');
+  if (fileBytes[4] !== 1) throw new Error(`不支持的格式版本:${fileBytes[4]}`);
+  const nonce = fileBytes.slice(5, HEADER_LEN);
+  const ct = fileBytes.slice(HEADER_LEN);
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: header, tagLength: 128 }, key, ct,
+    ));
+  } catch {
+    throw new Error('解密失败(密钥不符或密文被篡改)');
+  }
+}
+
+/**
+ * 用主密码解锁 vault.json → 裸 DEK。
+ * 密码不对 → 抛 Error('主密码不对…');结构坏 → 抛相应错误。
+ */
+async function unlockVaultJson(vaultJson, password) {
+  if (!vaultJson || typeof vaultJson !== 'object') throw new Error('vault.json 内容异常');
+  if (vaultJson.magic !== 'JMBIJI' || vaultJson.version !== 1) {
+    throw new Error('vault.json 魔数/版本不符,不是本应用的备份');
+  }
+  const kdf = vaultJson.kdf;
+  if (!kdf || kdf.name !== 'PBKDF2' || kdf.hash !== 'SHA-256' || typeof kdf.salt !== 'string') {
+    throw new Error('vault.json 的 KDF 参数不合法');
+  }
+  const wrap = vaultJson.wrap;
+  if (!wrap || wrap.alg !== 'AES-KW' || typeof wrap.wrappedDek !== 'string') {
+    throw new Error('vault.json 的密钥信封不合法');
+  }
+
+  const kekBytes = await deriveKekBytes(password, b64ToBytes(kdf.salt), kdf.iterations);
+  const kek = await crypto.subtle.importKey('raw', kekBytes, { name: 'AES-KW' }, false, ['unwrapKey']);
+  let dekKey;
+  try {
+    dekKey = await crypto.subtle.unwrapKey(
+      'raw', b64ToBytes(wrap.wrappedDek), kek,
+      { name: 'AES-KW' }, { name: 'AES-KW' },
+      true, ['unwrapKey'],
+    );
+  } catch {
+    throw new Error('主密码不对(AES-KW 解包失败)。密码是唯一钥匙,请确认大小写与字符。');
+  }
+  const dek = new Uint8Array(await crypto.subtle.exportKey('raw', dekKey));
+
+  // 校验块(老库可能没有,缺席则跳过):证明这把 DEK 确实是本库的
+  const verifier = vaultJson.verifier;
+  if (verifier && typeof verifier.nonce === 'string' && typeof verifier.ct === 'string') {
+    try {
+      const contentKey = await deriveContentKey(dek);
+      const plain = await openJmbRaw(contentKey, b64ToBytes(verifier.nonce), b64ToBytes(verifier.ct));
+      if (td.decode(plain) !== VERIFIER_PLAIN) throw new Error('校验块不符');
+    } catch {
+      throw new Error('主密码不对(校验块不符)。');
+    }
+  }
+  return dek;
+}
+
+/** 无文件头的裸 GCM(校验块用) */
+async function openJmbRaw(key, nonce, ct) {
+  return new Uint8Array(await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: new Uint8Array(0), tagLength: 128 }, key, ct,
+  ));
+}
+
+/* ---------- 备份包 → 明文 ---------- */
+
+function lenientNoteData(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.notes)) {
+    throw new Error('笔记数据结构异常');
+  }
+  return {
+    notes: raw.notes.filter((n) => n && typeof n === 'object'),
+    trash: Array.isArray(raw.trash) ? raw.trash.filter((t) => t && typeof t === 'object') : [],
+  };
+}
+
+/** 分类密文 → 单分类 .md 文本 */
+function categoryToMd(name, data) {
+  const lines = [`# ${name}`, ''];
+  for (const n of data.notes) {
+    lines.push(`## ${typeof n.title === 'string' && n.title ? n.title : '无标题'}`, '');
+    lines.push(`> 创建 ${fmtDate(n.createdAt)} · 更新 ${fmtDate(n.updatedAt)}`, '');
+    lines.push(typeof n.content === 'string' ? n.content : '', '', '---', '');
+  }
+  if (data.trash.length) {
+    lines.push('', `# 回收站（${data.trash.length} 篇）`, '');
+    for (const t of data.trash) {
+      lines.push(`## ${typeof t.title === 'string' && t.title ? t.title : '无标题'}`, '');
+      lines.push(`> 删除于 ${fmtDate(t.deletedAt)} · 更新 ${fmtDate(t.updatedAt)}`, '');
+      lines.push(typeof t.content === 'string' ? t.content : '', '', '---', '');
+    }
+  }
+  return lines.join('\n');
+}
+
+/** 附件导出名净化:去路径、去控制字符,保证能当 zip 条目名 */
+function sanitizeEntryName(name) {
+  let s = String(name || '').split(/[\\/]/).pop() || '';
+  let out = '';
+  for (const ch of s) {
+    const c = ch.charCodeAt(0);
+    if (c >= 0x20 && c !== 0x7f) out += ch;
+  }
+  out = out.trim();
+  if (!out || out === '.' || out === '..') out = '未命名';
+  return out.length > 120 ? out.slice(0, 120) : out;
+}
+
+/**
+ * 主流程:备份 zip 字节 + 主密码 → 全部明文。
+ * @returns {{vaultInfo:object, categories:{name,data}[], attachments:{name,bytes}[], failures:string[]}}
+ */
+async function decryptBackupPackage(zipBytes, password) {
+  const { entries, warnings } = await readZipEntries(zipBytes);
+  const byName = new Map(entries.map((e) => [e.name, e.bytes]));
+
+  const vaultRaw = byName.get('vault.json');
+  if (!vaultRaw) throw new Error('备份包里没有 vault.json —— 这不是本应用的备份包');
+  let vaultJson;
+  try {
+    vaultJson = JSON.parse(td.decode(vaultRaw));
+  } catch {
+    throw new Error('vault.json 不是合法 JSON,包已损坏');
+  }
+
+  const dek = await unlockVaultJson(vaultJson, password);
+  const contentKey = await deriveContentKey(dek);
+  const attachKey = await deriveAttachKey(dek);
+
+  const failures = [];
+  const categories = [];
+  for (const e of entries) {
+    if (!e.name.startsWith('cats/') || !e.name.endsWith('.enc')) continue;
+    const name = e.name.slice(5, -4);
+    try {
+      const plain = await openJmb(contentKey, MAGIC_CAT, e.bytes);
+      categories.push({ name, data: lenientNoteData(JSON.parse(td.decode(plain))) });
+    } catch (err) {
+      failures.push(`分类「${name}」:${err.message}`);
+    }
+  }
+
+  // 附件原名映射:笔记数据里的 attachments = [{file: 内容寻址名, name: 原名}]
+  const origNames = new Map();
+  for (const c of categories) {
+    for (const n of c.data.notes) {
+      if (!Array.isArray(n.attachments)) continue;
+      for (const a of n.attachments) {
+        if (a && typeof a.file === 'string' && typeof a.name === 'string'
+          && a.name && !origNames.has(a.file)) {
+          origNames.set(a.file, a.name);
+        }
+      }
+    }
+  }
+
+  const usedNames = new Set();
+  const attachments = [];
+  for (const e of entries) {
+    if (!e.name.startsWith('blobs/')) continue;
+    const file = e.name.slice(6);
+    try {
+      const bytes = await openJmb(attachKey, MAGIC_BLOB, e.bytes);
+      let base = sanitizeEntryName(origNames.get(file) || file);
+      const dotAt = base.lastIndexOf('.');
+      const stem = dotAt > 0 ? base.slice(0, dotAt) : base;
+      const ext = dotAt > 0 ? base.slice(dotAt) : '';
+      let finalName = base;
+      let i = 2;
+      while (usedNames.has(finalName)) finalName = `${stem}-${i++}${ext}`;
+      usedNames.add(finalName);
+      attachments.push({ name: finalName, bytes });
+    } catch (err) {
+      failures.push(`附件「${file}」:${err.message}`);
+    }
+  }
+
+  return { vaultInfo: vaultJson, categories, attachments, failures, warnings };
+}
+
+/** 结果 → 导出 zip 的条目列表(README + notes/*.md + 全量 JSON + attachments/*) */
+function buildExportEntries(result) {
+  const entries = [];
+  const dump = { exportedAt: new Date().toISOString(), tool: 'R2biji 应急解密', categories: {} };
+  for (const c of result.categories) {
+    dump.categories[c.name] = { notes: c.data.notes, trash: c.data.trash };
+    entries.push({ name: `notes/${sanitizeEntryName(c.name)}.md`, bytes: te.encode(categoryToMd(c.name, c.data)) });
+  }
+  entries.push({ name: 'notes/all-notes.json', bytes: te.encode(JSON.stringify(dump, null, 2)) });
+  for (const a of result.attachments) {
+    entries.push({ name: `attachments/${a.name}`, bytes: a.bytes });
+  }
+  const nMd = result.categories.length;
+  const nAtt = result.attachments.length;
+  entries.unshift({
+    name: 'README.txt',
+    bytes: te.encode(
+      `R2biji 应急解密导出包\n生成时间:${new Date().toLocaleString()}\n\n`
+      + `notes/            每个分类一个 .md(含回收站段),all-notes.json 为完整明文备底\n`
+      + `attachments/      附件,按笔记里的原始文件名命名\n\n`
+      + `共 ${nMd} 个分类、${nAtt} 个附件。本包内容为明文,请妥善保管。\n`,
+    ),
+  });
+  return entries;
+}
+
+/* ============================================================
+ * DOM 部分 —— Node 测试环境不存在 document,以下不参与纯逻辑导出
+ * ============================================================ */
+if (typeof document !== 'undefined') {
+  const $ = (id) => document.getElementById(id);
+  const drop = $('drop'), zipInput = $('zipInput'), summary = $('pkgSummary');
+  const pwd = $('pwd'), btnGo = $('btnGo'), errBox = $('err');
+  const results = $('results'), catList = $('catList'), failList = $('failList');
+  const warnList = $('warnList'), btnAll = $('btnAll'), btnReset = $('btnReset');
+  const doneTag = $('doneTag');
+
+  let state = { zipBytes: null, result: null };
+
+  function showErr(msg) {
+    errBox.textContent = msg || '';
+    errBox.style.display = msg ? 'block' : 'none';
+  }
+
+  function download(name, bytes, type) {
+    const blob = new Blob([bytes], { type: type || 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
+  }
+
+  function stamp() {
+    const d = new Date();
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+  }
+
+  function reset() {
+    state = { zipBytes: null, result: null };
+    summary.style.display = 'none';
+    summary.innerHTML = '';
+    results.style.display = 'none';
+    catList.innerHTML = '';
+    failList.innerHTML = '';
+    warnList.innerHTML = '';
+    doneTag.textContent = '';
+    btnGo.disabled = true;
+    pwd.value = '';
+    showErr('');
+  }
+
+  async function loadZip(file) {
+    reset();
+    if (!file) return;
+    try {
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const { entries, warnings } = await readZipEntries(buf);
+      const hasVault = entries.some((e) => e.name === 'vault.json');
+      const cats = entries.filter((e) => e.name.startsWith('cats/') && e.name.endsWith('.enc'));
+      const blobs = entries.filter((e) => e.name.startsWith('blobs/'));
+      const total = buf.length;
+      if (!hasVault) {
+        showErr('这个 zip 里没有 vault.json —— 不是本应用的备份包。请确认拿的是「全库备份」导出的 zip。');
+        return;
+      }
+      state.zipBytes = buf;
+      btnGo.disabled = false;
+      const iters = (() => {
+        try { return JSON.parse(td.decode(entries.find((e) => e.name === 'vault.json').bytes)).kdf?.iterations; }
+        catch { return '?'; }
+      })();
+      summary.innerHTML = `<table>
+        <tr><td>备份包</td><td>${sanitizeEntryName(file.name)} · ${fmtBytes(total)}</td></tr>
+        <tr><td>分类(密文)</td><td>${cats.length} 个</td></tr>
+        <tr><td>附件(密文)</td><td>${blobs.length} 个</td></tr>
+        <tr><td>PBKDF2 迭代</td><td>${typeof iters === 'number' ? iters.toLocaleString() : iters}</td></tr>
+      </table>`;
+      summary.style.display = 'block';
+      if (warnings.length) {
+        warnList.innerHTML = warnings.map((w) => `<li>${w}</li>`).join('');
+      }
+      pwd.focus();
+    } catch (e) {
+      showErr(e.message);
+    }
+  }
+
+  async function decryptAll() {
+    if (!state.zipBytes) return;
+    const password = pwd.value;
+    if (!password) { showErr('请先输入主密码'); return; }
+    showErr('');
+    btnGo.disabled = true;
+    btnGo.textContent = '解密中…(PBKDF2 需要一两秒)';
+    try {
+      state.result = await decryptBackupPackage(state.zipBytes, password);
+      renderResults();
+    } catch (e) {
+      showErr(e.message);
+    } finally {
+      btnGo.disabled = false;
+      btnGo.textContent = '解密全部';
+    }
+  }
+
+  function renderResults() {
+    const r = state.result;
+    catList.innerHTML = '';
+    let nNotes = 0;
+    let nTrash = 0;
+    for (const c of r.categories) {
+      nNotes += c.data.notes.length;
+      nTrash += c.data.trash.length;
+      const row = document.createElement('div');
+      row.className = 'cat-row';
+      row.innerHTML = `<span class="name"></span>
+        <span class="meta">${c.data.notes.length} 篇${c.data.trash.length ? ` · 回收站 ${c.data.trash.length}` : ''}</span>
+        <button class="btn" type="button">下载 .md</button>`;
+      row.querySelector('.name').textContent = c.name;
+      row.querySelector('button').addEventListener('click', () => {
+        download(`${sanitizeEntryName(c.name)}.md`, te.encode(categoryToMd(c.name, c.data)), 'text/markdown');
+      });
+      catList.appendChild(row);
+    }
+    if (!r.categories.length) {
+      catList.innerHTML = '<p class="hint">包里没有分类文件。</p>';
+    }
+    failList.innerHTML = r.failures.length
+      ? `<b style="font-size:13px">以下条目解密失败(其余不受影响):</b><ul class="warn-list">${r.failures.map((f) => `<li>${f}</li>`).join('')}</ul>`
+      : '';
+    warnList.innerHTML = (r.warnings || []).length
+      ? r.warnings.map((w) => `<li>${w}</li>`).join('')
+      : '';
+    doneTag.textContent = `共 ${nNotes} 篇笔记${nTrash ? `、回收站 ${nTrash} 篇` : ''}、${r.attachments.length} 个附件`;
+    results.style.display = 'block';
+  }
+
+  drop.addEventListener('click', () => zipInput.click());
+  zipInput.addEventListener('change', () => loadZip(zipInput.files[0]));
+  drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+  drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+  drop.addEventListener('drop', (e) => {
+    e.preventDefault();
+    drop.classList.remove('over');
+    loadZip(e.dataTransfer.files[0]);
+  });
+  btnGo.addEventListener('click', decryptAll);
+  pwd.addEventListener('keydown', (e) => { if (e.key === 'Enter') decryptAll(); });
+  btnAll.addEventListener('click', () => {
+    if (!state.result) return;
+    const entries = buildExportEntries(state.result);
+    download(`R2biji明文_${stamp()}.zip`, zipWriteEntries(entries), 'application/zip');
+  });
+  btnReset.addEventListener('click', reset);
+}
+/*RECOVER-SCRIPT-END*/
+</script>
+</body>
+</html>
