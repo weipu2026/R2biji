@@ -415,7 +415,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 /* ---------- 内容区 ---------- */
 
-.content { flex: 1; min-width: 0; overflow-y: auto; position: relative; }
+.content {
+  flex: 1; min-width: 0; overflow-y: auto; position: relative;
+  border-left: 1px solid var(--edge); /* 与侧栏之间补一道结构分界,浅色下清晰可辨 */
+}
 
 .empty {
   height: 100%;
@@ -427,10 +430,15 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   font-size: 14px;
 }
 
+/* 写作/阅读面板:做成带边框的「纸面」卡片,写作栏边界一眼可辨(明暗两套都成立) */
 #readView, #editView {
   max-width: 860px;
-  margin: 0 auto;
-  padding: 28px 36px 60px;
+  margin: 22px auto 44px;
+  padding: 26px 34px 34px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 12px;
+  box-shadow: var(--shadow);
 }
 
 .read-head {
@@ -686,6 +694,7 @@ mark { background: var(--mark-bg); border-radius: 3px; padding: 0 2px; }
 
   .read-body { padding: 16px 14px; }
   .edit-body { min-height: 40vh; }
+  #readView, #editView { margin: 12px 10px 26px; padding: 18px 16px 24px; }
   .lock-card { margin: 16px; padding: 22px 18px; }
   .toast { left: 12px; right: 12px; transform: none; }
 }
