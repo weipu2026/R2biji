@@ -176,7 +176,12 @@ export class Library {
   async deleteCategory(name) {
     const cat = this.categories.get(name);
     if (!cat) throw new LibraryError(`分类不存在:${name}`, 'missing');
-    await API.deleteCat(name); // 服务器在删除前自动备份
+    // 条件删除:带上本地见过的 etag。没打开过的分类没有 etag,先拉一次 ——
+    // 删除本来就该基于当前版本,否则竞态下会把别的设备刚保存的新版静默删掉
+    if (!cat.lastSeenEtag) {
+      try { await this.loadCategory(name); } catch { /* 读不出来也要给用户删的机会(不带条件删) */ }
+    }
+    await API.deleteCat(name, cat.lastSeenEtag); // 服务器删除前自动备份;412 = 刚被其他设备改过,上层如实提示
     this.categories.delete(name);
   }
 
@@ -294,24 +299,40 @@ export class Library {
       bytes: new TextEncoder().encode(JSON.stringify(vault.json, null, 2)),
     }];
     let done = 0;
+    let nCats = 0;
+    let nBlobs = 0;
     const step = (label) => onProgress({ done, total, label });
+    // 小并发池:纯串行在大库里太慢,全并发又会挤爆连接;4 路刚刚好
+    const pool = async (items, worker) => {
+      let i = 0;
+      await Promise.all(Array.from({ length: Math.min(4, items.length) }, async () => {
+        while (i < items.length) await worker(items[i++]);
+      }));
+    };
 
-    for (const c of cats) {
+    await pool(cats, async (c) => {
       const got = await API.getCat(c.name);
-      if (!got) continue; // 导出期间被别的设备删了:跳过,不编造
+      if (!got) return; // 导出期间被别的设备删了:跳过,不编造
       entries.push({ name: `cats/${c.name}.enc`, bytes: got.bytes });
+      nCats += 1;
       done += got.bytes.length;
       step(`cats/${c.name}.enc`);
-    }
-    for (const b of blobs) {
+    });
+    await pool(blobs, async (b) => {
       const bytes = await API.getBlob(b.name);
-      if (!bytes) continue;
+      if (!bytes) return;
       entries.push({ name: `blobs/${b.name}`, bytes });
+      nBlobs += 1;
       done += bytes.length;
       step(`blobs/${b.name}`);
-    }
+    });
 
-    return { bytes: zipStore(entries), counts: { cats: cats.length, blobs: blobs.length, bytes: total } };
+    // counts 必须是**实际写入包里的数量**,不是计划值:导出途中被删的对象会
+    // 静默缺席,报计划值会让用户以为包里有其实没有的东西
+    return {
+      bytes: zipStore(entries),
+      counts: { cats: nCats, blobs: nBlobs, bytes: done + entries[0].bytes.length },
+    };
   }
 
   /**

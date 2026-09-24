@@ -41,15 +41,23 @@ export function saveAccessKey(key) {
 
 /* ---------------- 请求原语 ---------------- */
 
+/** 请求超时。取值要容得下最慢一档(50MB 附件上传在慢网络下可能要几十秒)。 */
+const REQUEST_TIMEOUT_MS = 120_000;
+
 async function req(path, { method = 'GET', body = null, headers = {} } = {}) {
   const h = { ...headers };
   if (token) h.Authorization = `Bearer ${token}`;
   if (accessKey) h['X-Access-Key'] = accessKey;
   let res;
   try {
-    res = await fetch(path, { method, headers: h, body });
+    res = await fetch(path, { method, headers: h, body, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch (e) {
     throw new ApiError(`无法连接服务器:${e.message}`, 0, 'network');
+  }
+  if (res.status === 429) {
+    // 服务端限流响应带 retry-after;以前被丢弃,用户只看到干巴巴的失败
+    const after = Number(res.headers.get('retry-after') || 0);
+    throw new ApiError(after > 0 ? `请求过于频繁,请 ${after} 秒后再试` : '请求过于频繁,请稍后再试', 429, 'rate-limited');
   }
   if (res.status === 401) {
     // 读一次响应体区分「访问密钥缺失」与「解锁令牌失效」
@@ -100,6 +108,10 @@ export async function createVaultJson(jsonText) {
 
 /** 改主密码:覆盖 vault.json,带 CAS */
 export async function putVaultJson(jsonText, etag) {
+  if (!etag) {
+    // 空 etag 会拼出 If-Match: "" → 服务端恒 428/412,报错误导;提前拦下并说人话
+    throw new ApiError('vault 版本信息缺失,请刷新页面重新解锁后再试', 0, 'need-refresh');
+  }
   const res = await req('/api/vault', { method: 'PUT', body: jsonText, headers: { 'if-match': `"${etag}"`, 'content-type': 'application/json' } });
   if (res.status === 412) throw new ApiError('vault.json 已被其他会话修改,请重新解锁', 412, 'conflict');
   if (!res.ok) throw await errFrom(res);
@@ -137,8 +149,11 @@ export async function putCat(name, bytes, { etag = null, createOnly = false } = 
   return out;
 }
 
-export async function deleteCat(name) {
-  const res = await req(`/api/cat?key=${encodeURIComponent(name)}`, { method: 'DELETE' });
+/** 删除分类。etag = 本地见过的版本 → If-Match 条件删除(412 = 刚被其他设备改过) */
+export async function deleteCat(name, etag = null) {
+  const headers = {};
+  if (etag) headers['if-match'] = `"${etag}"`;
+  const res = await req(`/api/cat?key=${encodeURIComponent(name)}`, { method: 'DELETE', headers });
   if (!res.ok && res.status !== 404) throw await errFrom(res);
 }
 

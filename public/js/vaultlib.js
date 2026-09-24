@@ -105,7 +105,9 @@ export async function unlockVault(json, password) {
  *   调用方必须同步更新内存中的 Bearer 令牌,否则后续所有请求 401。 */
 export async function rewrapVault(json, dekBytes, newPassword) {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iterations = clampIterations(json.kdf.iterations);
+  // 改密码是免费的安全升级点:旧库迭代次数偏弱(低于当前默认)时顺手升到默认;
+  // 旧库本来就更高则保留(只加码,绝不降级)。反正盐要换、KEK 要重派生,零额外成本。
+  const iterations = Math.max(clampIterations(json.kdf.iterations), PBKDF2_ITERATIONS_DEFAULT);
   const kekBytes = await deriveKekBytes(newPassword, salt, iterations);
   const kek = await importKekBytes(kekBytes);
   const wrappedDek = await wrapDek(dekBytes, kek);
@@ -139,6 +141,8 @@ export function normalizeNoteData(raw) {
   }
   const now = Date.now();
   const notes = raw.notes.map((n, i) => ({
+    // 先铺开原对象:多端版本不同步时,新版本加的可选字段不得在白名单重建中丢失
+    ...(n && typeof n === 'object' && !Array.isArray(n) ? n : {}),
     id: typeof n?.id === 'string' && n.id ? n.id : newNoteId(i),
     title: typeof n?.title === 'string' ? n.title : '无标题',
     content: typeof n?.content === 'string' ? n.content : '',
@@ -179,9 +183,10 @@ export async function decryptCategory(contentKey, fileBytes) {
 export async function blobFileNameFor(filenameKey, originalBytes, originalName) {
   const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', originalBytes));
   const mac = await hmacBytes(filenameKey, digest);
-  const dot = originalName.lastIndexOf('.');
-  const ext = dot > 0 ? originalName.slice(dot).slice(0, 12) : '';
-  return bytesToB64url(mac) + ext;
+  // 扩展名必须过服务端的白名单正则([A-Za-z0-9]{1,12}):「攻略.最终版」这类
+  // 原名以前会把非法扩展名带进 blob 名,上传在服务端 400 必失败。不合法就干脆不带。
+  const m = /\.([A-Za-z0-9]{1,12})$/.exec(originalName || '');
+  return bytesToB64url(mac) + (m ? m[0] : '');
 }
 
 export async function encryptBlob(attachKey, originalBytes) {

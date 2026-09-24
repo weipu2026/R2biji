@@ -145,3 +145,39 @@ test('dekMatchesVault:只认与这份 vault.json 配对的 DEK', async () => {
   assert.equal(await dekMatchesVault(a.json, null), false);
   assert.equal(await dekMatchesVault(a.json, new Uint8Array(8)), false);
 });
+
+/* ---------- 本轮审计修复的回归 ---------- */
+
+test('改主密码:迭代次数只加码不降级 —— 偏弱库升到默认,更高的保留', async () => {
+  const low = await createVault('低迭代密码123', ITER); // 1000 次
+  const { json } = await rewrapVault(low.json, low.dek, '新密码abc123');
+  assert.equal(json.kdf.iterations, PBKDF2_ITERATIONS_DEFAULT, '偏弱库改密码时必须免费升到默认迭代次数');
+  assert.equal((await unlockVault(json, '新密码abc123')).ok, true, '新参数必须能真实解锁');
+
+  const high = await createVault('高迭代密码123', 2_000_000);
+  const { json: j2 } = await rewrapVault(high.json, high.dek, '换个密码123');
+  assert.equal(j2.kdf.iterations, 2_000_000, '旧库本来就更高时保留,绝不降级');
+});
+
+test('blobFileNameFor:扩展名必须过服务端白名单,非法就干脆不带', async () => {
+  const { dek } = await createVault('pw123456', ITER);
+  const { filenameKey } = await deriveAllKeys(dek);
+  const img = new Uint8Array([1, 2, 3, 4]);
+  // 服务端 BLOB_NAME_RE:/^[A-Za-z0-9_-]{43}(\.[A-Za-z0-9]{1,12})?$/
+  // 「攻略.最终版」这类原名以前会带出非法扩展名,上传在服务端 400 必失败
+  for (const name of ['攻略.最终版', '图.png ', 'file.abcdefghijklmnopqrstuvwxyz', '无扩展名']) {
+    const n = await blobFileNameFor(filenameKey, img, name);
+    assert.match(n, /^[A-Za-z0-9_-]{43}(\.[A-Za-z0-9]{1,12})?$/, `「${name}」产出的 blob 名必须能过服务端校验(实际 ${n})`);
+  }
+  const png = await blobFileNameFor(filenameKey, img, '截图.png');
+  assert.ok(png.endsWith('.png'), '合法扩展名应当保留');
+});
+
+test('normalizeNoteData:未知字段保留(多端版本不同步时不丢数据)', () => {
+  const out = normalizeNoteData({ notes: [{ id: 'n1', title: 't', content: 'c', futureField: { x: 1 } }] });
+  assert.deepEqual(out.notes[0].futureField, { x: 1 }, '白名单重建不得丢掉新版本加的可选字段');
+  // 原条目不是对象时不得炸(spread 有防护)
+  const out2 = normalizeNoteData({ notes: ['字符串', 42, null] });
+  assert.equal(out2.notes.length, 3);
+  assert.ok(out2.notes.every((n) => typeof n.id === 'string' && n.id));
+});
