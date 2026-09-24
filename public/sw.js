@@ -7,7 +7,7 @@
  *      本 SW 是 cache-first 的,而浏览器只在 sw.js 这个文件本身变化时才重新安装;
  *      不升版本号 → 老用户永远拿到旧缓存里的 js,表现为「部署了但界面没变」。
  */
-const CACHE = 'jmbiji-v11';
+const CACHE = 'jmbiji-v12';
 const ASSETS = [
   './',
   './index.html',

@@ -4,11 +4,13 @@
  * 安全边界(DESIGN.md §7.3):
  *   - 全程 createElement/createTextNode,零 innerHTML
  *   - 不解析链接、不解析任何 HTML → 无执行面
- *   支持:#/##/### 标题、**加粗**、==高亮==、`行内代码`、
- *         ``` 代码块、- 无序列表、1. 有序列表
+ *   支持:#/##/### 标题、**加粗**、*斜体*、~~删除线~~、==高亮==、
+ *         `行内代码`、``` 代码块、- 无序列表、1. 有序列表
  * ============================================================ */
 
-const INLINE_RE = /(\*\*([^*\n]+)\*\*)|(==([^=\n]+)==)|(`([^`\n]+)`)/g;
+/* 交替顺序即优先级:**粗** 必须先于 *斜*(否则双星会被拆成两个单星);
+ * 故意不做 _下划线_ 斜体 —— 中文语境下划线常见于 snake_case,误伤面太大 */
+const INLINE_RE = /(\*\*([^*\n]+)\*\*)|(==([^=\n]+)==)|(`([^`\n]+)`)|(~~([^~\n]+)~~)|(\*([^*\n]+)\*)/g;
 
 /** 行内标记:把一段文本按 **粗** / ==高亮== / `码` 切分并构建节点 */
 export function renderInline(parent, text) {
@@ -25,6 +27,14 @@ export function renderInline(parent, text) {
       const mark = document.createElement('mark');
       mark.textContent = m[4];
       parent.appendChild(mark);
+    } else if (m[7] !== undefined) {
+      const del = document.createElement('del');
+      del.textContent = m[8];
+      parent.appendChild(del);
+    } else if (m[9] !== undefined) {
+      const em = document.createElement('em');
+      em.textContent = m[10];
+      parent.appendChild(em);
     } else {
       const code = document.createElement('code');
       code.textContent = m[6];

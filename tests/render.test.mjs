@@ -93,6 +93,20 @@ test('renderInline:相邻标记、无标记纯文本', () => withDom(() => {
     ['a', 'strong', 'c', 'mark', 'e', 'code', 'g']);
 }));
 
+test('renderMarkdown:斜体与删除线(单星/双波浪)', () => withDom(() => {
+  const md = renderMarkdown('*斜*和~~删~~\n');
+  const p = md.children[0];
+  assert.deepEqual(p.children.map((c) => c.tag || c._text), ['em', '和', 'del']);
+}));
+
+test('renderInline:双星优先于单星,不成对单星保持纯文本', () => withDom(() => {
+  const parent = new FakeNode('p');
+  renderInline(parent, '**粗**与*斜*与2*3+4');
+  assert.deepEqual(parent.children.map((c) => c.tag || c._text),
+    ['strong', '与', 'em', '与2*3+4'],
+    '双星必须整体匹配;落单的 * 不能被吃进任何标记');
+}));
+
 test('highlightInto:大小写不敏感、多命中、拼接无损', () => withDom(() => {
   const parent = new FakeNode('div');
   highlightInto(parent, 'AbC abc XYZ', 'abc');

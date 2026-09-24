@@ -242,21 +242,32 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* 编辑器轻工具栏(Markdown 快捷插入) */
 .ed-tools {
   display: flex;
-  gap: 4px;
+  align-items: center;
+  gap: 3px;
   flex-wrap: wrap;
-  padding: 8px 0 2px;
+  padding: 6px 0 8px;
+  border-bottom: 1px dashed var(--border); /* 与正文区分隔 */
+  margin-bottom: 4px;
 }
 .ed-btn {
   border: 1px solid transparent;
   background: transparent;
   border-radius: 6px;
-  min-width: 32px;
+  min-width: 30px;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 7px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 13.5px;
 }
 .ed-btn:hover { background: var(--hover-weak); color: var(--text); border-color: var(--border); }
+/* 按钮字形即功能示意:B 粗、I 斜、S 删除线、H1-3 字重递减(=md 标题层级) */
+.ed-btn[data-wrap="**"] { font-weight: 700; }
+.ed-btn[data-wrap="*"] { font-style: italic; font-family: Georgia, serif; }
+.ed-btn[data-wrap="~~"] { text-decoration: line-through; }
+.ed-btn[data-prefix="# "] { font-weight: 700; }
+.ed-btn[data-prefix="## "] { font-weight: 600; }
+.ed-btn[data-prefix="### "] { font-weight: 500; }
+.ed-sep { width: 1px; height: 16px; background: var(--border-strong); margin: 0 5px; }
 
 /* ---------- 顶栏 ---------- */
 

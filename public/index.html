@@ -120,13 +120,19 @@
           <input id="editTitle" class="edit-title" placeholder="标题" aria-label="笔记标题" autocomplete="off">
           <div class="ed-tools" id="edTools" role="toolbar" aria-label="Markdown 快捷插入">
             <button type="button" class="ed-btn" data-wrap="**" title="加粗" aria-label="加粗">B</button>
+            <button type="button" class="ed-btn" data-wrap="*" title="斜体" aria-label="斜体">I</button>
+            <button type="button" class="ed-btn" data-wrap="~~" title="删除线" aria-label="删除线">S</button>
+            <span class="ed-sep" aria-hidden="true"></span>
+            <button type="button" class="ed-btn" data-prefix="# " title="一级标题(大字)" aria-label="一级标题">H1</button>
+            <button type="button" class="ed-btn" data-prefix="## " title="二级标题(中字)" aria-label="二级标题">H2</button>
+            <button type="button" class="ed-btn" data-prefix="### " title="三级标题(小字)" aria-label="三级标题">H3</button>
+            <span class="ed-sep" aria-hidden="true"></span>
             <button type="button" class="ed-btn" data-wrap="==" title="高亮" aria-label="高亮">H</button>
             <button type="button" class="ed-btn" data-wrap="`" title="行内代码" aria-label="行内代码">‹›</button>
-            <button type="button" class="ed-btn" data-prefix="# " title="标题行" aria-label="标题行">#</button>
             <button type="button" class="ed-btn" data-prefix="- " title="列表行" aria-label="列表行">≡</button>
           </div>
           <textarea id="editBody" class="edit-body" spellcheck="false" aria-label="笔记正文"
-            placeholder="正文…&#10;支持:# 标题 · **加粗** · ==高亮== · `行内代码` · 三个反引号代码块 · - 列表"></textarea>
+            placeholder="正文…&#10;Markdown:# 标题 · **加粗** · *斜体* · ~~删除线~~ · ==高亮== · `代码` · - 列表"></textarea>
           <div class="edit-foot">
             <button id="btnAddAtt" class="btn ghost small">添加图片</button>
             <input id="attInput" type="file" accept="image/*" multiple hidden>
