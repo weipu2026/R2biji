@@ -53,8 +53,8 @@
         <input id="searchBox" type="search" placeholder="搜索标题与正文…(Ctrl+K)" aria-label="搜索标题与正文" autocomplete="off">
       </div>
       <span id="saveStatus" class="save-status" data-kind="ok">–</span>
-      <button id="btnTheme" class="icon-btn" title="切换为深色" aria-label="切换为深色">☾</button>
-      <button id="btnLock" class="btn ghost small">锁定</button>
+      <button id="btnTheme" class="top-theme" title="切换为深色" aria-label="切换为深色">☾</button>
+      <button id="btnLock" class="btn small" title="锁定并清除本机密钥" aria-label="锁定"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>锁定</button>
     </header>
 
     <div id="sideBackdrop" class="side-backdrop" hidden></div>
@@ -73,7 +73,6 @@
             <span id="activeCatName">未选择分类</span>
             <span class="side-head-btns">
               <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)" aria-label="重命名分类">✎</button>
-              <button id="btnDelCat" class="icon-btn danger" title="删除分类" aria-label="删除分类">✕</button>
               <button id="btnAddNote" class="icon-btn primary" title="新建笔记" aria-label="新建笔记">＋</button>
             </span>
           </div>
@@ -94,6 +93,7 @@
             <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg></button>
             <button id="btnImport" class="icon-btn foot-icon" title="从备份恢复" aria-label="从备份恢复"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg></button>
             <button id="btnCleanBlobs" class="icon-btn foot-icon" title="清理未引用图片" aria-label="清理未引用图片"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg></button>
+            <button id="btnDelCat" class="icon-btn foot-icon danger" title="删除当前分类(需二次确认,删除前自动备份)" aria-label="删除当前分类"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg></button>
           </div>
           <input id="importInput" type="file" accept=".zip,application/zip" hidden>
         </div>
@@ -136,8 +136,9 @@
           <div class="edit-foot">
             <button id="btnAddAtt" class="btn ghost small">添加图片</button>
             <input id="attInput" type="file" accept="image/*" multiple hidden>
-            <span class="edit-hint">改动先存内存;Ctrl+S 或 5 分钟后保存到云端</span>
-            <button id="btnDone" class="btn primary small">完成</button>
+            <span class="edit-hint">Ctrl+S 或点「保存」立即上传;不操作也会在 5 分钟后自动保存</span>
+            <button id="btnSaveNow" class="btn primary small">保存</button>
+            <button id="btnDone" class="btn small">完成</button>
           </div>
           <div id="editAtts" class="edit-atts"></div>
         </section>

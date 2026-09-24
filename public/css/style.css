@@ -328,6 +328,30 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .save-status[data-kind="busy"] { color: var(--accent); }
 .save-status[data-kind="error"] { color: var(--danger); }
 
+/* 顶栏常驻按钮明显化:日夜切换给边框圆钮,锁定给实体按钮 + 锁形图标 */
+.top-theme {
+  border: 1px solid var(--border);
+  background: var(--panel);
+  border-radius: 50%;
+  width: 30px; height: 30px;
+  line-height: 1;
+  font-size: 15px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+.top-theme:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-weak); }
+#btnLock {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: var(--accent);
+  border-color: var(--accent-weak);
+  background: var(--accent-weak);
+}
+#btnLock:hover { border-color: var(--accent); background: var(--accent-weak); }
+#btnLock svg { display: block; }
+
 /* ---------- 布局 ---------- */
 
 .layout { flex: 1; display: flex; min-height: 0; }
@@ -391,6 +415,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 /* 内联矢量图标:块级显示防 baseline 空隙,描边继承 currentColor */
 .foot-icon svg { display: block; margin: 0 auto; }
+/* 危险类图标(删除当前分类):悬停才变红,平时与普通图标无异,不勾引误碰 */
+.foot-icon.danger:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-weak); }
 
 /* ---------- 分类 / 笔记列表 ---------- */
 

@@ -619,7 +619,10 @@ async function renameCategory() {
 }
 
 async function deleteCategory() {
-  if (!S.activeCat) return;
+  if (!S.activeCat) {
+    toast('先选择一个要删除的分类', 'warn');
+    return;
+  }
   const yes = await modal({
     type: 'confirm', danger: true,
     title: `删除分类「${S.activeCat}」`,
@@ -1330,6 +1333,11 @@ function bindEvents() {
   $('btnAddNote').addEventListener('click', addNote);
   $('btnEdit').addEventListener('click', enterEditMode);
   $('btnDone').addEventListener('click', exitEditMode);
+  // 显式保存:先把输入框里的内容收进内存态,再走与 Ctrl+S 同一条上传流水线
+  $('btnSaveNow').addEventListener('click', () => {
+    collectEditChanges();
+    saveAll();
+  });
   $('btnCopyAll').addEventListener('click', copyWholeNote);
   $('btnDelNote').addEventListener('click', deleteNote);
   $('btnAddAtt').addEventListener('click', () => $('attInput').click());
