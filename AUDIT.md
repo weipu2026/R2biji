@@ -444,3 +444,75 @@ DESIGN 已知限制同步。
 | 真机(导入) | 把该包喂回应用 → 「跳过已存在 2,图片 +0」,**一个都没覆盖**,正在编辑的内容原样还在 |
 | 真机(同步) | 应用内新建分类 → 旁听通道收到 `{"type":"cats-changed"}`;干净态收 `cat-saved` → 自动重载;有未保存改动收同一条 → **只警告,编辑框内容仍在** |
 | 静态接线 | 45 个元素 id 与 `index.html` 一一对应,无重复、无遗漏 |
+
+## 第 18 轮:外部审计修复(2026-09-24)
+
+针对一轮独立全库审计(Worker / 加密层 / 前端 UI / 渲染与测试四路并行)的修复记录。
+审计结论:**无 P0** —— 密码学组合、零 innerHTML、CAS 边界、fail-closed 门等既有承诺全部成立;
+但 120 项测试的覆盖缝里藏着 3 个 P1 与一批 P2/P3,本轮全部修复(「报告里说过的」不重复记录)。
+
+### P1(真 BUG,已逐条对过原文)
+
+1. **modal() 的 Esc 挂起**:Promise 只靠按钮/回车落定,原生 `showModal` 下按 Esc 直接关掉
+   dialog → `await modal()` 永久挂起。保存冲突弹窗按 Esc 曾把 `S.saving` 卡成恒 true,
+   Ctrl+S/自动保存/锁定前保存全部静默失效;boot 的访问密钥弹窗按 Esc 则页面永久卡锁屏。
+   现以 `cancel` + `close` 事件 + `settled` 守卫兜底,Esc 等价「取消」。
+2. **renameCategory 丢脏标记**:改名后 `S.dirty` 里还是旧名,未保存改动脱离保存队列,
+   锁定/刷新后无提示丢失。现在脏标记跟随搬到新名(重命名只换键名,本地数据仍是最新)。
+3. **lockNow 毁掉用户选择保留的改动**:冲突弹窗选「留待稍后」后照样 `S.dirty.clear()`。
+   现在锁定前若仍有未保存改动,先弹确认(放弃并锁定 / 暂不锁定);远端锁定(另一标签页
+   已结束会话)不问。「锁定必毁明文」的安全不变量保持:确认文案明说会放弃改动。
+
+### P2(并发与安全面)
+
+4. **鉴权前不读请求体**:适配层先 `arrayBuffer()` 全量读入再过门,未认证请求也能打满
+   isolate 内存。现在传惰性取体函数,鉴权通过后才物化;PUT/POST 缺 Content-Length 一律
+   411(chunked 绕过长度预检的口子一并封掉)。
+5. **条件删除**:DELETE /api/cat 支持 If-Match(head 比对),不符 412;前端删除带本地 etag,
+   没打开过的分类先补拉一次。以前设备 A 能把设备 B 刚保存的新版静默删掉。
+6. **备份失败不连累主操作**:writeBackup 包 try/catch 只记日志 —— 主数据 CAS 已成功时,
+   备份异常曾把整个请求拖成 5xx,客户端拿旧 etag 重试恒 412(死循环)。
+7. **顶层 catch**:handleApiRequest 兜底返回结构化 500,不再让平台吐裸 1101 错误页。
+8. **openCategory / runSearch 序号守卫**:慢请求后到不再覆盖用户后选的分类/新查询的结果。
+9. **冲突「用我的版本覆盖」失败**:force 保存抛错时把分类放回 dirty,不再脱离保存队列。
+10. **addAttachments 竞态**:上传途中 `cat.data` 被另一标签页换掉时,把已入库附件合并进
+    最新数据对象,不再对旧引用解引用(TypeError、附件引用悬空)。
+11. **改主密码升级 KDF 迭代**:rewrapVault 取 max(旧值, 当前默认) —— 偏弱库免费加码,
+    只升不降(反正盐要换、KEK 要重派生,零额外成本)。
+12. **键盘可达**:分类/笔记/搜索结果 Tab 聚焦 + Enter/空格触发;全部表单控件与图标按钮补
+    aria-label。
+13. **SW 混合态**:skipWaiting + claim 后 controllerchange 时刷新对齐(首次安装不刷)。
+14. **移动端**:100dvh、safe-area-inset(侧栏底部按钮/toasts 不再被小白条遮)、
+    viewport-fit=cover、hover:none 下操作按钮常显。
+
+### P3(择要)
+
+- addNote 忙态守卫 + try/catch(分类加载失败曾是无提示的 unhandled rejection;双击造两条);
+- toggleAttachmentImage 双击竞态守卫;
+- exportBackup 的 counts 改报**实际写入值**(以前报计划值,途中被删的对象会虚报)并加 4 路并发池;
+- putVaultJson 防空 etag(以前拼出 `If-Match: ""` 恒 428 报错误导);请求 120s 超时;
+  429 透出 retry-after;
+- blobFileNameFor 扩展名过服务端白名单正则(「攻略.最终版」这类原名上传曾必 400);
+- normalizeNoteData 保留未知字段(多端版本不同步时白名单重建不丢数据);
+- 空白正文预览显示「(空)」;collectEditChanges 死变量;renderCategoryList 重复查询;
+- gen-config 与 deploy.yml 双重拒绝 ACCESS_KEY 首尾空白(粘贴带空格曾致全站恒 401 且报错误导);
+- HSTS 加 includeSubDomains;
+- tests/deploy.test.mjs 归一 CRLF —— Windows(`core.autocrlf=true`)检出下曾必挂
+  「没能定位 on: 触发器块」而 CI(Linux LF)能过。
+
+### 明确不修(记录取舍)
+
+- **apple-touch-icon**:需要真实 PNG 资源,离线无法高保真生成;SVG 图标 + manifest 已覆盖
+  Android/桌面,iOS 添加主屏时降级为截图图标,待有设计资源再补。
+- **改密码前对旧 vault.json 做服务端备份**:vault.json 只有钥匙没有内容,且前端已有
+  自动下载兜底,收益有限。
+- **deploy.yml 换 jq 解析 CF API 响应**:现有 sed 路径已在生产验证过,收益小于回归风险。
+
+### 验证记录(本轮)
+
+| 项 | 结果 |
+|---|---|
+| 单测 | **130 项全绿**(120 → 130:dialog +1 / worker +5 / vault +3 / e2e +1;含 1 项 Windows CRLF 假失败修复) |
+| 反证 | 8 处修复逐条临时还原:**全部翻红**(411 预检 / 惰性取体 / 条件删除 / 备份容错 / Esc 落定 / rewrap 迭代 / 扩展名净化 / 未知字段保留),还原后复跑全绿 |
+| 语法 | 全部改动文件 `node --check` 通过 |
+| 行尾 | 仓库文件保持 CRLF,与既有约定一致 |
