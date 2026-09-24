@@ -1,0 +1,12 @@
+{
+  "name": "JMbiji 加密笔记本",
+  "short_name": "JMbiji",
+  "description": "端到端加密的云笔记:浏览器打开即用,内容在本地加密后才上传,服务器只存解不开的密文",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f6f8",
+  "theme_color": "#2563eb",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <meta name="description" content="JMbiji —— 端到端加密笔记本,多端云同步">
+  <meta name="theme-color" content="#2563eb">
+  <title>JMbiji · 加密笔记本</title>
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <!-- 锁屏 / 建库 -->
+  <div id="lock" class="lock">
+    <div class="lock-card">
+      <div class="lock-brand">
+        <img src="icon.svg" alt="" width="44" height="44">
+        <div>
+          <h1>JMbiji</h1>
+          <p>加密笔记本 · 端到端加密 · 多端同步</p>
+        </div>
+      </div>
+
+      <div id="lockForm">
+        <div class="field" id="pwConfirmField" hidden>
+          <input type="password" id="pwConfirm" placeholder="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
+        </div>
+        <input type="password" id="pwInput" placeholder="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false">
+        <div id="pwHint" class="pw-hint" hidden></div>
+        <button id="pwBtn" class="btn primary block">解锁</button>
+      </div>
+
+      <div id="lockErr" class="lock-err" hidden></div>
+
+      <p class="lock-hint">主密码不存储、不可找回;忘记 = 数据无法恢复</p>
+    </div>
+  </div>
+
+  <!-- 主界面 -->
+  <div id="app" hidden>
+    <header class="topbar">
+      <div class="brand-mini">JMbiji</div>
+      <div class="search-wrap">
+        <input id="searchBox" type="search" placeholder="搜索标题与正文…" autocomplete="off">
+      </div>
+      <span id="saveStatus" class="save-status" data-kind="ok">–</span>
+      <button id="btnLock" class="btn ghost small">锁定</button>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar">
+        <div class="side-sec">
+          <div class="side-head">
+            <span>分类</span>
+            <button id="btnAddCat" class="icon-btn" title="新建分类">＋</button>
+          </div>
+          <ul id="catList" class="cat-list"></ul>
+        </div>
+
+        <div class="side-sec grow">
+          <div class="side-head">
+            <span id="activeCatName">未选择分类</span>
+            <span class="side-head-btns">
+              <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)">✎</button>
+              <button id="btnDelCat" class="icon-btn danger" title="删除分类">✕</button>
+              <button id="btnAddNote" class="icon-btn primary" title="新建笔记">＋</button>
+            </span>
+          </div>
+          <ul id="noteList" class="note-list"></ul>
+        </div>
+
+        <div class="side-foot">
+          <label class="foot-row">自动锁屏
+            <select id="autoLock">
+              <option value="0">关闭</option>
+              <option value="5">5 分钟</option>
+              <option value="15">15 分钟</option>
+              <option value="30">30 分钟</option>
+            </select>
+          </label>
+          <button id="btnCleanBlobs" class="btn ghost tiny block">清理未引用图片</button>
+        </div>
+      </aside>
+
+      <main class="content">
+        <div id="emptyState" class="empty">从左侧选择一个分类</div>
+
+        <article id="readView" hidden>
+          <div class="read-head">
+            <h1 id="readTitle"></h1>
+            <div class="read-actions">
+              <button id="btnCopyAll" class="btn ghost small">⧉ 复制全文</button>
+              <button id="btnEdit" class="btn primary small">编辑</button>
+              <button id="btnDelNote" class="btn ghost small danger">删除</button>
+            </div>
+          </div>
+          <div id="readMeta" class="read-meta"></div>
+          <div id="readBody" class="read-body"></div>
+          <div id="readAtts" class="read-atts"></div>
+        </article>
+
+        <section id="editView" hidden>
+          <input id="editTitle" class="edit-title" placeholder="标题" autocomplete="off">
+          <textarea id="editBody" class="edit-body" spellcheck="false"
+            placeholder="正文…&#10;支持:# 标题 · **加粗** · ==高亮== · `行内代码` · 三个反引号代码块 · - 列表"></textarea>
+          <div class="edit-foot">
+            <button id="btnAddAtt" class="btn ghost small">添加图片</button>
+            <input id="attInput" type="file" accept="image/*" multiple hidden>
+            <span class="edit-hint">改动先存内存;Ctrl+S 或 5 分钟后保存到云端</span>
+            <button id="btnDone" class="btn primary small">完成</button>
+          </div>
+          <div id="editAtts" class="edit-atts"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="searchPanel" class="search-panel" hidden></div>
+  </div>
+
+  <dialog id="modal" class="modal"><div id="modalBody"></div></dialog>
+  <div id="toasts"></div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

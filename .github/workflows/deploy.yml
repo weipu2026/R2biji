@@ -1,0 +1,318 @@
+# JMbiji 一键部署:push main = 自动发布到 Cloudflare Workers
+#
+# ── 需要配置的东西:2 个必填 Secret(+ 若干个可选项)─────────────────────────
+#
+# Settings → Secrets and variables → Actions → **Secrets**（加密存储）
+#   CLOUDFLARE_API_TOKEN   【必填】API Token,权限至少:
+#                            · Workers Scripts: Edit       (部署 Worker)
+#                            · Workers R2 Storage: Edit    (部署时自动创建桶;只读则部署会失败)
+#                            · Account Settings: Read      (读账户信息)
+#                          R2 权限不是可选项:桶不存在时 wrangler 会去查询并创建,
+#                          缺权限会直接让部署失败(不是「建不了桶」这么轻)。
+#   ACCESS_KEY             【必填】访问密钥门,≥16 个 ASCII 字符。
+#                          它会被自动同步为 Worker secret——**别再手动去 CF 控制台改**,
+#                          否则下次部署会被这里覆盖回来。
+#
+# Settings → Secrets and variables → Actions → **Variables**（非敏感,明文可见,推荐放这里）
+#   CLOUDFLARE_ACCOUNT_ID   选填,32 位账户 id;只关联一个账户时可留空
+#   WORKER_DOMAIN           选填,自定义域名(如 bij.example.com,不带 http://)。
+#                           留空 → 站点走 <worker 名>.<你的子域>.workers.dev
+#   BUCKET_NAME             选填,R2 桶名,默认 jmbiji-vault
+#   KEEP_WORKERS_DEV        选填,=1 时即使配了自定义域也保留 workers.dev 入口(默认只留一个)
+#
+# 两类变量都支持:同名配置优先读 Variables,其次读 Secrets。
+#
+# ⚠️ 主密码不在这个列表里,也不需要放任何地方。
+#    它是零知识设计:主密码只在浏览器里参与 PBKDF2 派生,**从不发送给服务器**,
+#    所以 CI 里放它既无用、也会制造「配了就安全」的错觉。
+#    「访问密钥」(ACCESS_KEY)和「主密码」是两回事——前者开门,后者解密。
+#
+# ── 流水线顺序 ──────────────────────────────────────────────────────────
+#   Validate → Deploy → Sync secret → Verify live → Audit bucket
+# 为什么必须是这个顺序:
+#   · Sync 在 Deploy 之后:首次部署前 Worker 还不存在,`wrangler secret put` 会报 worker not found;
+#   · Verify 在 Sync 之后:它要断言「门已装上且已生效」,必须在密钥同步完成后跑;
+#   · Audit 在 Deploy 之后:桶由部署时创建,之前查不到。
+#
+# ── 公开仓库的安全约定(重要)─────────────────────────────────────────────
+#   · 只监听 push 到 main 与手动触发。**不要**改成 pull_request / pull_request_target:
+#     后者会把 Secrets 交给来自 fork 的代码执行,是经典的外泄通道(俗称 pwn request)。
+#     fork 的 PR 本来拿不到 Secrets,这条防线不能自己拆掉。
+#   · permissions 固定为 contents: read,checkout 关闭凭据落盘,降低被盗用面。
+#   · 所有密钥都通过 env 传入,**不**写进 run 脚本正文。
+#   · 别把线上真实域名/网址写进仓库文件:仓库公开后它就不再是秘密,
+#     ACCESS_KEY 与主密码是唯一的门与锁(README 里用示例域名)。
+name: Deploy JMbiji
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    # 同分支连续 push 时,让新 run 取消进行中的旧 run,只保留最后一个,避免重复部署
+    concurrency:
+      group: deploy-jmbiji
+      cancel-in-progress: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 不把 GITHUB_TOKEN 留在 .git/config 里 —— 后续步骤用不到它
+          persist-credentials: false
+
+      # 必填项前置校验(fail fast):放在安装依赖之前,省掉一次 npm ci 的等待。
+      # 为什么需要:ACCESS_KEY 缺失时 Worker 会 fail closed(整站 503),
+      # 部署照样「成功」,但站点谁也进不去;把它挡在部署之前,而不是等用户打开网页才发现。
+      - name: Validate required config
+        env:
+          CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          miss=0
+          need() { # $1=名称 $2=值
+            if [ -z "${2:-}" ]; then
+              echo "  ✗ 必填项缺失:$1"
+              miss=1
+            else
+              echo "  ✓ $1 已配置"
+            fi
+          }
+          need CLOUDFLARE_API_TOKEN "$CF_TOKEN"
+          need ACCESS_KEY           "$ACCESS_KEY"
+
+          # 长度与字符集这里先查一遍(gen-config 还会再查一次,含占位值检查):
+          # 大于 16 但不含 ASCII 的情况在 Secret 里不容易发现,早点报出来。
+          if [ -n "${ACCESS_KEY:-}" ]; then
+            len=$(printf '%s' "$ACCESS_KEY" | wc -c | tr -d ' ')
+            if [ "$len" -lt 16 ]; then
+              echo "  ✗ ACCESS_KEY 只有 $len 字符,至少需要 16 个"
+              miss=1
+            fi
+            if printf '%s' "$ACCESS_KEY" | LC_ALL=C grep -q '[^ -~]'; then
+              echo "  ✗ ACCESS_KEY 含非 ASCII 字符(HTTP 头无法携带)"
+              miss=1
+            fi
+          fi
+
+          if [ "$miss" != 0 ]; then
+            echo
+            echo "补齐上面标记的项后重跑:仓库 Settings → Secrets and variables → Actions。"
+            echo "域名、桶名这类「配置」放 Variables 页更合适(随时可见可改);密钥一律放 Secrets 页。"
+            exit 1
+          fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # npm run deploy = gen-config(校验 + 注入域名/桶名) → wrangler deploy --config wrangler.deploy.toml
+      # 仓库里的 wrangler.toml 只是**模板**(只有合法默认值,不含任何人的真实域名),
+      # 真实值在这里由环境变量注入生成物 —— fork 的人不会带着别人的域名上线。
+      - name: Deploy Worker
+        run: npm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN || secrets.WORKER_DOMAIN }}
+          BUCKET_NAME: ${{ vars.BUCKET_NAME || secrets.BUCKET_NAME }}
+          KEEP_WORKERS_DEV: ${{ vars.KEEP_WORKERS_DEV || secrets.KEEP_WORKERS_DEV }}
+          ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+
+      # 把访问密钥同步为 Cloudflare Worker secret(在 Deploy 之后:Worker 必须先存在)。
+      # 失败时打印 wrangler 的真实输出并做 3 次重试 —— 绝不能像早期 r2share 那样
+      # 把输出丢进 /dev/null,否则 CI 只剩一句「同步失败」,根因完全不可诊断。
+      - name: Sync ACCESS_KEY secret
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          # 与部署读同一份配置:拿模板 wrangler.toml 当「当前部署的配置」会引入隐性偏差
+          CFG=""
+          [ -f wrangler.deploy.toml ] && CFG="--config wrangler.deploy.toml"
+          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml | head -1)
+          [ -n "$NAME" ] || { echo "✗ 未能从生成物读出 worker 名"; exit 1; }
+
+          for attempt in 1 2 3; do
+            if out=$(printf '%s\n' "$ACCESS_KEY" | npx wrangler secret put ACCESS_KEY --name "$NAME" $CFG 2>&1); then
+              echo "  ✓ ACCESS_KEY 已同步"
+              exit 0
+            fi
+            echo "  … 第 ${attempt} 次失败,wrangler 输出:"
+            printf '%s\n' "$out" | tail -8 | sed 's/^/      /'
+            [ "$attempt" -lt 3 ] && sleep 2
+          done
+          echo "✗ ACCESS_KEY 同步失败(已重试 3 次)"
+          echo "--- 诊断:当前 wrangler 身份与权限 ---"
+          npx wrangler whoami $CFG 2>&1 | tail -15 || true
+          exit 1
+
+      # 上线后自动验收 —— 把「部署成功」和「真的能防住」分开断言。
+      # 三条判据直接对应审计报告里的 S2/S3,不靠人肉打开网页确认:
+      #   ① 首页 200 + 带 CSP/X-Frame-Options(静态资源的 _headers 真的生效了)
+      #   ② GET /api/vault 不带密钥 → 必须 401(门生效)
+      #        200 = 门形同虚设(致命,多半是 ALLOW_NO_ACCESS_KEY 被设了)
+      #        503 = ACCESS_KEY 没同步到 Worker
+      #   ③ GET /api/vault 带密钥 → 必须 200/404(说明密钥一致,不是 401)
+      - name: Verify live site
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN || secrets.WORKER_DOMAIN }}
+          ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
+        run: |
+          set -euo pipefail
+          NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml | head -1)
+
+          if [ -n "${WORKER_DOMAIN:-}" ]; then
+            URL="https://${WORKER_DOMAIN}"
+          else
+            # workers.dev 的完整地址含账户子域,只有 API 才知道;查不到就失败,
+            # 不静默跳过 —— 「跳过验收」等于把「可能没装好门」当成功。
+            SUB=$(curl -fsS -m 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
+              | sed -n 's/.*"subdomain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+            if [ -z "$SUB" ]; then
+              echo "✗ 未能从 API 取到 workers.dev 子域,无法确定部署地址。"
+              echo "  请在 Variables 里显式配置 WORKER_DOMAIN,或确认 API Token 含 Workers Scripts:Read。"
+              exit 1
+            fi
+            URL="https://${NAME}.${SUB}.workers.dev"
+          fi
+          echo "  验收目标:$URL"
+
+          code() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$@"; }
+
+          # 新部署生效有几秒传播延迟,轮询到 200 为止(最多 ~50s)
+          root=000
+          for i in $(seq 1 10); do
+            root=$(code "$URL/")
+            [ "$root" = "200" ] && break
+            echo "  … 第 $i 次探测首页:$root"
+            sleep 5
+          done
+
+          fail=0
+          if [ "$root" = "200" ]; then
+            echo "  ✓ 首页 200"
+          else
+            echo "  ✗ 首页未返回 200(实际 $root)"; fail=1
+          fi
+
+          hdr=$(curl -sI -m 20 "$URL/")
+          for h in content-security-policy x-frame-options x-content-type-options; do
+            if printf '%s' "$hdr" | grep -qi "^${h}:"; then
+              echo "  ✓ 安全响应头 $h 存在"
+            else
+              echo "  ✗ 缺少安全响应头 $h(public/_headers 是否生效?)"; fail=1
+            fi
+          done
+
+          no_key=$(code "$URL/api/vault")
+          yes_key=$(code -H "x-access-key: $ACCESS_KEY" "$URL/api/vault")
+          echo "  · /api/vault 无密钥 → $no_key ;带密钥 → $yes_key"
+
+          case "$no_key" in
+            401) echo "  ✓ 访问密钥门生效(无密钥被拒)" ;;
+            200) echo "  ✗ 致命:无密钥也能读到 vault.json —— 门没装(检查 Worker 里 ALLOW_NO_ACCESS_KEY 是否被设成 1)"; fail=1 ;;
+            503) echo "  ✗ ACCESS_KEY 未同步到 Worker(检查上面 Sync 步骤与 secret 名拼写)"; fail=1 ;;
+            *)   echo "  ✗ 预期 401,实际 $no_key"; fail=1 ;;
+          esac
+
+          case "$yes_key" in
+            200|404) echo "  ✓ 带密钥可访问($yes_key,404 = 库还没建)" ;;
+            401) echo "  ✗ 带密钥仍 401 —— GitHub Secrets 里的 ACCESS_KEY 与 Worker 上已有的不一致"; fail=1 ;;
+            *)   echo "  ✗ 带密钥预期 200/404,实际 $yes_key"; fail=1 ;;
+          esac
+
+          {
+            echo "### JMbiji 部署验收"
+            echo ""
+            echo "| 判据 | 结果 |"
+            echo "|---|---|"
+            echo "| 站点地址 | $URL |"
+            echo "| 首页 | $root |"
+            echo "| 安全响应头 | $([ "$fail" = 0 ] && echo 'CSP / X-Frame-Options / nosniff 齐备' || echo '有缺失') |"
+            echo "| 无密钥访问 /api/vault | $no_key(应为 401) |"
+            echo "| 带密钥访问 /api/vault | $yes_key(应为 200/404) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$fail" != 0 ]; then
+            echo "✗ 上线验收未通过 —— 站点可能处于「能打开但门没装好」的状态,请按上面提示处理。"
+            exit 1
+          fi
+
+      # S12:桶必须保持私有。开启 r2.dev 公开域(或绑自定义域)会让全部密文可被任何人直接下载,
+      # 且 ACCESS_KEY 这道门(只拦 /api/*)会被整体绕过 —— 是本项目代价最大的误操作。
+      # 用官方 API 直接查状态:domains/managed 的 enabled 必须为 false,domains/custom 必须为空。
+      # 判定口径:只对「已证实公开」判失败;查不到(权限不足等)只告警 ——
+      # 因为 R2 只读权限并非部署所必需,不该为此拦下一个合法部署。
+      # 但也不假装通过:日志与 summary 都会写明「未能判定」。
+      - name: Audit bucket public exposure
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
+          BUCKET_NAME: ${{ vars.BUCKET_NAME || secrets.BUCKET_NAME }}
+        run: |
+          set -euo pipefail
+          BUCKET="${BUCKET_NAME:-jmbiji-vault}"
+          API="https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/r2/buckets/$BUCKET"
+          auth=(-H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+
+          body=$(curl -sS -m 20 -w '\n%{http_code}' "${auth[@]}" "$API/domains/managed")
+          hcode=$(printf '%s' "$body" | tail -1)
+          json=$(printf '%s' "$body" | sed '$d')
+
+          if [ "$hcode" != "200" ]; then
+            echo "::warning::无法判定桶 $BUCKET 的公开访问状态(HTTP $hcode)。"
+            echo "  · 可能是 API Token 缺 R2 只读权限。请自行确认:Cloudflare 控制台 → R2 → $BUCKET → Settings,"
+            echo "    「Public access / R2.dev subdomain」必须处于 Disabled,且没有绑定自定义域。"
+            echo "| 桶公开访问 | 未能判定(HTTP $hcode) |" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          enabled=$(printf '%s' "$json" | sed -n 's/.*"enabled"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p')
+          r2dev=$(printf '%s' "$json" | sed -n 's/.*"domain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')
+
+          custom=$(curl -sS -m 20 "${auth[@]}" "$API/domains/custom" || echo '{}')
+          n_custom=$(printf '%s' "$custom" | grep -o '"domain"[[:space:]]*:[[:space:]]*"' | wc -l | tr -d ' ')
+
+          bad=0
+          if [ "$enabled" = "true" ]; then
+            echo "✗ 桶 $BUCKET 开启了公开访问:$r2dev"
+            echo "  这会绕过 ACCESS_KEY 门(门只拦 /api/*),让全部密文可被任何人下载。"
+            echo "  修复:npx wrangler r2 bucket dev-url disable $BUCKET"
+            bad=1
+          else
+            echo "  ✓ r2.dev 公开访问未开启($r2dev,enabled=$enabled)"
+          fi
+
+          if [ "$n_custom" != "0" ]; then
+            echo "✗ 桶 $BUCKET 绑定了 $n_custom 个自定义域,同样绕过 Worker:"
+            printf '%s\n' "$custom" | grep -o '"domain"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/^/      /'
+            bad=1
+          else
+            echo "  ✓ 未绑定自定义域"
+          fi
+
+          echo "| 桶 r2.dev 公开访问 | $([ "$bad" = 0 ] && echo '已确认关闭' || echo '**已开启(危险)**') |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| 桶自定义域 | $n_custom 个 |" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$bad" != 0 ]; then
+            echo "✗ 桶的可见性审计未通过。桶必须私有:本项目所有读写都走 Worker,私有桶零代价。"
+            exit 1
+          fi

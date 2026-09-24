@@ -1,0 +1,23 @@
+# 静态资源的安全响应头(Workers 静态资源在 public/ 下读这个文件)
+# 注意:本文件只作用于「静态资源」的响应;/api/* 由 Worker 代码生成,
+# 其硬化头在 worker/worker.js 的 SEC_HEADERS 里独立设置(两处都要有)。
+
+/*
+  Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: no-referrer
+  Permissions-Policy: accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()
+  Strict-Transport-Security: max-age=31536000
+  Cross-Origin-Opener-Policy: same-origin
+  X-Robots-Tag: noindex, nofollow, noarchive
+
+# Service Worker 必须能被注册,且更新时不能被 HTTP 缓存吃掉
+/sw.js
+  Cache-Control: no-cache
+
+# 入口页同样不缓存,避免升级后仍是旧外壳
+/
+  Cache-Control: no-cache
+/index.html
+  Cache-Control: no-cache
