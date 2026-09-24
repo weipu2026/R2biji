@@ -117,6 +117,28 @@ export function orderBetween(prev, next) {
   return (prev + next) / 2;
 }
 
+/* ---------- 相对时间 ---------- */
+
+/**
+ * 笔记列表里的时间:一眼可读的相对表达。
+ * 今天/昨天带时刻(刚存没存一眼分清),更早只到日,跨年补年份。
+ * @param {number} ts 毫秒时间戳
+ * @param {number} [now] 基准时间,默认当前(测试注入)
+ * @returns {string} 非有限输入返回空串(调用方不必判空)
+ */
+export function relTime(ts, now = Date.now()) {
+  if (!Number.isFinite(ts)) return '';
+  const d = new Date(ts);
+  const n = new Date(now);
+  const p = (x) => String(x).padStart(2, '0');
+  const dayStart = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((dayStart(n) - dayStart(d)) / 86400000);
+  if (diffDays <= 0) return `今天 ${p(d.getHours())}:${p(d.getMinutes())}`; // 未来(时钟偏差)也按今天
+  if (diffDays === 1) return `昨天 ${p(d.getHours())}:${p(d.getMinutes())}`;
+  if (d.getFullYear() === n.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日`;
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`;
+}
+
 /* ---------- 主密码强度 ---------- */
 
 /** 主密码最短长度。它是唯一同时决定「记不记得住」与「破不破得动」的参数。 */

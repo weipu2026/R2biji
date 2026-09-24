@@ -6,7 +6,7 @@ import {
   looksLikeConflictCopy, backupFileName, parseBackupFileName,
   planBackupRotation, blobDisplayName, sortNotes, orderBetween,
   stripEnc, isEncryptedName, SEAFILE_IGNORE_CONTENT,
-  assessPassword, PASSWORD_MIN_LEN,
+  assessPassword, PASSWORD_MIN_LEN, relTime,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -135,4 +135,21 @@ test('密码强度:合格与优秀的分档', () => {
   assert.equal(assessPassword('x'.repeat(20)).ok, false, '整串同字符仍应拒');
   assert.equal(assessPassword('qwrtpldkfjghsnmxbvz').ok, true, '20 位纯字母应放行');
   assert.equal(assessPassword('abc1234567').ok, false, '顺序串应拒');
+});
+
+/* ---------- 相对时间 ---------- */
+
+test('relTime:今天带时刻 / 昨天 / 同年月日 / 跨年补年份 / 非法输入', () => {
+  const now = new Date(2026, 8, 24, 22, 0).getTime(); // 2026-09-24 22:00
+  const t = (mo, d, h = 12, mi = 30, y = 2026) => new Date(y, mo, d, h, mi).getTime();
+  assert.equal(relTime(t(8, 24), now), '今天 12:30');
+  assert.equal(relTime(t(8, 24, 8, 5), now), '今天 08:05');
+  assert.equal(relTime(t(8, 23), now), '昨天 12:30');
+  assert.equal(relTime(t(8, 1), now), '9月1日');
+  assert.equal(relTime(t(0, 15), now), '1月15日');
+  assert.equal(relTime(t(11, 31, 12, 0, 2025), now), '2025年12月31日');
+  // 未来时间戳(设备间时钟偏差):按今天算,不出负数怪话
+  assert.equal(relTime(t(8, 24, 23, 0), now), '今天 23:00');
+  assert.equal(relTime(Number.NaN, now), '');
+  assert.equal(relTime(undefined, now), '');
 });

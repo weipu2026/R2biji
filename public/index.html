@@ -47,16 +47,19 @@
   <!-- 主界面 -->
   <div id="app" hidden>
     <header class="topbar">
+      <button id="btnMenu" class="icon-btn menu-btn" title="打开菜单" aria-label="打开菜单" aria-expanded="false">☰</button>
       <div class="brand-mini">JMbiji</div>
       <div class="search-wrap">
-        <input id="searchBox" type="search" placeholder="搜索标题与正文…" aria-label="搜索标题与正文" autocomplete="off">
+        <input id="searchBox" type="search" placeholder="搜索标题与正文…(Ctrl+K)" aria-label="搜索标题与正文" autocomplete="off">
       </div>
       <span id="saveStatus" class="save-status" data-kind="ok">–</span>
+      <button id="btnTheme" class="icon-btn" title="切换为深色" aria-label="切换为深色">☾</button>
       <button id="btnLock" class="btn ghost small">锁定</button>
     </header>
 
+    <div id="sideBackdrop" class="side-backdrop" hidden></div>
     <div class="layout">
-      <aside class="sidebar">
+      <aside class="sidebar" id="sidebar">
         <div class="side-sec">
           <div class="side-head">
             <span>分类</span>
@@ -112,6 +115,13 @@
 
         <section id="editView" hidden>
           <input id="editTitle" class="edit-title" placeholder="标题" aria-label="笔记标题" autocomplete="off">
+          <div class="ed-tools" id="edTools" role="toolbar" aria-label="Markdown 快捷插入">
+            <button type="button" class="ed-btn" data-wrap="**" title="加粗" aria-label="加粗">B</button>
+            <button type="button" class="ed-btn" data-wrap="==" title="高亮" aria-label="高亮">H</button>
+            <button type="button" class="ed-btn" data-wrap="`" title="行内代码" aria-label="行内代码">‹›</button>
+            <button type="button" class="ed-btn" data-prefix="# " title="标题行" aria-label="标题行">#</button>
+            <button type="button" class="ed-btn" data-prefix="- " title="列表行" aria-label="列表行">≡</button>
+          </div>
           <textarea id="editBody" class="edit-body" spellcheck="false" aria-label="笔记正文"
             placeholder="正文…&#10;支持:# 标题 · **加粗** · ==高亮== · `行内代码` · 三个反引号代码块 · - 列表"></textarea>
           <div class="edit-foot">

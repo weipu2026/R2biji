@@ -160,6 +160,37 @@ async function copyText(text, btn) {
   }
 }
 
+/** 编辑器选区包裹:已包裹则剥掉(再点一次 = 取消)。导出仅为可测(tests/edtools.test.mjs) */
+export function wrapSel(ta, mark) {
+  const s = ta.selectionStart;
+  const e = ta.selectionEnd;
+  const v = ta.value;
+  const sel = v.slice(s, e);
+  if (v.slice(s - mark.length, s) === mark && v.slice(e, e + mark.length) === mark) {
+    ta.value = v.slice(0, s - mark.length) + sel + v.slice(e + mark.length);
+    ta.setSelectionRange(s - mark.length, e - mark.length);
+    return;
+  }
+  ta.value = v.slice(0, s) + mark + sel + mark + v.slice(e);
+  ta.setSelectionRange(s + mark.length, e + mark.length);
+}
+
+/** 编辑器行前缀(# / - ):作用于选区触及的整行;全部已带前缀则剥掉。导出仅为可测 */
+export function prefixLines(ta, prefix) {
+  const v = ta.value;
+  const s = ta.selectionStart;
+  const e = ta.selectionEnd;
+  const ls = v.lastIndexOf('\n', s - 1) + 1;
+  const nl = v.indexOf('\n', e);
+  const le = nl === -1 ? v.length : nl;
+  const lines = v.slice(ls, le).split('\n');
+  const all = lines.every((l) => l.startsWith(prefix));
+  // 开关语义:全带 → 全剥;否则只给缺前缀的行补(已带的行二次补会变成嵌套列表)
+  const out = lines.map((l) => (all ? l.slice(prefix.length) : (l.startsWith(prefix) ? l : prefix + l))).join('\n');
+  ta.value = v.slice(0, ls) + out + v.slice(le);
+  ta.setSelectionRange(ls, ls + out.length);
+}
+
 /* ================= 保存状态 ================= */
 
 function setStatus(text, kind = 'ok') {
@@ -463,16 +494,33 @@ async function enterApp() {
   S.activeNoteId = null;
   S.editing = false;
   renderNoteList();
-  showEmpty('从左侧选择一个分类');
+  const hasCats = S.lib.listCategories().length > 0;
+  showEmpty(hasCats ? '从左侧选择一个分类' : '还没有分类,先建一个',
+    hasCats ? null : { label: '＋ 新建分类', fn: addCategory });
   refreshSaveStatus();
   startIdleTimer();
 }
 
-function showEmpty(text) {
-  $('emptyState').hidden = false;
+/**
+ * 空状态文案 + 可选引导按钮:没有分类/笔记时直接把下一步递到用户手上,
+ * 而不是只留一句让人自己找入口的提示。
+ */
+function showEmpty(text, action) {
+  const box = $('emptyState');
+  box.hidden = false;
   $('readView').hidden = true;
   $('editView').hidden = true;
-  $('emptyState').textContent = text;
+  box.textContent = '';
+  const p = document.createElement('p');
+  p.textContent = text;
+  box.appendChild(p);
+  if (action) {
+    const b = document.createElement('button');
+    b.className = 'btn primary';
+    b.textContent = action.label;
+    b.addEventListener('click', action.fn);
+    box.appendChild(b);
+  }
 }
 
 /* ================= 左侧:分类 ================= */
@@ -534,7 +582,8 @@ async function openCategory(name) {
   $('activeCatName').textContent = name;
   renderCategoryList();
   renderNoteList();
-  showEmpty(`「${name}」暂无笔记,点右上 + 新建`);
+  closeDrawer(); // 移动端:选完分类收起抽屉,把屏幕还给内容
+  showEmpty(`「${name}」暂无笔记`, { label: '＋ 新建笔记', fn: addNote });
 }
 
 async function addCategory() {
@@ -605,9 +654,11 @@ function renderNoteList() {
   const ul = $('noteList');
   ul.textContent = '';
   const cat = S.activeCat && S.lib.categoryInfo(S.activeCat);
-  if (!cat?.data) return;
+  if (!cat?.data) { $('activeCatName').textContent = S.activeCat || '未选择分类'; return; }
 
   const notes = F.sortNotes(cat.data.notes);
+  // 侧栏标题带上篇数:规模一眼可见,不用点进去数
+  $('activeCatName').textContent = `${S.activeCat} · ${notes.length} 篇`;
   for (const note of notes) {
     const li = document.createElement('li');
     li.className = 'note-item' + (note.id === S.activeNoteId ? ' active' : '');
@@ -620,10 +671,18 @@ function renderNoteList() {
     title.textContent = note.title || '无标题';
     main.appendChild(title);
 
+    const row = document.createElement('div');
+    row.className = 'note-preview-row';
     const preview = document.createElement('div');
     preview.className = 'note-preview';
     preview.textContent = note.content.trim().replace(/\s+/g, ' ').slice(0, 40) || '(空)';
-    main.appendChild(preview);
+    row.appendChild(preview);
+    const time = document.createElement('span');
+    time.className = 'note-time';
+    time.textContent = F.relTime(note.updatedAt);
+    time.title = `更新于 ${fmtTime(note.updatedAt)}`;
+    row.appendChild(time);
+    main.appendChild(row);
     li.appendChild(main);
 
     const btns = document.createElement('div');
@@ -658,6 +717,7 @@ function renderNoteList() {
 }
 
 function openNote(noteId) {
+  closeDrawer(); // 移动端:选完笔记收起抽屉
   if (S.editing) S.editing = false;
   S.activeNoteId = noteId;
   renderNoteList();
@@ -1121,6 +1181,54 @@ async function importFromBackup(file) {
   }
 }
 
+/* ================= 深浅色主题 ================= */
+
+/* 手动选择存 localStorage 并优先于系统;未选择时跟随系统,系统切换实时跟进。
+ * 只写 <html data-theme> 一个开关,CSS 侧就只需要一份暗色变量块。 */
+const THEME_KEY = 'jmbiji.theme';
+
+function loadThemePref() {
+  try { return localStorage.getItem(THEME_KEY); } catch { return null; }
+}
+
+function setThemePref(mode) {
+  try { localStorage.setItem(THEME_KEY, mode); } catch { /* 隐私模式:仅本次会话生效 */ }
+}
+
+function applyTheme(mode) {
+  const root = document.documentElement;
+  if (root) root.dataset.theme = mode;
+  const btn = $('btnTheme');
+  if (btn) {
+    btn.textContent = mode === 'dark' ? '☀' : '☾';
+    btn.title = mode === 'dark' ? '切换为浅色' : '切换为深色';
+    btn.setAttribute('aria-label', btn.title);
+  }
+  const meta = document.querySelector && document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', mode === 'dark' ? '#0d1117' : '#2563eb');
+}
+
+function initTheme() {
+  const pref = loadThemePref();
+  const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+  applyTheme(pref || (mq && mq.matches ? 'dark' : 'light'));
+  if (!pref && mq && mq.addEventListener) {
+    mq.addEventListener('change', (e) => {
+      if (!loadThemePref()) applyTheme(e.matches ? 'dark' : 'light');
+    });
+  }
+}
+
+/** 移动端抽屉收起。桌面同样无害(没有 open 类,backdrop 本来就 hidden)。 */
+function closeDrawer() {
+  const sb = $('sidebar');
+  if (sb) sb.classList.remove('open');
+  const bd = $('sideBackdrop');
+  if (bd) bd.hidden = true;
+  const menu = $('btnMenu');
+  if (menu) menu.setAttribute('aria-expanded', 'false');
+}
+
 /* ================= 启动与事件绑定 ================= */
 
 async function boot() {
@@ -1254,6 +1362,42 @@ function bindEvents() {
   $('autoLock').addEventListener('change', saveSettings);
   $('rememberDevice').addEventListener('change', saveRememberPref);
 
+  // 深浅色切换:点一次就固定下来(写入偏好,之后不再跟随系统变化)
+  $('btnTheme').addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    setThemePref(next);
+    applyTheme(next);
+  });
+
+  // 移动端抽屉:汉堡键开,遮罩点击关
+  $('btnMenu').addEventListener('click', () => {
+    const open = !$('sidebar').classList.contains('open');
+    $('sidebar').classList.toggle('open', open);
+    $('sideBackdrop').hidden = !open;
+    $('btnMenu').setAttribute('aria-expanded', String(open));
+  });
+  $('sideBackdrop').addEventListener('click', closeDrawer);
+
+  // Markdown 快捷插入:选区包裹 / 行前缀,写完立刻算改动
+  for (const b of document.querySelectorAll('#edTools .ed-btn')) {
+    b.addEventListener('click', () => {
+      if (!S.editing) return;
+      const ta = $('editBody');
+      if (b.dataset.wrap) wrapSel(ta, b.dataset.wrap);
+      else if (b.dataset.prefix) prefixLines(ta, b.dataset.prefix);
+      ta.focus();
+      collectEditChanges();
+    });
+  }
+
+  // 编辑器里 Tab 是缩进,不是「把焦点跳走」
+  $('editBody').addEventListener('keydown', (e) => {
+    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
+    e.preventDefault();
+    e.target.setRangeText('  ', e.target.selectionStart, e.target.selectionEnd, 'end');
+    collectEditChanges();
+  });
+
   // 修改主密码入口:顶栏锁定按钮旁长按?不搞玄的 —— 放在 autoLock 旁边
   const pwChangeBtn = document.createElement('button');
   pwChangeBtn.className = 'btn ghost tiny block';
@@ -1280,6 +1424,17 @@ function bindEvents() {
       e.preventDefault();
       saveAll();
     }
+    // Ctrl+K 聚焦搜索(比浏览器默认的「搜索 with 引擎」在这里有用得多)
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+      e.preventDefault();
+      $('searchBox').focus();
+      $('searchBox').select();
+    }
+    // Ctrl+Enter = 完成(退出编辑),写完一大段不用伸手去够右下角
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && S.editing) {
+      e.preventDefault();
+      exitEditMode();
+    }
   });
 
   document.addEventListener('visibilitychange', () => {
@@ -1292,6 +1447,7 @@ function bindEvents() {
 }
 
 export async function start() {
+  initTheme(); // 先定深浅色:锁屏第一屏就应该是用户要的样子
   bindEvents();
   // 多标签页同步:BroadcastChannel 不可用时 TabSync 会静默降级(S.tabs.enabled === false),
   // 其余功能一律照常 —— 同步是锦上添花,不是必需品。
