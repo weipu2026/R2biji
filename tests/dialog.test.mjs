@@ -34,6 +34,11 @@ function installDom() {
       focus() {}, select() {},
       showModal() { e.shown = true; },
       close() { e.closed = true; },
+      // 真实 dialog 按 Esc 会先触发 cancel 事件再关闭;mock 里手动触发以模拟。
+      // ⚠️ close() 刻意**不**派发 close 事件:真浏览器的 close 事件是异步派发的,
+      //    按钮路径先落定值、close 晚到被 settled 挡住;若 mock 同步派发会把
+      //    这个顺序破坏掉,所有按钮用例都会变成返回 null。
+      cancel() { e.closed = true; for (const fn of e.handlers.cancel || []) fn({}); },
     };
     return e;
   };
@@ -142,4 +147,25 @@ test('弹窗会 showModal,且选完任意按钮都会 close(否则盖住界面)'
   btn(body, '确定').click();
   await p;
   assert.equal(dlg.closed, true, '选完必须关闭');
+});
+
+/* ---------------- Esc 必须落定 Promise ---------------- */
+
+test('按 Esc(cancel 事件)必须把 Promise 落定为 null,且关掉弹窗', async () => {
+  // 曾经 Esc 只关 dialog、Promise 永久挂起:保存冲突弹窗按 Esc 把
+  // S.saving 卡成恒 true,整个保存流水线静默失效 —— 全库只剩这一层没有兜底。
+  // 用 race 兜底:修复被还原时这里翻红而不是把整个测试进程挂死
+  const withTimeout = (p) => Promise.race([p, new Promise((r) => setTimeout(() => r('HANG'), 500))]);
+  const { dlg, body } = installDom();
+  const p = modal({ type: 'conflict', title: '「秘钥」在云端已被其他设备修改' });
+  assert.equal(dlg.closed, false);
+  dlg.cancel(); // 模拟原生 dialog 的 Esc:先触发 cancel 再关闭
+  assert.equal(await withTimeout(p), null, 'Esc 必须等价于「取消」,绝不能让 await 永久挂起');
+  assert.equal(dlg.closed, true, 'Esc 后弹窗应处于关闭态');
+  // 提示层也顺带钉住:prompt 的 Esc 同样返回 null(调用方据此判「放弃」)
+  const dom2 = installDom();
+  const p2 = modal({ type: 'prompt', title: '访问密钥' });
+  inputOf(dom2.body).value = '不该被采用';
+  dom2.dlg.cancel();
+  assert.equal(await withTimeout(p2), null);
 });

@@ -61,6 +61,16 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
     const body = $('modalBody');
     body.textContent = '';
 
+    // ★ Esc(以及一切非按钮的关闭路径)也必须落定 Promise,否则调用方 await 永久挂起:
+    //   保存冲突弹窗按 Esc 曾把 S.saving 卡成恒 true,整个保存流水线静默失效;
+    //   boot 的访问密钥弹窗按 Esc 则页面永久卡在锁屏。
+    //   cancel = 原生 dialog 的 Esc 关闭(先于 close 触发);close = 兜底其余关闭路径。
+    //   按钮路径先落定值,close 事件晚到时 settled 保证不会改写返回值。
+    let settled = false;
+    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
+    dlg.addEventListener('cancel', () => settle(null));
+    dlg.addEventListener('close', () => settle(null));
+
     const h = document.createElement('h3');
     h.textContent = title;
     body.appendChild(h);
@@ -94,7 +104,7 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
       const b = document.createElement('button');
       b.className = cls;
       b.textContent = labelText;
-      if (val !== undefined) b.addEventListener('click', () => { dlg.close(); resolve(val); });
+      if (val !== undefined) b.addEventListener('click', () => { dlg.close(); settle(val); });
       row.appendChild(b);
       return b;
     };
@@ -107,9 +117,9 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
       // 只有按回车能用。离线单测测的是 Library 层,碰不到弹窗这一层。
       // 现在由 tests/dialog.test.mjs 钉住「点确定必须返回输入框的值」。
       const ok = mkBtn('确定', 'btn primary');
-      ok.addEventListener('click', () => { dlg.close(); resolve(input.value); });
-      mkBtn('取消', 'btn ghost', null).addEventListener('click', () => resolve(null));
-      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dlg.close(); resolve(input.value); } });
+      ok.addEventListener('click', () => { dlg.close(); settle(input.value); });
+      mkBtn('取消', 'btn ghost', null).addEventListener('click', () => settle(null));
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dlg.close(); settle(input.value); } });
     } else if (type === 'confirm') {
       mkBtn(danger ? '删除' : '确定', danger ? 'btn danger' : 'btn primary', true);
       mkBtn('取消', 'btn ghost', false);
@@ -210,9 +220,16 @@ async function handleConflict(name) {
   });
   const cat = S.lib.categoryInfo(name);
   if (choice === 'mine') {
-    await S.lib.saveCategory(name, { force: true });
-    S.tabs?.send({ type: 'cat-saved', name });
-    toast(`「${name}」已用本地版本覆盖(云端旧版已备份)`);
+    try {
+      await S.lib.saveCategory(name, { force: true });
+      S.tabs?.send({ type: 'cat-saved', name });
+      toast(`「${name}」已用本地版本覆盖(云端旧版已备份)`);
+    } catch (e) {
+      // 覆盖失败必须把该分类放回待保存队列:saveAll 在弹冲突前已把它移出,
+      // 这里若吞掉,改动会永久脱离保存队列、锁定/刷新后无提示丢失
+      S.dirty.add(name);
+      toast(`「${name}」覆盖保存失败:${e.message};已保留在待保存列表`, 'error');
+    }
   } else if (choice === 'disk') {
     // 丢弃内存改动,重读云端
     cat.data = null; cat.lastSeenEtag = null; cat.error = null;
@@ -236,7 +253,7 @@ async function handleConflict(name) {
  */
 function onTabMessage(msg) {
   // 退出登录是共享的(localStorage 会话),别的标签页锁了,这里也得锁
-  if (msg.type === 'locked') { lockNow({ broadcast: false }); return; }
+  if (msg.type === 'locked') { lockNow({ broadcast: false, confirmDiscard: false }); return; }
   if (!S.lib) return;
 
   if (msg.type === 'cats-changed') { rescanFromTabs(); return; }
@@ -313,11 +330,25 @@ function showLock(mode) {
 
 /**
  * 锁定 = 退出登录。
- * @param {{broadcast?:boolean}} [opt] 收到别的标签页的「锁定」通知时传 false,避免回声。
+ * @param {{broadcast?:boolean, confirmDiscard?:boolean}} [opt]
+ *   broadcast:false      = 收到别的标签页的「锁定」通知,不再回声;
+ *   confirmDiscard:false = 远端锁定(另一端已结束会话),不弹确认直接锁。
  */
-async function lockNow({ broadcast = true } = {}) {
+async function lockNow({ broadcast = true, confirmDiscard = true } = {}) {
   if (S.dirty.size > 0) {
     try { await saveAll(); } catch { /* 尽力保存 */ }
+  }
+  // ★ 锁定必毁全部明文,这是安全不变量;但「毁改动」必须经用户确认 ——
+  //   冲突弹窗里刚选过「留待稍后」的分类,转身就在这里被静默清空,等于承诺作废。
+  //   保存/冲突处理完仍有未保存改动时,让人在「放弃改动并锁定」与「暂不锁定」
+  //   之间二选一。远端锁定不问:另一标签页已把会话结束掉,没有可商量的余地。
+  if (confirmDiscard && S.dirty.size > 0) {
+    const yes = await modal({
+      type: 'confirm', danger: true,
+      title: '还有未保存的改动',
+      text: `${S.dirty.size} 个分类的改动尚未保存成功,锁定将放弃这些改动(服务器上的版本不受影响)。确定锁定吗?`,
+    });
+    if (!yes) return;
   }
   // 先通知再清:锁定会清掉共享的 localStorage 会话,不通知的话
   // 另一个标签页还开着就等于「锁定」没生效(它的内存里还留着令牌与明文)
@@ -446,10 +477,21 @@ function showEmpty(text) {
 
 /* ================= 左侧:分类 ================= */
 
+/** 列表项统一可点:键盘可达(Tab 聚焦 + Enter/空格触发),而非只认鼠标 click */
+function clickable(el, fn) {
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.addEventListener('click', fn);
+  el.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(e); }
+  });
+}
+
 function renderCategoryList() {
   const ul = $('catList');
   ul.textContent = '';
-  for (const name of S.lib.listCategories()) {
+  const names = S.lib.listCategories(); // 只调一次:原来循环内外各查一遍
+  for (const name of names) {
     const info = S.lib.categoryInfo(name);
     const li = document.createElement('li');
     li.className = 'cat-item' + (name === S.activeCat ? ' active' : '');
@@ -462,10 +504,10 @@ function renderCategoryList() {
     label.title = info?.conflict ? '疑似同步冲突副本,请核对内容后处理'
       : info?.error ? `无法解密:${info.error}` : name;
     li.appendChild(label);
-    li.addEventListener('click', () => openCategory(name));
+    clickable(li, () => openCategory(name));
     ul.appendChild(li);
   }
-  if (!S.lib.listCategories().length) {
+  if (!names.length) {
     const li = document.createElement('li');
     li.className = 'cat-item none';
     li.textContent = '暂无分类,点上方 + 新建';
@@ -473,14 +515,19 @@ function renderCategoryList() {
   }
 }
 
+let catOpenSeq = 0; // 打开分类的序号守卫:慢请求后到不得覆盖用户后选的分类
+
 async function openCategory(name) {
+  const seq = ++catOpenSeq;
   try {
     await S.lib.loadCategory(name);
   } catch (e) {
+    if (seq !== catOpenSeq) return; // 期间用户已换分类,这个失败不必再弹
     toast(`分类「${name}」无法打开:${e.message}`, 'error');
     renderCategoryList();
     return;
   }
+  if (seq !== catOpenSeq) return; // 慢的分类请求后到:放弃,别覆盖用户新选的分类
   if (S.editing) S.editing = false;
   S.activeCat = name;
   S.activeNoteId = null;
@@ -508,7 +555,9 @@ async function renameCategory() {
   if (name == null || name === S.activeCat) return;
   try {
     const created = await S.lib.renameCategory(S.activeCat, name);
-    S.dirty.delete(S.activeCat);
+    // 未保存的改动跟着搬到新名字:重命名只是换键名,本地这份改过的数据
+    // 仍是最新内容;脏标记留在旧名上等于让它脱离保存队列(静默丢失)
+    if (S.dirty.delete(S.activeCat)) S.dirty.add(created);
     S.tabs?.send({ type: 'cats-changed' });
     S.activeCat = created;
     renderCategoryList();
@@ -573,7 +622,7 @@ function renderNoteList() {
 
     const preview = document.createElement('div');
     preview.className = 'note-preview';
-    preview.textContent = note.content.replace(/\s+/g, ' ').slice(0, 40) || '(空)';
+    preview.textContent = note.content.trim().replace(/\s+/g, ' ').slice(0, 40) || '(空)';
     main.appendChild(preview);
     li.appendChild(main);
 
@@ -597,7 +646,7 @@ function renderNoteList() {
     btns.append(upBtn, downBtn, copyBtn);
     li.appendChild(btns);
 
-    li.addEventListener('click', () => openNote(note.id));
+    clickable(li, () => openNote(note.id));
     ul.appendChild(li);
   }
   if (!notes.length) {
@@ -668,10 +717,14 @@ function renderReadAttachments(note) {
   }
 }
 
+const attLoading = new Set(); // 解密中的附件:防双击竞态重复贴图
+
 async function toggleAttachmentImage(att, chip) {
   const existing = S.objectUrls.get(att.file);
   const next = chip.nextElementSibling;
   if (next && next.classList.contains('att-img')) { next.remove(); return; }
+  if (attLoading.has(att.file)) return;
+  attLoading.add(att.file);
   try {
     let url = existing;
     if (!url) {
@@ -692,6 +745,8 @@ async function toggleAttachmentImage(att, chip) {
     chip.after(wrap);
   } catch (e) {
     toast(`附件解密失败:${e.message}`, 'error');
+  } finally {
+    attLoading.delete(att.file);
   }
 }
 
@@ -724,7 +779,6 @@ function enterEditMode() {
 function collectEditChanges() {
   const note = activeNoteData();
   if (!note) return;
-  const cat = S.lib.categoryInfo(S.activeCat);
   const title = $('editTitle').value.trim() || '无标题';
   const content = $('editBody').value;
   if (title !== note.title || content !== note.content) {
@@ -767,43 +821,72 @@ function renderEditAttachments(note) {
 }
 
 async function addAttachments(files) {
+  const cat = S.lib.categoryInfo(S.activeCat);
   const note = activeNoteData();
-  if (!note) return;
+  if (!cat || !note) return;
+  const added = [];
   for (const file of files) {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const { file: blobName } = await S.lib.addAttachment(bytes, file.name);
-      note.attachments.push({ file: blobName, name: file.name });
+      const entry = { file: blobName, name: file.name };
+      added.push(entry);
+      note.attachments.push(entry);
     } catch (e) {
       toast(`「${file.name}」入库失败:${e.message}`, 'error');
     }
   }
-  const cat = S.lib.categoryInfo(S.activeCat);
-  cat.data.notes.find((n) => n.id === note.id).updatedAt = Date.now();
-  markDirty(S.activeCat);
-  renderEditAttachments(note);
+  if (!added.length) return;
+  // 上传途中可能收到另一标签页的 cat-saved → cat.data 被整体换掉(置 null 或换新
+  // 对象),对旧引用直接解引用曾在这里 TypeError、已入库附件引用悬空。
+  // 改为把已入库的附件合并进最新数据对象:
+  if (cat.data) {
+    const live = cat.data.notes.find((n) => n.id === note.id);
+    if (live) {
+      const have = new Set(live.attachments.map((a) => a.file));
+      for (const a of added) if (!have.has(a.file)) live.attachments.push(a);
+      live.updatedAt = Date.now();
+      markDirty(S.activeCat);
+      renderEditAttachments(live);
+      return;
+    }
+  }
+  toast('图片已入库,但该分类刚被其他标签页更新;重新打开分类后再查看', 'warn');
 }
 
 /* ================= 笔记增删排序 ================= */
 
+let addingNote = false;
+
 async function addNote() {
+  if (addingNote) return; // 双击会造出两条「无标题」:忙态守卫
   if (!S.activeCat) { toast('先选择一个分类', 'warn'); return; }
-  const cat = S.lib.categoryInfo(S.activeCat);
-  await S.lib.loadCategory(S.activeCat);
-  const sorted = F.sortNotes(cat.data.notes);
-  const note = {
-    id: `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
-    title: '无标题',
-    content: '',
-    order: F.orderBetween(sorted.length ? sorted[sorted.length - 1].order : null, null),
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-    attachments: [],
-  };
-  cat.data.notes.push(note);
-  markDirty(S.activeCat);
-  openNote(note.id);
-  enterEditMode();
+  addingNote = true;
+  try {
+    const cat = S.lib.categoryInfo(S.activeCat);
+    if (!cat) return;
+    await S.lib.loadCategory(S.activeCat);
+    if (!cat.data) return; // 加载失败已在下面提示,这里别再解引用
+    const sorted = F.sortNotes(cat.data.notes);
+    const note = {
+      id: `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
+      title: '无标题',
+      content: '',
+      order: F.orderBetween(sorted.length ? sorted[sorted.length - 1].order : null, null),
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      attachments: [],
+    };
+    cat.data.notes.push(note);
+    markDirty(S.activeCat);
+    openNote(note.id);
+    enterEditMode();
+  } catch (e) {
+    // 分类加载失败以前是无提示的 unhandled rejection
+    toast(`无法新建笔记:${e.message}`, 'error');
+  } finally {
+    addingNote = false;
+  }
 }
 
 async function deleteNote() {
@@ -837,12 +920,16 @@ function moveNote(noteId, dir) {
 
 /* ================= 搜索 ================= */
 
+let searchSeq = 0; // 搜索序号守卫:慢查询后到不得覆盖新查询的结果
+
 async function runSearch() {
   const q = $('searchBox').value.trim();
   const panel = $('searchPanel');
   if (!q) { panel.hidden = true; panel.textContent = ''; return; }
   if (!S.lib) return;
+  const seq = ++searchSeq;
   await S.lib.loadAllCategories();
+  if (seq !== searchSeq) return; // 期间用户又输入了:这轮结果作废
   const notesByCat = new Map();
   for (const name of S.lib.listCategories()) {
     const cat = S.lib.categoryInfo(name);
@@ -858,7 +945,7 @@ async function runSearch() {
   ul.className = 'search-list';
   for (const r of results.slice(0, 50)) {
     const li = renderSearchResult(r, q);
-    li.addEventListener('click', () => {
+    clickable(li, () => {
       S.activeCat = r.cat;
       openNote(r.note.id);
       renderCategoryList();
