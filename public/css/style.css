@@ -389,6 +389,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   color: var(--accent);
   background: var(--accent-weak);
 }
+/* 内联矢量图标:块级显示防 baseline 空隙,描边继承 currentColor */
+.foot-icon svg { display: block; margin: 0 auto; }
 
 /* ---------- 分类 / 笔记列表 ---------- */
 
@@ -485,13 +487,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   line-height: 1;
 }
 
-/* 写作/阅读面板:一张铺满内容区的「纸」(留呼吸边距),编辑区不再缩在屏幕中间;
-   内部超出时纸面自滚。层次靠发丝线 + 极轻投影,不靠渐变 */
+/* 写作/阅读面板:一张通栏铺满内容区的「纸」(四周只留细窄呼吸边),
+   编辑区不再缩在屏幕中间;内部超出时纸面自滚 */
 #readView, #editView {
   flex: 1; min-height: 0;
-  width: 100%;
-  max-width: 980px;
-  margin: 16px auto 18px;
+  width: auto;
+  max-width: none;
+  margin: 12px 14px 14px;
   padding: 26px 36px 28px;
   overflow-y: auto;
   background: var(--panel);
