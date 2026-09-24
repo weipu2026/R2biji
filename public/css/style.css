@@ -27,6 +27,9 @@
   --danger-weak: #fef3f2;
   --grad1: #dbeafe;
   --grad2: #e0e7ff;
+  /* 结构分界线:主分栏边界用比 --border 重一档的颜色,分栏界限一眼可辨 */
+  --edge: #c9d0da;
+  --edge-shadow: 2px 0 8px rgba(16, 24, 40, .06);
 }
 
 /* 暗色主题:手动选择(initTheme 写入 <html data-theme>)与跟随系统共用这一份变量 */
@@ -51,6 +54,8 @@
   --danger-weak: rgba(248, 81, 73, .14);
   --grad1: rgba(21, 70, 160, .28);
   --grad2: rgba(98, 79, 202, .2);
+  --edge: #39424e;
+  --edge-shadow: 2px 0 8px rgba(0, 0, 0, .35);
   --shadow: 0 1px 3px rgba(0, 0, 0, .5), 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-lg: 0 12px 32px rgba(0, 0, 0, .6);
 }
@@ -68,7 +73,8 @@ html, body {
 }
 
 button { font: inherit; cursor: pointer; }
-input, textarea, select { font: inherit; color: inherit; }
+/* 光标显式给强调色:默认的细光标在浅色底上几乎看不清 */
+input, textarea, select { font: inherit; color: inherit; caret-color: var(--accent); }
 [hidden] { display: none !important; }
 
 /* ---------- 通用按钮 ---------- */
@@ -263,7 +269,7 @@ input, textarea, select { font: inherit; color: inherit; }
   gap: 14px;
   padding: 10px 16px;
   background: var(--panel);
-  border-bottom: 1px solid var(--border);
+  border-bottom: 1px solid var(--edge);
 }
 .brand-mini {
   font-weight: 700;
@@ -295,12 +301,13 @@ input, textarea, select { font: inherit; color: inherit; }
   width: 280px;
   min-width: 280px;
   background: var(--panel);
-  border-right: 1px solid var(--border);
+  border-right: 1px solid var(--edge);
+  box-shadow: var(--edge-shadow);
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
-.side-sec { padding: 12px 10px 6px; border-bottom: 1px solid var(--border); }
+.side-sec { padding: 12px 10px 6px; border-bottom: 1px solid var(--edge); }
 .side-sec.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; border-bottom: none; }
 
 .side-head {
@@ -314,7 +321,7 @@ input, textarea, select { font: inherit; color: inherit; }
 .side-head-btns { display: flex; gap: 2px; }
 
 .side-foot {
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--edge);
   padding: 10px 12px;
   padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); /* iOS/PWA 小白条会遮住底部按钮 */
   display: grid;
@@ -329,6 +336,22 @@ input, textarea, select { font: inherit; color: inherit; }
   border-radius: 6px;
   padding: 3px 6px;
   background: var(--panel);
+}
+
+/* 左下角功能按钮:一排图标;完整功能名在 title/aria-label 里,悬停即见 */
+.foot-icons { display: flex; gap: 6px; }
+.foot-icon {
+  flex: 1;
+  width: auto;
+  height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 15px;
+}
+.foot-icon:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-weak);
 }
 
 /* ---------- 分类 / 笔记列表 ---------- */

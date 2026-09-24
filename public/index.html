@@ -89,10 +89,13 @@
               <option value="30">30 分钟</option>
             </select>
           </label>
-          <button id="btnExport" class="btn ghost tiny block">导出全库备份</button>
-          <button id="btnImport" class="btn ghost tiny block">从备份恢复</button>
+          <div class="foot-icons">
+            <button id="btnChangePw" class="icon-btn foot-icon" title="修改主密码" aria-label="修改主密码">钥</button>
+            <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份">⇩</button>
+            <button id="btnImport" class="icon-btn foot-icon" title="从备份恢复" aria-label="从备份恢复">⇧</button>
+            <button id="btnCleanBlobs" class="icon-btn foot-icon" title="清理未引用图片" aria-label="清理未引用图片">清</button>
+          </div>
           <input id="importInput" type="file" accept=".zip,application/zip" hidden>
-          <button id="btnCleanBlobs" class="btn ghost tiny block">清理未引用图片</button>
         </div>
       </aside>
 

@@ -1398,12 +1398,8 @@ function bindEvents() {
     collectEditChanges();
   });
 
-  // 修改主密码入口:顶栏锁定按钮旁长按?不搞玄的 —— 放在 autoLock 旁边
-  const pwChangeBtn = document.createElement('button');
-  pwChangeBtn.className = 'btn ghost tiny block';
-  pwChangeBtn.textContent = '修改主密码';
-  pwChangeBtn.addEventListener('click', changePassword);
-  $('autoLock').closest('.foot-row').after(pwChangeBtn);
+  // 修改主密码:左下角图标排里的「钥」(HTML 侧定义,这里只绑事件)
+  $('btnChangePw').addEventListener('click', changePassword);
 
   $('editTitle').addEventListener('input', () => { collectEditChanges(); });
   $('editBody').addEventListener('input', () => { collectEditChanges(); });
