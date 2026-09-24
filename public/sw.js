@@ -8,7 +8,7 @@
  *      不升版本号 → 老用户永远拿到旧缓存里的 js,表现为「部署了但界面没变」。
  *      页面 HTML 已是 network-first(2026-09-24),普通刷新即可拿到新外壳。
  */
-const CACHE = 'jmbiji-v14';
+const CACHE = 'jmbiji-v15';
 const ASSETS = [
   './',
   './index.html',
