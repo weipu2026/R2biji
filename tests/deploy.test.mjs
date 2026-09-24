@@ -23,7 +23,9 @@ const read = (p) => readFileSync(join(ROOT, p), 'utf8');
 const workerSrc = read('worker/worker.js');
 const genSrc = read('scripts/gen-config.mjs');
 const template = read('wrangler.toml');
-const workflow = read('.github/workflows/deploy.yml');
+// Windows 下 core.autocrlf 检出为 CRLF,而下面的触发器正则只认 LF
+// —— 不归一的话本地必挂「没能定位 on: 触发器块」、CI(Linux LF)却能过
+const workflow = read('.github/workflows/deploy.yml').replace(/\r\n/g, '\n');
 const gitignore = read('.gitignore');
 const pkg = JSON.parse(read('package.json'));
 

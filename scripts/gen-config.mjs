@@ -120,6 +120,12 @@ if (allowNoKey) {
   );
 } else if (!/^[\x20-\x7e]+$/.test(accessKey)) {
   err('ACCESS_KEY 必须是 ASCII 可见字符(不含中文/换行/控制字符),否则 HTTP 头无法携带。');
+} else if (/^\s|\s$/.test(accessKey)) {
+  err(
+    'ACCESS_KEY 首尾含空白字符(多半是粘贴带进来的)。\n' +
+      '    这里校验的是去掉与否的原值,与 Worker secret 里的实际值一旦不一致,表现为全站恒 401 且报错误导。\n' +
+      '    请去掉首尾空白,并确认 GitHub Secrets 里存的是同一份值。',
+  );
 } else if (PLACEHOLDER_KEY_RE.test(accessKey)) {
   err(
     'ACCESS_KEY 看起来是示例/占位值,拒绝部署 ——\n' +

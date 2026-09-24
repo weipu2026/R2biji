@@ -100,6 +100,10 @@ jobs:
               echo "  ✗ ACCESS_KEY 含非 ASCII 字符(HTTP 头无法携带)"
               miss=1
             fi
+            if printf '%s' "$ACCESS_KEY" | LC_ALL=C grep -Eq '^[[:space:]]|[[:space:]]$'; then
+              echo "  ✗ ACCESS_KEY 首尾含空白字符,与 Worker secret 比对会恒 401;请去掉首尾空白"
+              miss=1
+            fi
           fi
 
           if [ "$miss" != 0 ]; then
