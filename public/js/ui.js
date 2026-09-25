@@ -14,7 +14,7 @@ import { TabSync, planSavedCategoryAction } from './tabsync.js';
 
 const $ = (id) => document.getElementById(id);
 
-const AUTOSAVE_MS = 5 * 60 * 1000;      // 改动停止后 5 分钟兜底
+const IDLE_SAVE_MS = 4000;               // 改动停止 4 秒后自动保存(输入中每次按键都会重置计时)
 const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
 /* 自动锁屏默认「关闭」。它与「记住本设备」的目的正好相反:前者要「离开就得输密码」,
  * 后者要「打开即用」。默认给后者,想要前者自己去侧栏选 —— 选了之后空闲到点会
@@ -29,6 +29,7 @@ const S = {
   activeNoteId: null,
   editing: false,
   dirty: new Set(),      // 有未保存改动的分类名
+  resavePending: false,  // saveAll 运行期间又来了新改动:本轮结束后补跑一轮
   saving: false,
   autoSaveTimer: null,
   statusTimer: null,
@@ -218,11 +219,12 @@ function markDirty(catName) {
   S.dirty.add(catName);
   refreshSaveStatus();
   clearTimeout(S.autoSaveTimer);
-  S.autoSaveTimer = setTimeout(() => { saveAll(); }, AUTOSAVE_MS);
+  S.autoSaveTimer = setTimeout(() => { saveAll(); }, IDLE_SAVE_MS);
 }
 
 async function saveAll() {
-  if (!S.lib || S.saving || S.dirty.size === 0) return;
+  if (!S.lib || S.dirty.size === 0) return;
+  if (S.saving) { S.resavePending = true; return; } // 保存进行中又来新改动:别丢,结束后补跑
   S.saving = true;
   setStatus('保存中…', 'busy');
   const names = [...S.dirty];
@@ -246,6 +248,7 @@ async function saveAll() {
     }
   }
   S.saving = false;
+  if (S.resavePending) { S.resavePending = false; setTimeout(() => { saveAll(); }, 300); return; }
   if (failed > 0) { setStatus(`保存失败 ×${failed}`, 'error'); toast(`${failed} 个分类保存失败,详见控制台`, 'error'); }
   else refreshSaveStatus();
 }
@@ -878,6 +881,7 @@ function collectEditChanges() {
 
 function exitEditMode() {
   collectEditChanges();
+  saveAll(); // 「完成」即收尾:立刻上传,别让顶部挂着「有未保存更改」等 4 秒兜底
   S.editing = false;
   renderReadView();
   renderNoteList();
