@@ -230,7 +230,9 @@ async function saveAll() {
   for (const name of names) {
     try {
       const res = await S.lib.saveCategory(name);
-      if (res.conflict) {
+      if (res.skipped) {
+        S.dirty.delete(name); // 没有内存数据可存(saveCategory 如实上报),移出待保存队列
+      } else if (res.conflict) {
         S.dirty.delete(name);
         await handleConflict(name);
       } else {
@@ -269,6 +271,7 @@ async function handleConflict(name) {
   } else if (choice === 'disk') {
     // 丢弃内存改动,重读云端
     cat.data = null; cat.lastSeenEtag = null; cat.error = null;
+    S.dirty.delete(name); // 本地已无未保存改动,别让「未保存」标记一直挂着
     if (S.activeCat === name) {
       await openCategory(name);
     }

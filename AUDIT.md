@@ -516,3 +516,269 @@ DESIGN 已知限制同步。
 | 反证 | 8 处修复逐条临时还原:**全部翻红**(411 预检 / 惰性取体 / 条件删除 / 备份容错 / Esc 落定 / rewrap 迭代 / 扩展名净化 / 未知字段保留),还原后复跑全绿 |
 | 语法 | 全部改动文件 `node --check` 通过 |
 | 行尾 | 仓库文件保持 CRLF,与既有约定一致 |
+
+## 第 19 轮:全站审计(2026-09-25)—— **仅报告,未修复**
+
+四路并行审查(Worker / 加密层 / 前端 UI / 渲染与测试基建),**每条发现都亲自复核取证**后才计入。
+本轮共确认 **15 条**(1 P0 + 7 P1 + 5 P2 + 2 P3),另**排除 3 条误报**。
+所有「实测」结论都是用仓库自身代码跑出来的,不是读代码推的。
+
+> 本轮**只报告、未改任何代码** —— 见文末「下一步待用户拍板」。
+
+### P0 —— 功能级损毁(实测复现)
+
+**P0-1 `recover.html:333` 把 4 字节字段写成 2 字节 → 导出 zip 超过约 64KB 即损坏**
+
+中央目录的「本地头偏移」是 **4 字节**字段(偏移 42),`public/js/zip.js:158` 写的是
+`setUint32(42, offset, true)`,而 `recover.html:333` 写的是 `setUint16(42, offset, true)`。
+用仓库自己的 `zipStore` 造一个 70KB 条目的包、把偏移字段高 2 字节清零(即 `setUint16` 的净效果),
+再用仓库自己的 `readZipStore` 读回,实测:
+
+```
+条目 #1  真实偏移=0      读回=0      (未越界)
+条目 #2  真实偏移=70037  读回=4501   <- 偏移被截断
+[正确写法 setUint32(42,...)] 读回成功,条目=big.txt, small.txt
+[recover.html 现状 setUint16(42,...)] 读回失败 -> 条目「small.txt」的本地头不对
+```
+
+**为什么这是 P0**:应急页存在的唯一意义就是「CF 被封那天把备份解开」,而
+「一键打包下载 zip」(第 1459 行 `download('R2biji明文_*.zip', zipWriteEntries(entries))`)
+正是它给用户的**兜底出口**。真实库(几十本笔记 + 附件)必然超过 64KB,
+所以这条路径**在真正需要它的时刻必然失败**,且失败方式是「下载下来才发现打不开」——
+用户此时已经没有别的退路了。
+
+而 `tests/recover.test.mjs:146` 那条「产出的 zip 用项目 readZipStore 能读回」用的 fixture
+**所有条目都远小于 64KB**,偏移恰好没越界 → 测试永远绿。
+
+### P1 —— 真 BUG
+
+**P1-1 `render.js:163` 有序列表丢内容(`ol[1]` 应为 `ol[2]`)**
+
+```js
+const ol = /^(\d{1,3}[.)]\s+|\d{1,3}、\s*)(.*)$/.exec(line);
+listItems.push(ol[1]);   // ← 这里推的是「序号标记」
+```
+实测 `'1. 第一步:打款'` → `ol[1]="1. "`、`ol[2]="第一步:打款"`。
+即**有序列表渲染出来只剩 `1. `,正文没了**。同函数的 `recover.html:1070` 写的是 `ol[2]`(正确),
+两套实现分叉。
+
+> **测试为什么没抓住**:`tests/render.test.mjs:68` 只断言了 `lists[1].tag === 'ol'` 和
+> `children.length === 2`,**从不断言 `<li>` 的文本内容**。「结构对、内容错」是断言写法的盲区。
+
+**P1-2 部署在站点上的 `recover.html` 会被自家 CSP 拦死(但离线双击不受影响)**
+
+`public/_headers` 的 CSP 是 `script-src 'self'; style-src 'self'`,而 `recover.html` 里有
+**2 段内联 `<style>` + 2 段内联 `<script>`**(第 7/133/728/888 行)。在带生产同款 CSP 的本地服务上
+真实浏览器实测:
+
+| 判据 | `recover.html` | 对照组 `index.html` |
+|---|---|---|
+| `typeof openJmb` | `undefined` | — |
+| `document.styleSheets.length` | **0**(样式全丢) | 1 |
+| CSP 拦截日志 | **5 条**(4× inline style + 1× inline script) | **0 条** |
+| 背景色 | 透明(未上色) | 正常 `rgb(250,248,242)` |
+
+→ 问题**精确定位在 recover.html 自己,不是 CSP 配错**(主应用在同款 CSP 下完全正常)。
+`dev-server.mjs` 镜像的 CSP 与生产 `_headers` **逐字相同**(已比对)。
+
+**为什么只算 P1,不算 P0**:该页的设计用途是「CF 被封那天**双击本地副本**打开」
+(见引入提交 `51420c9` 的说明「单文件零依赖,双击即开」),而站点被封时用户本来也访问不到
+部署副本;`public/` 下也无任何入口链接到它(`index.html`/`js/*`/`sw.js` 里 `recover` 零命中)。
+**所以离线应急这条路照常可用**。受影响的仅是「站点还活着时,直接敲 URL 用它」这一条路径 ——
+打开也是白屏且控制台报 CSP,容易被误判成「页面坏了」。
+
+> ⚠️ **为什么 159 项测试全绿却看不到它**:两个浏览器冒烟(`recover-browser-smoke.mjs` /
+> `reader-browser-smoke.mjs`)都用 **`file://`** 打开页面,**而 `file://` 不携带任何 HTTP 响应头
+> → CSP 根本不生效**。测试跑的是「无 CSP 的 file:// 态」,站点跑的是「有 CSP 的 http 态」。
+> 这条值得记住:**浏览器测试的协议选择本身就是一个未声明的假设**。
+
+**P1-3 `SECRET_RE` 缺 `m` 标志 → 多行段落里的敏感行不遮罩**
+
+`render.js:22` 的正则以 `^…$` 界定,但 `renderMarkdown` 把整段多行文本
+用 `para.join('\n')` 合成一个字符串交给 `renderInline`(`render.js:96`)。
+无 `m` 标志时 `^`/`$` 只匹配整串首尾,实测:
+
+| 输入 | 结果 |
+|---|---|
+| 单行 `'登录密码: MySecret123'` | 已遮罩 ✓ |
+| 多行(敏感行在第 2 行) | **未遮罩 ✗ 明文外露** |
+| 同输入 + `m` 标志 | 已遮罩 ✓ |
+
+**P1-4 `recover.html` 多处 `innerHTML` 拼接 zip 条目名 → XSS,且能读到主应用密钥**
+
+`failures` / `warnings` 的每一项都是 `条目「${name}」…`,而 `name` **直接来自拖入的 zip**
+(第 254/261/271/275/279/534/571 行),随后在 1387/1435 处拼进 `innerHTML`。
+
+严重性在于同源:`recover.html` 与主应用**同源**,共享 `localStorage`,而
+`public/js/session.js` 在「记住本设备」时把**裸 DEK** 明文存在 `jmbiji.session`(该文件注释自己
+也讲明了这个安全边界)。→ 一个恶意备份包就能在用户拖入时读走 DEK。
+
+对照:`public/js/render.js` 是**零 innerHTML** 的纯 DOM 构建(已核:`public/js/*.js` 里
+`innerHTML` 出现 0 次),`recover.html` 是唯一破例处。
+
+**P1-5 `lib.js:164` `renameCategory` 调 `API.deleteCat(oldName)` 未传 etag**
+
+`deleteCategory:184` 传了 `cat.lastSeenEtag` 并且有详细注释解释为什么必须传,而
+`renameCategory` 的删除半程**裸调**。`worker.js:287` 的 DELETE 是「带 If-Match 才校验」的语义
+→ 不传就是无条件删 → **改名会把并发设备刚保存的新版静默删掉**,正是 `deleteCategory` 注释里
+写明要避免的那个场景。
+
+**P1-6 CI 完全不跑测试**
+
+`.github/workflows/deploy.yml` 的步骤是 Validate → Deploy → Sync → Verify → Audit,
+**没有 `npm test`**。全仓 grep `npm test|node --test` 在 `.github/` 下**零命中**。
+→ 159 项测试只靠人工记得跑;一旦忘记,坏代码会一路部署上线。
+
+**P1-7 `tests/falsify.mjs` **9 处**锚点失效 → 鉴伪套件恒红**
+
+falsify 的锚点是硬编码字符串,代码改过就失配;失配时它打印 `[跳过] 锚点未找到` 并把 `bad += 1`,
+最终**退出码 1**。实跑确认 9 条失效,横跨 4 个文件:
+
+| 文件 | 失效锚点数 |
+|---|---|
+| `worker/worker.js` | 4(限流状态 / 硬化头 / 预检长度 / 附件体积) |
+| `.github/workflows/deploy.yml` | 2(密钥内联 / 验收步骤) |
+| `public/js/ui.js` | 1(已确认:`ui.js:109` 早改成 `settle(val)`,锚点还写着 `resolve(val)`) |
+| `public/js/session.js` | 1(写入参数校验) |
+| `public/sw.js` | 1(ASSETS 清单) |
+
+**这意味着 falsify 现在是「永远失败」状态,作为守卫已完全失效** —— 红着的东西没人看。
+
+> 附带踩坑(本轮亲历,必须记):`npm run test:falsify` 第二次运行时**被 SIGTERM 掐断在
+> `finally` 还原之前**,把 `.github/workflows/deploy.yml` 留在「注入了 `pull_request_target`」
+> 的变异态。已 `git checkout --` 还原并复核工作区干净。
+> **教训:falsify 是「原地改写 + 还原」的破坏性脚本,中断就可能留下变异代码,跑完必须查 `git status`。**
+
+### P2 —— 并发 / 边界 / 体验
+
+**P2-1** `lib.js:107` `saveCategory` 对未知分类 `return { ok: true }` —— 分类不存在(或
+   `cat.data` 为 null)时**谎报保存成功**,调用方 `saveAll` 据此把它从 `S.dirty` 移除 →
+   改动静默脱离保存队列。达成条件是「dirty 集合与 data 同时为空」,当前触发路径窄
+   (冲突弹窗选「以云端版本为准」会把 `data` 置 null 且不复置 dirty),**故列 P2 而非 P0**,
+   但这个「成功」返回值本身是错的,建议改成 `{ skipped: true }` 或抛错。
+**P2-2** `format.js:163` `genPassword` 的「保底」基本不起作用 —— 逻辑是「发现缺某类就
+   `out[at] = next()`,但**不复检**」,而塞进去的那个字符未必属于缺的那一类。
+   20 万次实测,至少缺一类的比例:
+
+   | 长度 | 含符号 | 缺失率 | 最常缺 |
+   |---|---|---|---|
+   | 8 | 是 | **47.5%** | 数字 76k |
+   | 12 | 是 | 27.1% | 数字 49k |
+   | 16 | 是 | 16.6% | 数字 32k |
+
+   即生成 8 位密码时近一半不含数字,而注释承诺「数字至少一个」。
+**P2-3** `search.js:27` 搜索片段高亮错位 —— `snipOffset` 基于**原始**切片计算,随后
+   `replace(/\s+/g,' ')` 压缩空白改变了长度,offset 不再指向匹配处。实测匹配词
+   `admin123` 被高亮成了 `"妥善保存。"`(真实下标 16,算出来的 26)。
+**P2-4** `worker.js:133` `listAll` 50 页硬上限静默截断 —— 注释只为「第 1001 个可⻅」而写,
+    但 50 页 × 1000 = 50000 个对象后会**静默停止**,不报错。对个人库够用,属已知取舍。
+**P2-5** `worker.js:287` `deleteCategory` 四步非原子(head → get → backup → delete)——
+    head 比对通过后、delete 之前仍可被并发写插空。R2 的 delete 不支持条件参数,已被注释
+    说明是「能做的最强校验」,属平台限制下的已知残差。
+
+### P3 —— 冗余
+
+**P3-1** `render.js:183` `notePlainText` 是死代码 —— 全仓引用 **0 次**(含测试)。
+**P3-2** markdown 渲染两套实现长期分叉 —— `render.js` 的 `renderMarkdown`(98 行)与
+    `recover.html` 的 `rdrMd`(约 115 行)是同一套逻辑的两份拷贝,**并且已经各自演化出差异**
+    (P1-1 的 `ol[1]` vs `ol[2]` 就是分叉的产物)。加密原语同理(`crypto.js` 10 处 vs
+    `recover.html` 18 处 WebCrypto 调用)。这是「单文件零依赖」的必然代价,
+    但**每次改动都要两边同步**,建议至少加一条「两边输出等价」的对照测试兜住。
+
+### 已排除的误报(复核后否决)
+
+- ~~「`changeMasterPassword` 未同步 `vaultJson`」~~ —— **不成立**。`lib.js:200`
+  明确有 `this.vaultJson = json;`,子代理读漏了。
+- ~~「鉴权前就物化请求体」~~ —— **不成立**。`worker.js:497` 传的是惰性函数
+  `body = () => request.arrayBuffer()…`,`putCategory`/`vault PUT` 内部才调 `bodyBytes(body)`,
+  且 `handleApi` 的 Bearer 校验在第 387 行、早于任何取体。上一轮已修,子代理看的是旧印象。
+- ~~`recover.html` 的 `@@DATA@@` 注入可被 `</script>` 逃逸~~ —— **不成立**。
+  `recover.html:703` 对 blobs 做了 `.replace(/</g,'\\u003c')`;`catalog`/`dek` 等字段
+  全是 base64/数字,不含 `<`。
+
+### 隐私 / 凭据核查结论
+
+| 检查项 | 结论 |
+|---|---|
+| 服务端是否见到明文 | **否**。Worker 全程只搬运密文,R2 对象名(`cats/*.enc`、`blobs/*`)不含明文标题 |
+| 主密码是否会上传 | **否**。只在浏览器参与 PBKDF2;`vault.json` 只存 `auth.hash = SHA-256(authKey)` |
+| 仓库内是否硬编码真实域名/密钥 | **否**。`wrangler.toml` 全是合法占位默认值;`.dev.vars` 已被 gitignore |
+| 主应用是否零 `innerHTML` | **是**(`public/js/*.js` 命中 0 次),XSS 面只剩 `recover.html`(见 P1-3) |
+| 浏览器侧明文残留 | `localStorage['jmbiji.session']` **存裸 DEK 明文**(设计如此,`session.js` 已声明);这正是 P1-3 值得修的原因 |
+| 离线密码本是否零泄漏 | 阅读站内嵌的是密文,标题/正文/附件字节/附件原名全在密文里(上轮已验) |
+
+### 验证记录(本轮)
+
+| 项 | 结果 |
+|---|---|
+| 单测 | `npm test` **159 项全绿**(审计未改代码,这是审计前基线) |
+| 复现手段 | 6 个一次性探针(`.probe-*.mjs`),全部用仓库自身模块跑,跑完已删除 |
+| CSP | 真实 Edge headless + CDP,在带生产同款 CSP 的本地服务上实测;含主应用对照组 |
+| 变异测试 | `npm run test:falsify` → **退出码 1,9 处锚点失效**(确认已失效,非本轮引入) |
+| 工作区 | 清理探针后 `git status` 干净(中途已还原被 falsify 遗留的 `deploy.yml` 变异) |
+
+### 优化建议(非缺陷,按性价比排序)
+
+1. **给测试补「内容断言」而不只是「结构断言」** —— P1-1 能活下来,是因为 `<ol>` 的断言只查
+   tag 与子元素个数。建议凡是渲染类用例,都对 `textContent` 落一条断言。
+2. **给 falsify 加自检:锚点失配即整体报错退出** —— 现在 9 处失配却只在日志里逐条 `[跳过]`,
+   套件恒红就被当噪音忽略。更好的是**把锚点改成从源码里按语义定位**(如 `find` + 正则),
+   或至少在失配数 > 0 时打印一行「本套件已失效,守卫不成立」的醒目结论。
+3. **浏览器测试改用 http 服务而非 `file://`** —— 否则 CSP / 安全响应头这一类
+   「只在 HTTP 下存在」的问题永远测不到(P1-2 就是这么漏的)。成本很低:
+   `dev-server.mjs` 已经在镜像生产头,直接指向它即可。
+4. **`recover.html` 补一条大文件用例** —— fixture 里放一个 >64KB 的条目,
+   P0-1 这类「字段宽度写错」的问题就能被测试挡住。
+5. **CI 里加一步 `npm test`** —— 放在 Deploy 之前。风险提示:159 项目前全绿,加进去是安全的。
+6. **`recover.html` 的 `innerHTML` 收口** —— 与主应用保持一致改用 `textContent` +
+   `createElement`(仓库里已有成熟写法可抄),顺手把 P1-4 消掉。
+7. **两边 markdown 实现加「输出等价」对照测试** —— 防止继续分叉。
+
+### 下一步待用户拍板
+
+本轮**只出报告,未改任何代码**(工作区除本文件外干净)。可选修复范围:
+
+| 选项 | 覆盖内容 | 风险 |
+|---|---|---|
+| A. 只修 P0 | `recover.html:333` 一处改 `setUint16`→`setUint32`,补大文件用例 | 极低,改动 ~2 行 |
+| B. P0 + P1 | 再加有序列表、`SECRET_RE` 的 `m`、`recover.html` XSS 收口、`renameCategory` etag、CI 加测试、falsify 锚点 | 低,均为局部改动 |
+| C. 全修(含 P2/P3) | 再加 `saveCategory` 返回值语义、密码生成器重写(用洗牌保证各类至少一个)、搜索 offset 对齐、死代码清理 | 中,密码生成器与搜索属逻辑重写,需带反证测试 |
+| D. 先只做「测试基建」三项 | 内容断言 + 浏览器测试改 http + CI 加 `npm test` | 低,但会立刻暴露更多既有问题 |
+
+我的建议:**先做 D,再做 A/B** —— 测试基建不修好,后面每次修复都缺少可靠的判据;
+尤其 falsify 现在已经失效,等于变异测试这道防线是空的。
+### 第 19 轮修复记录(2026-09-25,当天全修)—— 15 条全部修复并验证
+
+上一节为审计报告(仅报告);同日用户拍板「全修 P0~P3 一波流」,以下为修复与验证记录。
+
+**源码修复(12 文件,24 处补丁,全部带命中断言应用)**:
+
+| 条目 | 修复 |
+|---|---|
+| P0-1 | recover.html setUint16→**setUint32**(4 字节偏移字段);补 >64KB 条目回归用例 |
+| P1-1 | render.js ol[1]→**ol[2]**;render.test 补 li 文本内容断言 |
+| P1-2 | _headers 对 /recover.html 单独放宽 CSP(内联页是「双击即用」设计,不能拆外部资源);dev-server.mjs 镜像同款按路径头。真机 Edge 实测:openJmb=function、styleSheets=1、着色正常、拦截 0 条(修复前 5 条) |
+| P1-3 | SECRET_RE 加 **m** 标志;render.test 补多行段落敏感行用例 |
+| P1-4 | recover.html 全部动态 innerHTML 拼接处包 rdrEsc()(zip 条目名来自不可信包,同源可读裸 DEK) |
+| P1-5 | renameCategory 删除半程改传 **got.etag**(刚 get 的服务器当前版本),不再无条件删 |
+| P1-6 | deploy.yml 在 Deploy 前加 **npm test** 步骤(测试不绿不上线) |
+| P1-7 | falsify.mjs 锚点匹配改为**行尾自适应**(CRLF 文件上 
+ 锚点全部失配,9 处失效里 8 处是这个根因);ui.js 锚点 resolve→settle。实跑恢复「全部守卫具备判别力 ✓」退出码 0 |
+| P2-1 | saveCategory 无内存数据时如实返回 {skipped:true}(不再谎报 ok);saveAll 与冲突「以云端为准」分支配套清理 dirty |
+| P2-2 | genPassword 重写为**洗牌法**:每类先各取一个+全池补齐+Fisher-Yates,类别保证是构造出来的;测试升级为 300 次统计断言 |
+| P2-3 | search.js snipOffset 在压缩空白后的串上重新定位;新建 tests/search.test.mjs(4 用例) |
+| P2-4 | listAll 到 50 页上限时 console.warn 出声(不再静默截断) |
+| P2-5 | deleteCategory 在 delete 前终检一次 etag,把 TOCTOU 窗口压到极限(R2 delete 无条件参数,平台限制) |
+| P3-1 | 删除 notePlainText 死代码(全仓引用 0) |
+| P3-2 | 双实现对账靠既有互证测试 + 本轮补的 ol 内容断言;完整合并留待后续(单文件设计所致) |
+
+**验证记录**:
+
+| 项 | 结果 |
+|---|---|
+| 单测 | npm test **165 项全绿**(159 → +6:search 4、大 zip 1、多行遮罩 1) |
+| 判别力 | 5 条核心修复逐条改回旧写法,**全部如期翻红**且还原后 sha 一致 |
+| 变异测试 | npm run test:falsify 退出码 **0**,全部守卫具备判别力(修复前恒红 9 处) |
+| CSP 真机 | Edge headless + CDP:recover.html 完整可用、index.html 仍严格、拦截 0 条 |
+| 工作区 | 探针全部清理,git status 只剩预期修复文件 |
+

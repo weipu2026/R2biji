@@ -330,7 +330,7 @@ function zipWriteEntries(entries) {
     cv.setUint32(20, data.length, true);
     cv.setUint32(24, data.length, true);
     cv.setUint16(28, nameBytes.length, true);
-    cv.setUint16(42, offset, true);
+    cv.setUint32(42, offset, true); // 本地头偏移是 4 字节字段(超过 64KB 的包,2 字节会把偏移截断、整包损坏)
     central.set(nameBytes, 46);
 
     blobs.push(local, data);
@@ -1377,14 +1377,14 @@ if (typeof document !== 'undefined') {
         catch { return '?'; }
       })();
       summary.innerHTML = `<table>
-        <tr><td>备份包</td><td>${sanitizeEntryName(file.name)} · ${fmtBytes(total)}</td></tr>
+        <tr><td>备份包</td><td>${rdrEsc(sanitizeEntryName(file.name))} · ${fmtBytes(total)}</td></tr>
         <tr><td>分类(密文)</td><td>${cats.length} 个</td></tr>
         <tr><td>附件(密文)</td><td>${blobs.length} 个</td></tr>
         <tr><td>PBKDF2 迭代</td><td>${typeof iters === 'number' ? iters.toLocaleString() : iters}</td></tr>
       </table>`;
       summary.style.display = 'block';
       if (warnings.length) {
-        warnList.innerHTML = warnings.map((w) => `<li>${w}</li>`).join('');
+        warnList.innerHTML = warnings.map((w) => `<li>${rdrEsc(w)}</li>`).join('');
       }
       pwd.focus();
     } catch (e) {
@@ -1433,10 +1433,10 @@ if (typeof document !== 'undefined') {
       catList.innerHTML = '<p class="hint">包里没有分类文件。</p>';
     }
     failList.innerHTML = r.failures.length
-      ? `<b style="font-size:13px">以下条目解密失败(其余不受影响):</b><ul class="warn-list">${r.failures.map((f) => `<li>${f}</li>`).join('')}</ul>`
+      ? `<b style="font-size:13px">以下条目解密失败(其余不受影响):</b><ul class="warn-list">${r.failures.map((f) => `<li>${rdrEsc(f)}</li>`).join('')}</ul>`
       : '';
     warnList.innerHTML = (r.warnings || []).length
-      ? r.warnings.map((w) => `<li>${w}</li>`).join('')
+      ? r.warnings.map((w) => `<li>${rdrEsc(w)}</li>`).join('')
       : '';
     doneTag.textContent = `共 ${nNotes} 篇笔记${nTrash ? `、回收站 ${nTrash} 篇` : ''}、${r.attachments.length} 个附件`;
     results.style.display = 'block';

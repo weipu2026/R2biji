@@ -136,6 +136,11 @@ async function listAll(bucket, prefix) {
     if (!res.truncated) break;
     cursor = res.cursor;
   }
+  if (cursor) {
+    // 循环跑满 50 页仍有游标 = 后面还有对象被截断。个人库到不了 5 万个对象,
+    // 但真到了必须出声 —— 静默截断会让「备份明明存在却看不到」无从诊断
+    console.warn(`listAll: ${prefix} 达到 50 页上限,仅返回前 ${objects.length} 个对象,其余被截断`);
+  }
   return objects;
 }
 
@@ -299,6 +304,14 @@ async function deleteCategory(headers, env, name) {
   if (old) {
     const oldBytes = old instanceof Uint8Array ? old : new Uint8Array(await old.arrayBuffer());
     await writeBackup(env, name, oldBytes);
+  }
+  // delete 前最后核对一次版本:上面 head→get→backup 之间仍可能被并发写插空,
+  // 这次比对把竞态窗口压缩到最后一步(R2 的 delete 不支持条件参数,这是极限)
+  if (ifMatch) {
+    const latest = await env.VAULT.head(r2key);
+    if (latest && latest.etag !== ifMatch) {
+      return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
+    }
   }
   await env.VAULT.delete(r2key);
   return empty();

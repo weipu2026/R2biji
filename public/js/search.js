@@ -24,8 +24,12 @@ export function findMatches(notesByCat, query, ctx = 26) {
       let snipOffset = -1;
       if (rawIdx >= 0) {
         const start = Math.max(0, rawIdx - ctx);
+        // 压缩空白会改变长度,高亮偏移必须在**压缩后的串**上重新定位:
+        // 先量出「匹配词之前那段」压缩后的长度,它才是匹配词的新起点
+        // (旧写法拿原始下标当压缩后的偏移,匹配词前面一带空白就高亮错位)
+        const before = note.content.slice(start, rawIdx).replace(/\s+/g, ' ');
         snippet = note.content.slice(start, rawIdx + q.length + ctx).replace(/\s+/g, ' ');
-        snipOffset = rawIdx - start;
+        snipOffset = before.length;
       }
       out.push({ cat, note, inTitle, snippet, snipOffset, qLen: query.length });
     }

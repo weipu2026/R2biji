@@ -84,10 +84,16 @@ async function serveStatic(pathname, res) {
     res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('Not Found');
     return;
   }
+  // recover.html 是单文件应急页(内联 script/style):生产 _headers 对它单独放宽 CSP,
+  // 本地镜像必须保持一致,否则「本地正常、线上白屏」的分叉又会回到测试盲区
+  const sec = { ...STATIC_SEC_HEADERS };
+  if (rel === '/recover.html') {
+    sec['content-security-policy'] = "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  }
   res.writeHead(200, {
     'content-type': MIME[extname(full).toLowerCase()] || 'application/octet-stream',
     'cache-control': 'no-cache, no-store, must-revalidate',
-    ...STATIC_SEC_HEADERS,
+    ...sec,
   });
   res.end(data);
 }

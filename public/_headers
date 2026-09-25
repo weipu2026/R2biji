@@ -12,6 +12,13 @@
   Cross-Origin-Opener-Policy: same-origin
   X-Robots-Tag: noindex, nofollow, noarchive
 
+# recover.html 是单文件应急页(内联 script/style,设计为「双击即用」,不能拆外部资源)。
+# 上面的严格 CSP 会把它拦成白屏(实测:全部内联脚本样式被禁、页面完全不可用)。
+# 这里对它单独放宽内联限制;该页不承载已解锁的会话数据(只处理用户主动拖入的
+# 备份包),且主应用与其余资源仍走严格 CSP。条目名渲染处已做 HTML 转义。
+/recover.html
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
 # Service Worker 必须能被注册,且更新时不能被 HTTP 缓存吃掉
 /sw.js
   Cache-Control: no-cache

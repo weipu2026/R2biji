@@ -104,7 +104,13 @@ export class Library {
    */
   async saveCategory(name, opt = {}) {
     const cat = this.categories.get(name);
-    if (!cat || !cat.data) return { ok: true };
+    if (!cat || !cat.data) {
+      // 没有可保存的内存数据(如冲突后选「以云端版本为准」,data 已置 null)。
+      // 绝不能谎报 {ok:true} —— 调用方会把它当「保存成功」移出待保存队列,
+      // 真实存在的改动会静默脱离保存流程。如实返回 skipped,由调用方决定去向。
+      console.warn(`saveCategory:「${name}」没有内存数据可保存,已跳过`);
+      return { skipped: true };
+    }
 
     let etag = cat.lastSeenEtag;
     if (opt.force || !etag) {
@@ -161,7 +167,9 @@ export class Library {
     if (res.status === 409) throw new LibraryError(`分类「${newName}」已存在(服务器)`, 'dup');
     if (res.status !== 201) throw new LibraryError(`重命名失败(HTTP ${res.status})`, 'rename');
 
-    await API.deleteCat(oldName);
+    // 删除半程必须带条件:got.etag 是刚才 get 到的服务器当前版本 ——
+    // 不带 etag 是无条件删,并发设备刚保存的新版会被静默删掉(与 deleteCategory 同理)
+    await API.deleteCat(oldName, got.etag);
     this.categories.delete(oldName);
     this.categories.set(newName, {
       data: cat.data,

@@ -19,7 +19,7 @@ const INLINE_RE = /(\*\*([^*\n]+)\*\*)|(==([^=\n]+)==)|(`([^`\n]+)`)|(~~([^~\n]+
  * 只认「关键字后跟 :/=/：」的赋值形态;「密码学:一门学科」这类也会命中 ——
  * 宁遮勿漏,点一下就显形,误遮的代价远小于漏遮。
  */
-const SECRET_RE = /^([^:：=\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\s*[:：=]\s*)([^\s].*)$/i;
+const SECRET_RE = /^([^:：=\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\s*[:：=]\s*)([^\s].*)$/im; // m 标志:多行段落里非首行的敏感行也要遮(整段合成一个字符串交给 renderInline)
 
 /** 纯函数,导出供单测:命中返回 {prefix, secret},否则 null */
 export function splitSecretLine(text) {
@@ -160,7 +160,7 @@ export function renderMarkdown(content) {
     if (ol) {
       flushPara();
       if (listTag !== 'ol') { flushList(); listItems = []; listTag = 'ol'; }
-      listItems.push(ol[1]);
+      listItems.push(ol[2]); // ol[1] 是序号标记(如「1. 」),内容在 ol[2] —— 曾写错导致有序列表正文全丢
       i += 1;
       continue;
     }
@@ -177,11 +177,6 @@ export function renderMarkdown(content) {
   }
   flushPara(); flushList();
   return root;
-}
-
-/** 纯文本导出(复制全文用) */
-export function notePlainText(note) {
-  return note.content;
 }
 
 /** 在父元素内构建带 <mark> 高亮的文本(搜索结果用),纯 DOM */

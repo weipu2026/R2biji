@@ -170,7 +170,7 @@ const MUTANTS = [
   {
     label: '弹窗按钮退回「无条件自动 resolve」(prompt 确定返回 null)',
     file: 'public/js/ui.js',
-    from: '      if (val !== undefined) b.addEventListener(\'click\', () => { dlg.close(); resolve(val); });',
+    from: '      if (val !== undefined) b.addEventListener(\'click\', () => { dlg.close(); settle(val); });',
     to: '      b.addEventListener(\'click\', () => { dlg.close(); resolve(val); }); // MUTANT',
     expect: '点「确定」必须返回输入框里的值',
   },
@@ -304,13 +304,19 @@ let bad = 0;
 for (const m of selected) {
   const path = join(ROOT, m.file);
   const src = readFileSync(path, 'utf8');
-  if (!src.includes(m.from)) {
+  // 仓库文件是 CRLF:锚点按 \n 书写,匹配前把锚点适配成目标文件的实际行尾。
+  // 不适配的话,**所有多行锚点**都会在 CRLF 文件上失配,整套守卫静默退化成「跳过」
+  // (2026-09-25 实测:9 处失效锚点里 8 处是这个原因,只有 1 处是代码改名)
+  const eol = src.includes('\r\n') ? '\r\n' : '\n';
+  const from = m.from.split('\n').join(eol);
+  const to = m.to.split('\n').join(eol);
+  if (!src.includes(from)) {
     console.log(`[跳过] ${m.label}\n        锚点未找到(${m.file})—— 代码改过就要同步改本脚本`);
     bad += 1;
     continue;
   }
   try {
-    writeFileSync(path, src.replace(m.from, m.to), 'utf8');
+    writeFileSync(path, src.replace(from, to), 'utf8');
     const { failed, pass, fail } = runTests();
     const hit = failed.some((f) => f.includes(m.expect));
     if (hit) {

@@ -164,6 +164,21 @@ test('buildExportEntries:产出的 zip 用项目 readZipStore 能读回且内容
   assert.deepEqual([...byName.get('attachments/截图 说明.png')], [...ATTACH_BYTES]);
 });
 
+test('zipWriteEntries:超过 64KB 的包必须能读回(本地头偏移是 4 字节字段)', () => {
+  // 曾经把 4 字节字段写成 setUint16:条目偏移超过 65535 就被截断,
+  // 整包损坏 —— 而真实库必然超 64KB,应急页兜底出口在真正需要时必然失败。
+  // fixture 里塞一个大条目,让第二个条目的偏移落在 64KB 之外
+  const big = new TextEncoder().encode('x'.repeat(70 * 1024));
+  const zip = recover.zipWriteEntries([
+    { name: 'big.bin', bytes: big },
+    { name: 'small.txt', bytes: new TextEncoder().encode('hi') },
+  ]);
+  const entries = readZipStore(zip);
+  assert.deepEqual(entries.map((e) => e.name), ['big.bin', 'small.txt']);
+  assert.equal(entries[0].bytes.length, 70 * 1024);
+  assert.deepEqual([...entries[1].bytes], [...new TextEncoder().encode('hi')]);
+});
+
 test('sanitizeEntryName:路径/控制字符/空名全部挡住', () => {
   assert.equal(recover.sanitizeEntryName('a/b\\c.txt'), 'c.txt');
   assert.equal(recover.sanitizeEntryName('bad\x00name\x1f.md'), 'badname.md');

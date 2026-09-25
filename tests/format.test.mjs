@@ -146,6 +146,18 @@ test('genPassword:长度 / 字符集 / 易混淆剔除 / 类别保底 / 随机�
   }
   const pw = genPassword(16);
   assert.ok(/[a-z]/.test(pw) && /[A-Z]/.test(pw) && /[0-9]/.test(pw), '三类字符各至少一个');
+  // 类别保证必须是**构造出来**的:旧实现靠事后补塞(塞进的字符未必属于缺的那类),
+  // 20 万次实测 len=8 约 47% 仍缺数字 —— 这里 300 次小长度全部四类齐全才能通过
+  for (let i = 0; i < 300; i++) {
+    const p8 = genPassword(8);
+    assert.ok(/[a-z]/.test(p8) && /[A-Z]/.test(p8) && /[0-9]/.test(p8) && /[^a-zA-Z0-9]/.test(p8),
+      `第 ${i} 次生成缺少字符类`);
+  }
+  for (let i = 0; i < 100; i++) {
+    const p8 = genPassword(8, { symbols: false });
+    assert.ok(/[a-z]/.test(p8) && /[A-Z]/.test(p8) && /[0-9]/.test(p8),
+      `无符号模式第 ${i} 次缺少字符类`);
+  }
   const seen = new Set();
   for (let i = 0; i < 50; i++) seen.add(genPassword(16));
   assert.ok(seen.size > 45, '50 次生成几乎不应重复');

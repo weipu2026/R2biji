@@ -73,6 +73,26 @@ test('renderMarkdown:列表(1. 与 1、两种序号)', () => withDom(() => {
   assert.equal(lists[0].children.length, 2);
   assert.equal(lists[1].tag, 'ol');
   assert.equal(lists[1].children.length, 2);
+  // 内容断言:曾经只断言结构(tag+个数),ol[1] 拿成序号标记、正文全丢也照样绿
+  assert.equal(lists[1].children[0].textContent, 'c');
+  assert.equal(lists[1].children[1].textContent, 'd');
+  assert.equal(lists[0].children[0].textContent, 'a');
+}));
+
+test('renderMarkdown:敏感行在多行段落的非首行也遮罩', () => withDom(() => {
+  // 曾经 SECRET_RE 缺 m 标志:整段多行文本合成一个字符串后,^$ 只匹配整串首尾,
+  // 敏感行不在首行时明文外露(实测:单行遮、多行漏)
+  const md = renderMarkdown('先看说明文字\n登录密码: MySecret123\n再看下一段');
+  let masked = null;
+  const walk = (n) => {
+    for (const c of n.children) {
+      if (String(c.className).includes('masked')) masked = c;
+      walk(c);
+    }
+  };
+  walk(md);
+  assert.ok(masked, '多行段落中的敏感行必须被 .secret.masked 遮罩');
+  assert.equal(masked.textContent, 'MySecret123');
 }));
 
 test('renderMarkdown:零 innerHTML —— <script> 只能是文本', () => withDom(() => {

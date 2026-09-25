@@ -149,7 +149,10 @@ export const TRASH_MAX = 500;
 /* ---------- 随机密码生成 ---------- */
 
 /** 生成池刻意剔除易混淆字符(0/O/o、1/l/I):抄写密码时少一次看错的风险 */
-const GEN_BASE = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const GEN_LOWER = 'abcdefghijkmnpqrstuvwxyz';
+const GEN_UPPER = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+const GEN_DIGITS = '23456789';
+const GEN_BASE = GEN_LOWER + GEN_UPPER + GEN_DIGITS;
 const GEN_SYMBOLS = '!@#$%^&*()-_=+[]{}:,.?';
 
 /**
@@ -163,25 +166,29 @@ const GEN_SYMBOLS = '!@#$%^&*()-_=+[]{}:,.?';
 export function genPassword(len = 16, { symbols = true } = {}) {
   const n = Math.min(64, Math.max(8, Math.round(Number(len) || 16)));
   const pool = GEN_BASE + (symbols ? GEN_SYMBOLS : '');
-  const limit = Math.floor(0x100000000 / pool.length) * pool.length; // 拒绝采样上界,消除取模偏差
-  const buf = crypto.getRandomValues(new Uint32Array(n + 16));
+  const buf = crypto.getRandomValues(new Uint32Array(n * 2 + 16));
   let i = 0;
-  const next = () => {
+  const randBelow = (m) => { // 拒绝采样上界,消除取模偏差
+    const limit = Math.floor(0x100000000 / m) * m;
     let v;
     do {
       if (i >= buf.length) { crypto.getRandomValues(buf); i = 0; }
       v = buf[i];
       i += 1;
     } while (v >= limit);
-    return pool[v % pool.length];
+    return v % m;
   };
-  const out = Array.from({ length: n }, next);
-  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, ...(symbols ? [/[^a-zA-Z0-9]/] : [])];
-  for (const re of classes) {
-    if (!re.test(out.join(''))) {
-      const at = crypto.getRandomValues(new Uint32Array(1))[0] % n;
-      out[at] = next();
-    }
+  const next = () => pool[randBelow(pool.length)];
+  // 每个字符类先各取一个 —— 「小写/大写/数字各至少一个(带符号时符号也至少一个)」
+  // 是**构造出来**的承诺,不靠事后打补丁(旧写法塞进的字符未必属于缺的那一类,
+  // 20 万次实测 len=8 时约半数仍缺数字);其余位置从全池均匀取,最后整体洗牌,
+  // 不泄露「哪几位是保底位」。
+  const parts = [GEN_LOWER, GEN_UPPER, GEN_DIGITS, ...(symbols ? [GEN_SYMBOLS] : [])];
+  const out = parts.map((chars) => chars[randBelow(chars.length)]);
+  while (out.length < n) out.push(next());
+  for (let j = out.length - 1; j > 0; j--) {
+    const k = randBelow(j + 1);
+    [out[j], out[k]] = [out[k], out[j]];
   }
   return out.join('');
 }

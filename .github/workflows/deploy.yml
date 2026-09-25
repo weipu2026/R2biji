@@ -28,7 +28,7 @@
 #    「访问密钥」(ACCESS_KEY)和「主密码」是两回事——前者开门,后者解密。
 #
 # ── 流水线顺序 ──────────────────────────────────────────────────────────
-#   Validate → Deploy → Sync secret → Verify live → Audit bucket
+#   Validate → Test → Deploy → Sync secret → Verify live → Audit bucket
 # 为什么必须是这个顺序:
 #   · Sync 在 Deploy 之后:首次部署前 Worker 还不存在,`wrangler secret put` 会报 worker not found;
 #   · Verify 在 Sync 之后:它要断言「门已装上且已生效」,必须在密钥同步完成后跑;
@@ -121,6 +121,10 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      # 离线单测挡在部署之前:测试不绿就不上线(此前 CI 完全不跑测试,坏代码全靠人肉记得跑)
+      - name: Test
+        run: npm test
 
       # npm run deploy = gen-config(校验 + 注入域名/桶名) → wrangler deploy --config wrangler.deploy.toml
       # 仓库里的 wrangler.toml 只是**模板**(只有合法默认值,不含任何人的真实域名),
