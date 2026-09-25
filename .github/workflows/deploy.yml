@@ -266,17 +266,27 @@ jobs:
             echo "  ✗ 首页未返回 200(实际 $root)"; fail=1
           fi
 
+          hdr_fail=0
           hdr=$(curl -sI -m 20 "$URL/")
           for h in content-security-policy x-frame-options x-content-type-options; do
             if printf '%s' "$hdr" | grep -qi "^${h}:"; then
               echo "  ✓ 安全响应头 $h 存在"
             else
-              echo "  ✗ 缺少安全响应头 $h(public/_headers 是否生效?)"; fail=1
+              echo "  ✗ 缺少安全响应头 $h(public/_headers 是否生效?)"; hdr_fail=1
             fi
           done
 
           no_key=$(code "$URL/api/vault")
           yes_key=$(code -H "x-access-key: $ACCESS_KEY" "$URL/api/vault")
+          # secret 刚在 Sync 步骤更新,边缘节点拿到新值需要数秒(2026-09-25 实测:
+          # 同步成功后 0.8s 发请求即 401,而同步本身已成功)。401 先轮询重试再判红。
+          retries=0
+          while [ "$yes_key" = "401" ] && [ "$retries" -lt 6 ]; do
+            retries=$((retries+1))
+            echo "  … 带密钥 401,等待 5s 后重试(第 $retries/6 次;密钥可能仍在边缘传播)"
+            sleep 5
+            yes_key=$(code -H "x-access-key: $ACCESS_KEY" "$URL/api/vault")
+          done
           echo "  · /api/vault 无密钥 → $no_key ;带密钥 → $yes_key"
 
           case "$no_key" in
@@ -288,7 +298,7 @@ jobs:
 
           case "$yes_key" in
             200|404) echo "  ✓ 带密钥可访问($yes_key,404 = 库还没建)" ;;
-            401) echo "  ✗ 带密钥仍 401 —— GitHub Secrets 里的 ACCESS_KEY 与 Worker 上已有的不一致"; fail=1 ;;
+            401) echo "  ✗ 带密钥仍 401(已重试 30s)—— 排除边缘传播后,基本可断定 GitHub Secrets 里的 ACCESS_KEY 与 Worker 上已有的不一致;请核对 Secrets 值后 Re-run failed jobs"; fail=1 ;;
             *)   echo "  ✗ 带密钥预期 200/404,实际 $yes_key"; fail=1 ;;
           esac
 
@@ -299,7 +309,7 @@ jobs:
             echo "|---|---|"
             echo "| 站点地址 | $URL |"
             echo "| 首页 | $root |"
-            echo "| 安全响应头 | $([ "$fail" = 0 ] && echo 'CSP / X-Frame-Options / nosniff 齐备' || echo '有缺失') |"
+            echo "| 安全响应头 | $([ "$hdr_fail" = 0 ] && echo 'CSP / X-Frame-Options / nosniff 齐备' || echo '有缺失') |"
             echo "| 无密钥访问 /api/vault | $no_key(应为 401) |"
             echo "| 带密钥访问 /api/vault | $yes_key(应为 200/404) |"
           } >> "$GITHUB_STEP_SUMMARY"
