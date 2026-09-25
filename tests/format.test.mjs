@@ -96,6 +96,20 @@ test('笔记排序与 order 计算', () => {
   assert.equal(orderBetween(1000, 2000), 1500);
 });
 
+test('笔记排序:置顶优先,组内按 order;pin 非布尔值不炸', () => {
+  const notes = [
+    { order: 1, createdAt: 1 },                // 普通组最前
+    { order: 9000, createdAt: 2, pin: true },  // 置顶组,order 最大
+    { order: 2, createdAt: 3 },                // 普通组
+    { order: 1000, createdAt: 4, pin: 'yes' }, // 脏值:只有 === true 才算置顶
+    { order: 500, createdAt: 5, pin: true },   // 置顶组,order 最小
+  ];
+  const sorted = sortNotes(notes);
+  assert.deepEqual(sorted.map((n) => n.pin === true), [true, true, false, false, false]);
+  assert.deepEqual(sorted.map((n) => n.order), [500, 9000, 1, 2, 1000]);
+  assert.ok(sortNotes(notes) !== notes, '应返回副本,不改原数组');
+});
+
 test('seafile-ignore 内容恰好两行且不忽略自己人', () => {
   const lines = SEAFILE_IGNORE_CONTENT.trim().split('\n');
   assert.deepEqual(lines, ['*.crswap', 'backup/']);

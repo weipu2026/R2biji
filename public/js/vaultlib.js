@@ -148,6 +148,7 @@ export function normalizeNoteData(raw) {
     title: typeof n?.title === 'string' ? n.title : '无标题',
     content: typeof n?.content === 'string' ? n.content : '',
     order: Number.isFinite(n?.order) ? n.order : (i + 1) * 1000,
+    pin: n?.pin === true, // 置顶标记;老数据无此字段 = false,脏值(字符串等)收敛为布尔
     createdAt: Number.isFinite(n?.createdAt) ? n.createdAt : now,
     updatedAt: Number.isFinite(n?.updatedAt) ? n.updatedAt : now,
     attachments: Array.isArray(n?.attachments)

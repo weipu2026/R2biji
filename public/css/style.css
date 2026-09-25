@@ -97,7 +97,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 ::selection { background: rgba(47, 90, 146, .16); }
 
 /* 数字一律等宽:字数、日期、计数对齐不跳动 */
-.tabnum, .note-time, .read-meta, .save-status, .cat-count {
+.tabnum, .read-meta, .save-status, .cat-count {
   font-variant-numeric: tabular-nums;
 }
 
@@ -474,7 +474,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .note-list { flex: 1; }
 .note-item {
   display: flex; align-items: center; gap: 6px;
-  padding: 9px 8px 9px 10px;
+  padding: 7px 8px 7px 10px;
   border-radius: var(--radius);
   cursor: pointer;
   transition: background .12s;
@@ -490,25 +490,15 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .note-item.active .note-title { color: var(--text); font-weight: 600; }
-.note-preview-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-top: 3px;
+/* 置顶标识:标题前的图钉 + 轻底色,与普通项一眼可分 */
+.cat-item.pinned .cat-name::before,
+.note-item.pinned .note-title::before {
+  content: '📌 ';
+  font-size: .82em;
 }
-.note-preview {
-  flex: 1;
-  min-width: 0;
-  color: var(--muted);
-  font-size: 12px;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.note-time {
-  flex: 0 0 auto;
-  color: var(--muted);
-  font-size: 11px;
-  opacity: .85;
-}
+.cat-item.pinned, .note-item.pinned { background: var(--sel); }
+.cat-btns { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
+.cat-item:hover .cat-btns { opacity: 1; }
 .note-btns { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
 .note-item:hover .note-btns { opacity: 1; }
 
@@ -591,7 +581,9 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .read-body h1 { font-size: 21px; }
 .read-body h2 { font-size: 17.5px; }
 .read-body h3 { font-size: 15.5px; color: var(--muted); }
-.read-body p { margin: 10px 0; word-break: break-word; }
+/* pre-wrap:普通文本的回车原样显示(渲染器把连续行合成一个 <p>,HTML 默认把 \n
+ * 折叠成空格 —— 纯文本笔记曾整段粘连);textContent 不受影响,逐块复制仍带换行 */
+.read-body p { margin: 10px 0; word-break: break-word; white-space: pre-wrap; }
 .read-body ul, .read-body ol { margin: 10px 0; padding-left: 26px; }
 .read-body li { margin: 4px 0; }
 .read-body code {
@@ -909,7 +901,7 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 
 /* 触屏设备没有 hover:操作按钮常显,否则永远点不到 */
 @media (hover: none) {
-  .note-btns { opacity: 1; }
+  .note-btns, .cat-btns { opacity: 1; }
   .blk-copy { opacity: .55; }
 }
 

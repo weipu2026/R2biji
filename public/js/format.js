@@ -101,9 +101,9 @@ export function blobDisplayName(hashB64url, originalName) {
 
 /* ---------- 排序 ---------- */
 
-/** 笔记排序:浮点 order 升序;同序号按创建时间兜底 */
+/** 笔记排序:置顶(pin)优先,组内浮点 order 升序;同序号按创建时间兜底 */
 export function sortNotes(notes) {
-  return [...notes].sort((a, b) => (a.order - b.order) || (a.createdAt - b.createdAt));
+  return [...notes].sort((a, b) => ((b.pin === true) - (a.pin === true)) || (a.order - b.order) || (a.createdAt - b.createdAt));
 }
 
 /**

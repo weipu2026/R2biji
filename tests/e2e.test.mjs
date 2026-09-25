@@ -436,3 +436,43 @@ test('条件删除:A 打开后 B 保存,A 再删 → 必须 412,不能静默删�
   const notes = await after.loadCategory('秘钥');
   assert.ok(notes.notes.some((n) => n.id === 'nB'), 'B 刚保存的新笔记必须还在');
 });
+
+test('分类置顶:元信息存 vault.json 跨设备可见;vault 被他人改过时 CAS 冲突自动重放', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('pw123456', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await a.rescan();
+  await a.createCategory('工作');
+  await a.createCategory('生活');
+
+  assert.equal(a.catPin('工作'), false, '未置顶过 → false');
+  await a.setCatPin('工作', true);
+  assert.equal(a.catPin('工作'), true);
+
+  /* 另一台设备解锁:置顶跨设备可见 */
+  const b = await unlockAs('pw123456');
+  await b.rescan();
+  assert.equal(b.catPin('工作'), true, '置顶对其他设备可见');
+  assert.equal(b.catPin('生活'), false);
+
+  /* 取消置顶后 catMeta 整体摘掉,vault.json 不留空壳 */
+  await a.setCatPin('工作', false);
+  assert.equal((await API.fetchVault()).json.catMeta, undefined);
+
+  /* 冲突重放:B 在 A 之后动过 vault.json(A 手里的 etag 已过期)…… */
+  await b.setCatPin('生活', true);
+  /* ……A 再置顶 → 412 → 重拉最新 vault 并按名字重放,两次置顶都不丢 */
+  await a.setCatPin('工作', true);
+  const final = (await API.fetchVault()).json;
+  assert.equal(final.catMeta['工作']?.pin, true, 'A 的置顶在重放后生效');
+  assert.equal(final.catMeta['生活']?.pin, true, 'B 先前的置顶不被覆盖');
+
+  /* 改主密码(spread 重建 json)后 catMeta 必须保留 */
+  await a.changeMasterPassword('pw654321');
+  assert.equal((await API.fetchVault()).json.catMeta['工作']?.pin, true, '改密码不丢置顶元信息');
+});

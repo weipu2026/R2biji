@@ -547,11 +547,15 @@ function clickable(el, fn) {
 function renderCategoryList() {
   const ul = $('catList');
   ul.textContent = '';
-  const names = S.lib.listCategories(); // 只调一次:原来循环内外各查一遍
+  const names = S.lib.listCategories();
+  // 置顶优先,组内按名称排序(与云端清单字典序一致,顺序可预期)
+  names.sort((a, b) => ((S.lib.catPin(b) === true) - (S.lib.catPin(a) === true)) || a.localeCompare(b));
   for (const name of names) {
     const info = S.lib.categoryInfo(name);
+    const pinned = S.lib.catPin(name);
     const li = document.createElement('li');
     li.className = 'cat-item' + (name === S.activeCat ? ' active' : '');
+    li.classList.toggle('pinned', pinned);
     if (info?.conflict) li.classList.add('warn');
     if (info?.error) li.classList.add('broken');
 
@@ -561,6 +565,26 @@ function renderCategoryList() {
     label.title = info?.conflict ? '疑似同步冲突副本,请核对内容后处理'
       : info?.error ? `无法解密:${info.error}` : name;
     li.appendChild(label);
+
+    const btns = document.createElement('div');
+    btns.className = 'cat-btns';
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'icon-btn';
+    pinBtn.title = pinned ? '取消置顶' : '置顶';
+    pinBtn.textContent = '📌';
+    pinBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await S.lib.setCatPin(name, !pinned);
+        toast(pinned ? `已取消置顶「${name}」` : `已置顶「${name}」`);
+      } catch (err) {
+        toast(`置顶失败:${err.message}`, 'error');
+      }
+      renderCategoryList();
+    });
+    btns.appendChild(pinBtn);
+    li.appendChild(btns);
+
     clickable(li, () => openCategory(name));
     ul.appendChild(li);
   }
@@ -674,6 +698,7 @@ function renderNoteList() {
   for (const note of notes) {
     const li = document.createElement('li');
     li.className = 'note-item' + (note.id === S.activeNoteId ? ' active' : '');
+    li.classList.toggle('pinned', note.pin === true);
 
     const main = document.createElement('div');
     main.className = 'note-main';
@@ -681,20 +706,9 @@ function renderNoteList() {
     const title = document.createElement('div');
     title.className = 'note-title';
     title.textContent = note.title || '无标题';
+    // 单行清单不展开内容,悬停用原生气泡兜底给出时间与正文概要
+    li.title = `${fmtTime(note.updatedAt)} · ${(note.content.trim().replace(/\s+/g, ' ').slice(0, 60)) || '(空)'}`;
     main.appendChild(title);
-
-    const row = document.createElement('div');
-    row.className = 'note-preview-row';
-    const preview = document.createElement('div');
-    preview.className = 'note-preview';
-    preview.textContent = note.content.trim().replace(/\s+/g, ' ').slice(0, 40) || '(空)';
-    row.appendChild(preview);
-    const time = document.createElement('span');
-    time.className = 'note-time';
-    time.textContent = F.relTime(note.updatedAt);
-    time.title = `更新于 ${fmtTime(note.updatedAt)}`;
-    row.appendChild(time);
-    main.appendChild(row);
     li.appendChild(main);
 
     const btns = document.createElement('div');
@@ -709,12 +723,12 @@ function renderNoteList() {
     downBtn.title = '下移';
     downBtn.textContent = '↓';
     downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveNote(note.id, 1); });
-    const copyBtn = document.createElement('button');
-    copyBtn.className = 'icon-btn';
-    copyBtn.title = '复制全文';
-    copyBtn.textContent = '⧉';
-    copyBtn.addEventListener('click', (e) => { e.stopPropagation(); copyText(note.content, copyBtn); });
-    btns.append(upBtn, downBtn, copyBtn);
+    const pinBtn = document.createElement('button');
+    pinBtn.className = 'icon-btn';
+    pinBtn.title = note.pin ? '取消置顶' : '置顶';
+    pinBtn.textContent = '📌';
+    pinBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleNotePin(note.id); });
+    btns.append(upBtn, downBtn, pinBtn);
     li.appendChild(btns);
 
     clickable(li, () => openNote(note.id));
@@ -979,6 +993,15 @@ async function deleteNote() {
   showEmpty('笔记已移入「最近删除」,30 天内可恢复(保存后生效)');
 }
 
+function toggleNotePin(noteId) {
+  const cat = S.lib.categoryInfo(S.activeCat);
+  const note = cat?.data?.notes.find((n) => n.id === noteId);
+  if (!note) return;
+  note.pin = !note.pin;
+  markDirty(S.activeCat); // pin 存在分类密文里,随保存多端同步
+  renderNoteList();
+}
+
 function moveNote(noteId, dir) {
   const cat = S.lib.categoryInfo(S.activeCat);
   const sorted = F.sortNotes(cat.data.notes);
@@ -986,10 +1009,12 @@ function moveNote(noteId, dir) {
   if (idx < 0) return;
   const target = dir < 0 ? idx - 1 : idx + 1;
   if (target < 0 || target >= sorted.length) return;
-  // 上移:新位置夹在 sorted[idx-2] 与 sorted[idx-1] 之间;下移对称
-  const prevOrder = dir < 0 ? (sorted[idx - 2] ? sorted[idx - 2].order : null) : sorted[idx + 1].order;
-  const nextOrder = dir < 0 ? sorted[idx - 1].order : (sorted[idx + 2] ? sorted[idx + 2].order : null);
-  sorted[idx].order = F.orderBetween(prevOrder, nextOrder);
+  // 不跨置顶分区移动:分区由 pin 优先排序保证,跨区交换不会有视觉反馈
+  if ((sorted[target].pin === true) !== (sorted[idx].pin === true)) return;
+  // 相邻交换 order 值:所见即所得,且不产生中值新数(order 永不漂移)
+  const a = sorted[idx].order;
+  sorted[idx].order = sorted[target].order;
+  sorted[target].order = a;
   markDirty(S.activeCat);
   renderNoteList();
 }

@@ -87,6 +87,22 @@ test('normalizeNoteData:宽容读取、补默认值', () => {
   assert.equal(out2.notes[0].attachments.length, 1);
 });
 
+test('normalizeNoteData:pin 归一为布尔(缺失=false,脏值收敛),加密往返保留', async () => {
+  const out = normalizeNoteData({
+    notes: [{ id: 'a', pin: true }, { id: 'b', pin: 'yes' }, { id: 'c' }, { id: 'd', pin: false }],
+  });
+  assert.equal(out.notes[0].pin, true);
+  assert.equal(out.notes[1].pin, false);
+  assert.equal(out.notes[2].pin, false);
+  assert.equal(out.notes[3].pin, false);
+
+  const { dek } = await createVault('pw123456', ITER);
+  const { contentKey } = await deriveAllKeys(dek);
+  const enc = await encryptCategory(contentKey, out);
+  const back = await decryptCategory(contentKey, enc);
+  assert.equal(back.notes[0].pin, true, '置顶标记随密文保存往返不丢');
+});
+
 test('附件:内容寻址文件名稳定 + 加解密往返 + 去重语义', async () => {
   const { dek } = await createVault('pw123456', ITER);
   const { attachKey, filenameKey } = await deriveAllKeys(dek);

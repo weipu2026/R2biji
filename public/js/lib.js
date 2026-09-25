@@ -63,6 +63,59 @@ export class Library {
     return this.categories.get(name) || null;
   }
 
+  /* ============ 分类元信息(置顶等;存 vault.json.catMeta,跨设备同步) ============ */
+
+  catPin(name) {
+    return this.vaultJson?.catMeta?.[name]?.pin === true;
+  }
+
+  /**
+   * 对 vault.json 做一次元信息变更并落盘(CAS)。
+   * 412 = 别的会话刚写过 → 重拉最新 vault、在新内容上重放同一变更(按名字写,幂等)再试一次;
+   * 变更前后内容一致则不写云端(如清理不存在的元信息)。
+   * @param {(json:object)=>void} mutate 在克隆体上就地修改(纯同步函数)
+   * @returns {Promise<boolean>} 是否真的写了一次云端
+   */
+  async updateVaultMeta(mutate) {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const before = JSON.stringify(this.vaultJson);
+      const json = JSON.parse(before);
+      mutate(json);
+      const after = JSON.stringify(json);
+      if (after === before) return false;
+      try {
+        const etag = await API.putVaultJson(after, this.vaultEtag);
+        this.vaultJson = json;
+        this.vaultEtag = etag;
+        return true;
+      } catch (e) {
+        if (e?.status === 412 && attempt === 0) {
+          const fresh = await API.fetchVault();
+          if (fresh.status !== 200) throw e;
+          this.vaultJson = fresh.json; // 基于最新内容重放;下次循环的 before 自然取到新值
+          this.vaultEtag = fresh.etag;
+          continue;
+        }
+        throw e;
+      }
+    }
+    throw new LibraryError('vault.json 持续被其他会话修改,请刷新页面后重试', 'conflict');
+  }
+
+  /** 分类置顶 / 取消置顶 */
+  async setCatPin(name, pin) {
+    await this.updateVaultMeta((json) => {
+      const meta = { ...(json.catMeta || {}) };
+      const entry = { ...(meta[name] || {}) };
+      if (pin) entry.pin = true;
+      else delete entry.pin;
+      if (Object.keys(entry).length) meta[name] = entry;
+      else delete meta[name];
+      if (Object.keys(meta).length) json.catMeta = meta;
+      else delete json.catMeta; // 全空就整个摘掉,不在 vault.json 里留空壳
+    });
+  }
+
   /* ============ 分类:读 ============ */
 
   /** 懒加载:点开才解密 */
@@ -178,6 +231,15 @@ export class Library {
       conflict: false,
       error: null,
     });
+    // 置顶等元信息跟着改名走;失败不影响改名本身(下次重命名会再对齐)
+    if (this.vaultJson?.catMeta?.[oldName]) {
+      try {
+        await this.updateVaultMeta((json) => {
+          json.catMeta[newName] = json.catMeta[oldName];
+          delete json.catMeta[oldName];
+        });
+      } catch { /* 元信息迁移失败只影响置顶显示,不回滚改名 */ }
+    }
     return newName;
   }
 
@@ -191,6 +253,10 @@ export class Library {
     }
     await API.deleteCat(name, cat.lastSeenEtag); // 服务器删除前自动备份;412 = 刚被其他设备改过,上层如实提示
     this.categories.delete(name);
+    // 残留的置顶元信息顺手清掉;失败无害(名字已不在清单里,永不显示)
+    if (this.vaultJson?.catMeta?.[name]) {
+      try { await this.setCatPin(name, false); } catch { /* 忽略 */ }
+    }
   }
 
   /* ============ vault.json ============ */
