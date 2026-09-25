@@ -116,14 +116,17 @@
     <div class="warn-list" id="warnList"></div>
     <div class="btn-row" style="margin-top:16px">
       <button class="btn primary" id="btnAll">下载全部明文（zip）</button>
+      <button class="btn" id="btnReader" title="生成一个内嵌密文的单文件阅读站:双击打开、输主密码就能像网站一样浏览">生成离线阅读站（加密）</button>
       <button class="btn" id="btnReset">换一个备份包</button>
     </div>
+    <p class="hint" id="readerNote" style="display:none;margin:10px 0 0"></p>
   </div>
 
   <div class="foot">
     <b>平时怎么用：</b>把这个 HTML 文件和备份 zip 存在一起（U 盘 / 本地盘 / 网盘都行）。它不依赖任何网站，离线双击即可打开。<br>
     <b>出事那天：</b>双击本文件 → 拖入备份包 → 输主密码 → 每个分类导出明文 .md，附件按原名导出，另有完整 JSON 备底。<br>
-    <b>记住：</b>主密码是唯一钥匙，忘了谁都打不开；备份包本身是密文，丢了没关系，泄露了别人也读不出内容（但请勿外泄）。
+    <b>想告别这套系统：</b>解密后点「生成离线阅读站」—— 得到一个内嵌密文的单文件 HTML,双击输主密码就能像网站一样浏览和搜索,不依赖本页、不依赖任何服务器。<br>
+    <b>记住：</b>主密码是唯一钥匙，忘了谁都打不开；备份包和阅读站本身都是密文，丢了没关系，泄露了别人也读不出内容（但请勿外泄）。
   </div>
 </div>
 
@@ -372,6 +375,17 @@ function deriveSubkey(dekBytes, info) {
 function deriveContentKey(dekBytes) { return deriveSubkey(dekBytes, 'JMBIJI-content-v1'); }
 function deriveAttachKey(dekBytes) { return deriveSubkey(dekBytes, 'JMBIJI-attach-v1'); }
 
+/** 加密用途的同族子钥(HKDF info 与上面一一对应,可互解) */
+function deriveSubkeyWithUsages(dekBytes, info, usages) {
+  return crypto.subtle.importKey('raw', dekBytes, 'HKDF', false, ['deriveKey']).then((base) =>
+    crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: te.encode(info) },
+      base, { name: 'AES-GCM', length: 256 }, false, usages,
+    ));
+}
+function deriveContentKeyEnc(dekBytes) { return deriveSubkeyWithUsages(dekBytes, 'JMBIJI-content-v1', ['encrypt']); }
+function deriveAttachKeyEnc(dekBytes) { return deriveSubkeyWithUsages(dekBytes, 'JMBIJI-attach-v1', ['encrypt']); }
+
 async function openJmb(key, magic, fileBytes) {
   if (!(fileBytes instanceof Uint8Array) || fileBytes.length < HEADER_LEN + TAG_LEN) {
     throw new Error('文件过短或已截断');
@@ -537,6 +551,7 @@ async function decryptBackupPackage(zipBytes, password) {
 
   const usedNames = new Set();
   const attachments = [];
+  const blobs = []; // 供离线阅读站按内容键引用:{file: 桶内键, name: 原名, bytes: 明文}
   for (const e of entries) {
     if (!e.name.startsWith('blobs/')) continue;
     const file = e.name.slice(6);
@@ -551,12 +566,13 @@ async function decryptBackupPackage(zipBytes, password) {
       while (usedNames.has(finalName)) finalName = `${stem}-${i++}${ext}`;
       usedNames.add(finalName);
       attachments.push({ name: finalName, bytes });
+      blobs.push({ file, name: finalName, bytes });
     } catch (err) {
       failures.push(`附件「${file}」:${err.message}`);
     }
   }
 
-  return { vaultInfo: vaultJson, categories, attachments, failures, warnings };
+  return { vaultInfo: vaultJson, categories, attachments, blobs, failures, warnings };
 }
 
 /** 结果 → 导出 zip 的条目列表(README + notes/*.md + 全量 JSON + attachments/*) */
@@ -586,6 +602,707 @@ function buildExportEntries(result) {
 }
 
 /* ============================================================
+ * 离线阅读站(内嵌密文的单文件 HTML)
+ *
+ * buildReaderSite(解密结果, 主密码, vaultInfo) → {name, html, embedded, skipped, bytes}
+ *  - 新造一把 DEK,用主密码(沿用库的 PBKDF2 迭代数)AES-KW 包裹后内嵌
+ *  - 目录(全部分类/笔记/回收站)按 JMB1 加密内嵌;附件按 JMBB 原样格式
+ *    重新加密内嵌(预算内),引用关系走内容键,原名只存在密文目录里
+ *  - 生成的 HTML 不含任何明文内容 —— 双击打开输主密码,在本页解密渲染
+ * ============================================================ */
+
+/** 附件密文内嵌总预算(base64 后的字节数) */
+const READER_BLOB_LIMIT = 64 * 1048576;
+
+/** 加密 counterpart of openJmb:魔数(4B)+版本(1B)+nonce(12B)+GCM,AAD=文件头 */
+async function encryptJmb(key, magic, plainBytes) {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const header = new Uint8Array(HEADER_LEN);
+  header.set(te.encode(magic), 0);
+  header[4] = 1;
+  header.set(nonce, 5);
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: nonce, additionalData: header, tagLength: 128 }, key, plainBytes,
+  ));
+  const out = new Uint8Array(HEADER_LEN + ct.length);
+  out.set(header, 0);
+  out.set(ct, HEADER_LEN);
+  return out;
+}
+
+/** 主密码 → KEK → AES-KW 包裹裸 DEK(阅读站的钥匙信封) */
+async function wrapDekForReader(dekBytes, password, salt, iterations) {
+  const kekBytes = await deriveKekBytes(password, salt, iterations);
+  const kek = await crypto.subtle.importKey('raw', kekBytes, { name: 'AES-KW' }, false, ['wrapKey']);
+  const dekKey = await crypto.subtle.importKey('raw', dekBytes, { name: 'AES-KW' }, true, ['wrapKey']);
+  const wrapped = new Uint8Array(await crypto.subtle.wrapKey('raw', dekKey, kek, { name: 'AES-KW' }));
+  return bytesToB64(wrapped);
+}
+
+/** 解密结果 → 阅读站目录(纯 JSON,随后整体加密) */
+function buildCatalogJson(result) {
+  return {
+    exportedAt: new Date().toISOString(),
+    categories: result.categories.map((c) => ({
+      name: c.name,
+      notes: c.data.notes,
+      trash: c.data.trash,
+    })),
+  };
+}
+
+/** 时间戳:20260925-1136 */
+function stampForName() {
+  const d = new Date();
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}`;
+}
+
+/**
+ * 生成离线阅读站。
+ * @returns {Promise<{name:string, html:string, embedded:number, skipped:string[], bytes:number}>}
+ */
+async function buildReaderSite(result, password, vaultInfo) {
+  if (!password) throw new Error('主密码不能为空');
+  if (!result || !Array.isArray(result.categories) || !Array.isArray(result.blobs)) {
+    throw new Error('解密结果不完整,无法生成阅读站');
+  }
+  const iters = Math.min(
+    Math.max(1, Math.floor(vaultInfo && vaultInfo.kdf && vaultInfo.kdf.iterations) || 1_000_000),
+    ITER_MAX,
+  );
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const dek = crypto.getRandomValues(new Uint8Array(32));
+
+  const wrappedDek = await wrapDekForReader(dek, password, salt, iters);
+  const contentKey = await deriveContentKeyEnc(dek);
+  const attachKey = await deriveAttachKeyEnc(dek);
+
+  const catalogCt = await encryptJmb(
+    contentKey, MAGIC_CAT, te.encode(JSON.stringify(buildCatalogJson(result))),
+  );
+
+  const embedded = [];
+  const skipped = [];
+  let budget = READER_BLOB_LIMIT;
+  for (const b of result.blobs) {
+    const b64 = bytesToB64(await encryptJmb(attachKey, MAGIC_BLOB, b.bytes));
+    if (b64.length + 64 > budget) { skipped.push(b.name); continue; }
+    budget -= b64.length;
+    embedded.push({ file: b.file, data: b64 }); // 原名在密文目录里,这里只放内容键
+  }
+
+  const dataJson = JSON.stringify({
+    v: 1,
+    exported: new Date().toISOString(),
+    kdf: { name: 'PBKDF2', hash: 'SHA-256', salt: bytesToB64(salt), iterations: iters },
+    dek: wrappedDek,
+    catalog: bytesToB64(catalogCt),
+    nBlobs: embedded.length,
+  });
+  const blobsJson = JSON.stringify(embedded).replace(/</g, '\\u003c');
+
+  const html = READER_TEMPLATE
+    .split('@@DATA@@').join(dataJson)
+    .split('@@BLOBS@@').join(blobsJson);
+  return {
+    name: `R2biji阅读站_${stampForName()}.html`,
+    html,
+    embedded: embedded.length,
+    skipped,
+    bytes: te.encode(html).length,
+  };
+}
+
+/* ============================================================
+ * 阅读站模板。占位符:@@DATA@@ / @@BLOBS@@(均为 JSON,且不含明文内容)。
+ * ⚠️ 本模板是 recover.html script 标签内的模板字符串:反引号写成 \`,
+ *    script 结束标签写成 <\/script>(防 HTML 解析器截断),并禁用 ${ 插值。
+ * ============================================================ */
+const READER_TEMPLATE = `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>R2biji · 离线书斋</title>
+<style>
+  :root {
+    --paper: #f7f5ef; --panel: #fffdf9; --hair: #e5e0d4;
+    --ink: #2b2925; --soft: #8a857a;
+    --accent: #2f5a92; --accent-weak: #e9eef6;
+    --mask: #d9d4c8; --mark: #f3e3b0; --err: #a32d2d;
+  }
+  html[data-theme="dark"] {
+    --paper: #1d2026; --panel: #242830; --hair: #343945;
+    --ink: #d6d3c9; --soft: #8b8f97;
+    --accent: #7fa7d9; --accent-weak: #2b3750;
+    --mask: #3a3f4a; --mark: #5a5230; --err: #d8756b;
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font: 15px/1.85 -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* ---- 锁屏 ---- */
+  #lock { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 24px; }
+  .lock-card {
+    width: 400px; max-width: 100%; background: var(--panel);
+    border: 1px solid var(--hair); border-radius: 10px; padding: 34px 30px 28px; text-align: center;
+  }
+  .seal {
+    display: inline-flex; width: 44px; height: 44px; border: 1.5px solid var(--accent);
+    color: var(--accent); border-radius: 8px; align-items: center; justify-content: center;
+    font-family: Georgia, "Songti SC", SimSun, serif; font-size: 18px; font-weight: 600; letter-spacing: 1px;
+  }
+  .lock-card h1 { font-family: Georgia, "Songti SC", SimSun, serif; font-size: 21px; margin: 14px 0 8px; letter-spacing: 1px; }
+  .lock-card .desc { color: var(--soft); font-size: 13px; line-height: 1.8; margin: 0 0 18px; text-align: left; }
+  #lpwd {
+    width: 100%; padding: 10px 12px; font-size: 15px; border: 1px solid var(--hair);
+    border-radius: 6px; background: var(--paper); color: var(--ink);
+  }
+  #lpwd:focus { outline: none; border-color: var(--accent); }
+  #lbtn {
+    width: 100%; margin-top: 12px; padding: 9px 0; font-size: 14px; border: 0; border-radius: 6px;
+    background: var(--accent); color: var(--panel); cursor: pointer;
+  }
+  #lbtn:hover { filter: brightness(1.08); }
+  #lbtn:disabled { opacity: .5; cursor: wait; }
+  #lerr { color: var(--err); font-size: 13px; margin-top: 10px; min-height: 18px; }
+  /* ---- 主框架 ---- */
+  #app { display: flex; flex-direction: column; height: 100vh; }
+  .top {
+    display: flex; align-items: center; justify-content: space-between; height: 52px;
+    padding: 0 16px; border-bottom: 1px solid var(--hair); background: var(--panel); flex-shrink: 0;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand .seal { width: 30px; height: 30px; font-size: 12px; border-radius: 6px; }
+  .brand b { font-family: Georgia, "Songti SC", SimSun, serif; font-size: 15px; letter-spacing: .5px; display: block; line-height: 1.25; }
+  .brand small { color: var(--soft); font-size: 11px; }
+  .top-actions { display: flex; gap: 8px; }
+  .rbtn {
+    width: 32px; height: 32px; border: 1px solid var(--hair); border-radius: 50%;
+    background: transparent; color: var(--soft); cursor: pointer; font-size: 14px; line-height: 1;
+    display: inline-flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .rbtn:hover { border-color: var(--accent); color: var(--accent); }
+  .frame { display: flex; flex: 1; min-height: 0; }
+  .side {
+    width: 264px; flex-shrink: 0; border-right: 1px solid var(--hair);
+    background: var(--panel); display: flex; flex-direction: column;
+  }
+  .search-box { padding: 10px 12px; border-bottom: 1px solid var(--hair); }
+  .search-box input {
+    width: 100%; padding: 7px 10px; font-size: 13px; border: 1px solid var(--hair);
+    border-radius: 6px; background: var(--paper); color: var(--ink);
+  }
+  .search-box input:focus { outline: none; border-color: var(--accent); }
+  #nav { overflow-y: auto; flex: 1; padding: 6px 6px 24px; }
+  .cat-label { font-size: 11px; color: var(--soft); letter-spacing: 1px; padding: 12px 10px 4px; font-weight: 600; }
+  .note-it {
+    display: block; width: 100%; text-align: left; border: 0; background: transparent;
+    padding: 7px 10px; border-radius: 6px; cursor: pointer; color: var(--ink); font: inherit; line-height: 1.5;
+  }
+  .note-it:hover { background: var(--accent-weak); }
+  .note-it.on { background: var(--accent-weak); box-shadow: inset 3px 0 0 var(--accent); }
+  .note-it .t { display: block; font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .note-it .m { display: block; font-size: 11px; color: var(--soft); font-variant-numeric: tabular-nums; }
+  .badge-trash { font-size: 10px; color: var(--soft); border: 1px solid var(--hair); border-radius: 4px; padding: 0 4px; margin-left: 6px; }
+  .main { flex: 1; overflow-y: auto; min-width: 0; }
+  #view { max-width: 76ch; margin: 0 auto; padding: 38px 30px 80px; }
+  .empty { color: var(--soft); text-align: center; margin-top: 18vh; font-size: 14px; }
+  .v-title { font-family: Georgia, "Songti SC", SimSun, serif; font-size: 23px; margin: 0 0 6px; line-height: 1.4; }
+  .v-meta {
+    color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums;
+    border-bottom: 1px solid var(--hair); padding-bottom: 14px; margin-bottom: 20px;
+  }
+  .md p { margin: 0 0 14px; }
+  .md h1, .md h2, .md h3 { font-family: Georgia, "Songti SC", SimSun, serif; line-height: 1.4; margin: 22px 0 10px; }
+  .md h1 { font-size: 20px; } .md h2 { font-size: 17.5px; } .md h3 { font-size: 15.5px; }
+  .md ul, .md ol { margin: 0 0 14px; padding-left: 24px; }
+  .md li { margin: 3px 0; }
+  .md pre {
+    background: var(--panel); border: 1px solid var(--hair); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.7;
+  }
+  .md code { font-family: Consolas, Menlo, monospace; font-size: .92em; background: var(--accent-weak); border-radius: 4px; padding: 1px 5px; }
+  .md pre code { background: transparent; padding: 0; }
+  .md mark { background: var(--mark); color: inherit; padding: 0 2px; }
+  .secret { cursor: pointer; }
+  .secret.masked {
+    background: var(--mask); color: transparent; border-radius: 4px;
+    filter: blur(4px); user-select: none;
+  }
+  .atts { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--hair); }
+  .att-chip {
+    display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--hair);
+    background: var(--panel); border-radius: 6px; padding: 4px 12px; font-size: 12.5px;
+    margin: 0 8px 8px 0; cursor: pointer; color: var(--ink); font: inherit;
+  }
+  .att-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .att-chip.off { opacity: .5; cursor: not-allowed; }
+  @media (max-width: 760px) {
+    .frame { flex-direction: column; }
+    .side { width: 100%; max-height: 42vh; border-right: 0; border-bottom: 1px solid var(--hair); }
+  }
+</style>
+</head>
+<body>
+<div id="lock">
+  <div class="lock-card">
+    <span class="seal">R2</span>
+    <h1>R2biji · 离线书斋</h1>
+    <p class="desc">这是一个自包含的只读阅读站:文件里内嵌的是<b>全库密文</b>,不含任何明文。
+    输入主密码后在本页解密阅读 —— 全程离线,不发出任何网络请求。</p>
+    <input type="password" id="lpwd" placeholder="主密码" autocomplete="off">
+    <button id="lbtn" type="button">解锁阅读</button>
+    <div id="lerr"></div>
+  </div>
+</div>
+<div id="app" hidden>
+  <header class="top">
+    <div class="brand">
+      <span class="seal">R2</span>
+      <div><b>R2biji · 离线书斋</b><small id="expInfo"></small></div>
+    </div>
+    <div class="top-actions">
+      <button class="rbtn" id="btnTheme" type="button" title="明暗切换">☾</button>
+      <button class="rbtn" id="btnLockTop" type="button" title="锁定(清空内存中的明文)">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      </button>
+    </div>
+  </header>
+  <div class="frame">
+    <aside class="side">
+      <div class="search-box"><input id="q" placeholder="搜索标题或正文…"></div>
+      <nav id="nav"></nav>
+    </aside>
+    <main class="main"><article id="view"><div class="empty">解锁后,从左侧选择一篇笔记</div></article></main>
+  </div>
+</div>
+<noscript>本文件需要启用 JavaScript 才能解密阅读(解密在本机完成,无任何网络行为)。</noscript>
+<script id="reader-data" type="application/json">@@DATA@@<\/script>
+<script id="reader-blobs" type="application/json">@@BLOBS@@<\/script>
+<script>
+/*READER-SCRIPT-START*/
+'use strict';
+/* ============================================================
+ * R2biji 离线书斋 —— 单文件只读阅读站。
+ * 加密链与主站一致:PBKDF2(salt,iterations)→AES-KW unwrap→HKDF→AES-256-GCM。
+ * 纯逻辑函数全部在 DOM 之前;Node 测试抽取本段与 recover.html 双实现互证。
+ * ============================================================ */
+var RDR_MAGIC_CAT = 'JMB1';
+var RDR_MAGIC_BLOB = 'JMBB';
+var RDR_HEADER_LEN = 17;
+var RDR_TAG_LEN = 16;
+
+var rdrTe = new TextEncoder();
+var rdrTd = new TextDecoder();
+
+function rdrB64ToBytes(s) {
+  var bin = atob(s);
+  var out = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function fmtDate(ts) {
+  if (!Number.isFinite(ts)) return '未知时间';
+  var d = new Date(ts);
+  var p = function (n) { return String(n).padStart(2, '0'); };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+    + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+async function rdrDeriveKek(password, salt, iterations) {
+  var iters = Math.min(Math.max(1, Math.floor(iterations) || 1), 8000000);
+  var base = await crypto.subtle.importKey('raw', rdrTe.encode(String(password)), 'PBKDF2', false, ['deriveBits']);
+  return new Uint8Array(await crypto.subtle.deriveBits(
+    { name: 'PBKDF2', hash: 'SHA-256', salt: salt, iterations: iters }, base, 256,
+  ));
+}
+
+function rdrDeriveSubkey(dekBytes, info) {
+  return crypto.subtle.importKey('raw', dekBytes, 'HKDF', false, ['deriveKey']).then(function (base) {
+    return crypto.subtle.deriveKey(
+      { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: rdrTe.encode(info) },
+      base, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+    );
+  });
+}
+
+function rdrContentKey(dekBytes) { return rdrDeriveSubkey(dekBytes, 'JMBIJI-content-v1'); }
+function rdrAttachKey(dekBytes) { return rdrDeriveSubkey(dekBytes, 'JMBIJI-attach-v1'); }
+
+async function rdrOpen(key, magic, fileBytes) {
+  if (!(fileBytes instanceof Uint8Array) || fileBytes.length < RDR_HEADER_LEN + RDR_TAG_LEN) {
+    throw new Error('密文过短或已截断');
+  }
+  var header = fileBytes.slice(0, RDR_HEADER_LEN);
+  if (rdrTd.decode(header.slice(0, 4)) !== magic) throw new Error('魔数不符');
+  if (fileBytes[4] !== 1) throw new Error('不支持的格式版本');
+  var nonce = fileBytes.slice(5, RDR_HEADER_LEN);
+  var ct = fileBytes.slice(RDR_HEADER_LEN);
+  try {
+    return new Uint8Array(await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: nonce, additionalData: header, tagLength: 128 }, key, ct,
+    ));
+  } catch (e) {
+    throw new Error('解密失败(密钥不符或密文被篡改)');
+  }
+}
+
+/**
+ * 解锁:数据块 + 主密码 → { catalog, dek, exported }
+ * 密码不对 → Error('主密码不对…')
+ */
+async function readerUnlock(data, password) {
+  if (!data || data.v !== 1 || !data.kdf || typeof data.dek !== 'string' || typeof data.catalog !== 'string') {
+    throw new Error('数据块缺失或版本不符,文件已损坏');
+  }
+  var kekBytes = await rdrDeriveKek(password, rdrB64ToBytes(data.kdf.salt), data.kdf.iterations);
+  var kek = await crypto.subtle.importKey('raw', kekBytes, { name: 'AES-KW' }, false, ['unwrapKey']);
+  var dekKey;
+  try {
+    dekKey = await crypto.subtle.unwrapKey(
+      'raw', rdrB64ToBytes(data.dek), kek,
+      { name: 'AES-KW' }, { name: 'AES-KW' }, true, ['unwrapKey'],
+    );
+  } catch (e) {
+    throw new Error('主密码不对(密钥解包失败)。密码是唯一钥匙,请确认大小写与字符。');
+  }
+  var dek = new Uint8Array(await crypto.subtle.exportKey('raw', dekKey));
+  var contentKey = await rdrContentKey(dek);
+  var plain;
+  try {
+    plain = await rdrOpen(contentKey, RDR_MAGIC_CAT, rdrB64ToBytes(data.catalog));
+  } catch (e) {
+    throw new Error('目录密文解密失败,文件可能被改动');
+  }
+  var catalog;
+  try { catalog = JSON.parse(rdrTd.decode(plain)); } catch (e) { throw new Error('目录不是合法 JSON'); }
+  if (!catalog || !Array.isArray(catalog.categories)) throw new Error('目录结构异常');
+  return { catalog: catalog, dek: dek, exported: data.exported || '' };
+}
+
+/* ---------- Markdown 子集渲染(与主站 render.js 同一套语法,字符串版) ---------- */
+
+function rdrEsc(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+/* 交替顺序即优先级:**粗** 先于 *斜*(与主站 render.js 一致) */
+var RDR_INLINE_RE = /(\\*\\*([^*\\n]+)\\*\\*)|(==([^=\\n]+)==)|(\`([^\`\\n]+)\`)|(~~([^~\\n]+)~~)|(\\*([^*\\n]+)\\*)/g;
+var RDR_SECRET_RE = /^([^:：=\\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\\s*[:：=]\\s*)([^\\s].*)$/i;
+
+function rdrInlineCore(text) {
+  RDR_INLINE_RE.lastIndex = 0;
+  var out = '', last = 0, m;
+  while ((m = RDR_INLINE_RE.exec(text)) !== null) {
+    if (m.index > last) out += rdrEsc(text.slice(last, m.index));
+    if (m[1] !== undefined) out += '<strong>' + rdrEsc(m[2]) + '</strong>';
+    else if (m[3] !== undefined) out += '<mark>' + rdrEsc(m[4]) + '</mark>';
+    else if (m[5] !== undefined) out += '<code>' + rdrEsc(m[6]) + '</code>';
+    else if (m[7] !== undefined) out += '<del>' + rdrEsc(m[8]) + '</del>';
+    else out += '<em>' + rdrEsc(m[10]) + '</em>';
+    last = RDR_INLINE_RE.lastIndex;
+  }
+  if (last < text.length) out += rdrEsc(text.slice(last));
+  return out;
+}
+
+function rdrInline(text, allowSecret) {
+  if (allowSecret) {
+    var m = RDR_SECRET_RE.exec(text);
+    if (m) {
+      return rdrInlineCore(m[1])
+        + '<span class="secret masked" title="点击显示 / 再点隐藏">' + rdrEsc(m[2]) + '</span>';
+    }
+  }
+  return rdrInlineCore(text);
+}
+
+function rdrMd(content) {
+  var lines = String(content).replace(/\\r\\n?/g, '\\n').split('\\n');
+  var html = [], para = [], list = null, listTag = null;
+  var flushPara = function () {
+    if (para.length) { html.push('<p>' + rdrInline(para.join('\\n'), true) + '</p>'); para = []; }
+  };
+  var flushList = function () {
+    if (!list) return;
+    var lis = [];
+    for (var i = 0; i < list.length; i++) lis.push('<li>' + rdrInline(list[i], true) + '</li>');
+    html.push('<' + listTag + '>' + lis.join('') + '</' + listTag + '>');
+    list = null; listTag = null;
+  };
+  var i = 0;
+  while (i < lines.length) {
+    var line = lines[i];
+    if (/^\`\`\`/.test(line)) {
+      flushPara(); flushList();
+      var buf = [];
+      i += 1;
+      while (i < lines.length && !/^\`\`\`/.test(lines[i])) { buf.push(lines[i]); i += 1; }
+      i += 1;
+      html.push('<pre><code>' + rdrEsc(buf.join('\\n')) + '</code></pre>');
+      continue;
+    }
+    var h = /^(#{1,3})\\s+(.*)$/.exec(line);
+    if (h) {
+      flushPara(); flushList();
+      html.push('<h' + h[1].length + '>' + rdrInline(h[2], true) + '</h' + h[1].length + '>');
+      i += 1; continue;
+    }
+    var ul = /^[-*]\\s+(.*)$/.exec(line);
+    if (ul) {
+      flushPara();
+      if (listTag !== 'ul') { flushList(); list = []; listTag = 'ul'; }
+      list.push(ul[1]); i += 1; continue;
+    }
+    var ol = /^(\\d{1,3}[.)]\\s+|\\d{1,3}、\\s*)(.*)$/.exec(line);
+    if (ol) {
+      flushPara();
+      if (listTag !== 'ol') { flushList(); list = []; listTag = 'ol'; }
+      list.push(ol[2]); i += 1; continue;
+    }
+    if (line.trim() === '') { flushPara(); flushList(); i += 1; continue; }
+    flushList(); para.push(line); i += 1;
+  }
+  flushPara(); flushList();
+  return html.join('\\n');
+}
+
+/* ============================================================
+ * DOM 部分 —— Node 测试环境不存在 document,以下不参与纯逻辑导出
+ * ============================================================ */
+if (typeof document !== 'undefined') {
+  var $ = function (id) { return document.getElementById(id); };
+  var DATA = null, BLOBS = {};
+  try {
+    DATA = JSON.parse($('reader-data').textContent);
+    var blobList = JSON.parse($('reader-blobs').textContent);
+    for (var bi = 0; bi < blobList.length; bi++) BLOBS[blobList[bi].file] = blobList[bi].data;
+  } catch (e) { /* 数据块损坏:解锁时会报错 */ }
+
+  var st = { unlocked: null, maskTimers: [] };
+
+  function lerr(msg) {
+    var el = $('lerr');
+    el.textContent = msg || '';
+  }
+
+  function setTheme(dark) {
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+    $('btnTheme').textContent = dark ? '☀' : '☾';
+  }
+  setTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  $('btnTheme').addEventListener('click', function () {
+    setTheme(document.documentElement.getAttribute('data-theme') !== 'dark');
+  });
+
+  function clearMasks() {
+    for (var i = 0; i < st.maskTimers.length; i++) clearTimeout(st.maskTimers[i]);
+    st.maskTimers = [];
+  }
+
+  function sanitizeName(name) {
+    var s = String(name || '').split(/[\\\\/]/).pop() || '';
+    var out = '';
+    for (var i = 0; i < s.length; i++) {
+      var c = s.charCodeAt(i);
+      if (c >= 0x20 && c !== 0x7f) out += s[i];
+    }
+    return (out.trim() || '未命名').slice(0, 120);
+  }
+
+  function downloadBytes(name, bytes) {
+    var blob = new Blob([bytes], { type: 'application/octet-stream' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url; a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+
+  async function downloadAtt(meta) {
+    var data64 = BLOBS[meta.file];
+    if (!data64) return;
+    try {
+      var plain = await rdrOpen(st.unlocked.attachKey, RDR_MAGIC_BLOB, rdrB64ToBytes(data64));
+      downloadBytes(sanitizeName(meta.name || meta.file), plain);
+    } catch (e) {
+      alert('附件解密失败:' + e.message);
+    }
+  }
+
+  function buildNav(q) {
+    var nav = $('nav');
+    nav.innerHTML = '';
+    var cats = st.unlocked.catalog.categories;
+    var shown = 0;
+    var needle = (q || '').toLowerCase();
+    for (var ci = 0; ci < cats.length; ci++) {
+      var cat = cats[ci];
+      var items = [];
+      for (var ni = 0; ni < (cat.notes || []).length; ni++) items.push({ n: cat.notes[ni], ni: ni, trash: false });
+      for (var ti = 0; ti < (cat.trash || []).length; ti++) items.push({ n: cat.trash[ti], ni: ti, trash: true });
+      var hits = [];
+      for (var ii = 0; ii < items.length; ii++) {
+        if (!needle) { hits.push(items[ii]); continue; }
+        var hay = ((items[ii].n.title || '') + '\\n' + (items[ii].n.content || '')).toLowerCase();
+        if (hay.indexOf(needle) !== -1) hits.push(items[ii]);
+      }
+      if (!hits.length) continue;
+      var label = document.createElement('div');
+      label.className = 'cat-label';
+      label.textContent = cat.name;
+      nav.appendChild(label);
+      for (var hi = 0; hi < hits.length; hi++) {
+        shown += 1;
+        (function (it, cat, ci) {
+          var b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'note-it';
+          b.setAttribute('data-ci', ci);
+          b.setAttribute('data-ni', it.ni);
+          b.setAttribute('data-trash', it.trash ? '1' : '');
+          var t = document.createElement('span');
+          t.className = 't';
+          t.textContent = (it.n.title && String(it.n.title)) || '无标题';
+          if (it.trash) {
+            var bg = document.createElement('span');
+            bg.className = 'badge-trash';
+            bg.textContent = '回收站';
+            t.appendChild(bg);
+          }
+          var m = document.createElement('span');
+          m.className = 'm';
+          m.textContent = fmtDate(it.n.updatedAt) + ' · ' + ((it.n.content || '').length) + ' 字';
+          b.appendChild(t); b.appendChild(m);
+          b.addEventListener('click', function () {
+            showNote(cat.name, it.n, it.trash, b);
+          });
+          nav.appendChild(b);
+        })(hits[hi], cat, ci);
+      }
+    }
+    if (!shown) {
+      var empty = document.createElement('div');
+      empty.className = 'empty';
+      empty.style.marginTop = '40px';
+      empty.textContent = needle ? ('没有匹配「' + q + '」的笔记') : '这个库还没有笔记';
+      nav.appendChild(empty);
+    }
+  }
+
+  function showNote(catName, n, trash, btn) {
+    clearMasks();
+    var view = $('view');
+    view.innerHTML = '';
+    var h = document.createElement('h1');
+    h.className = 'v-title';
+    h.textContent = (n.title && String(n.title)) || '无标题';
+    var meta = document.createElement('div');
+    meta.className = 'v-meta';
+    meta.textContent = '创建 ' + fmtDate(n.createdAt) + ' · 更新 ' + fmtDate(n.updatedAt)
+      + (trash && n.deletedAt ? ' · 删除于 ' + fmtDate(n.deletedAt) : '')
+      + ' · ' + catName;
+    var body = document.createElement('div');
+    body.className = 'md';
+    body.innerHTML = rdrMd(String(n.content || ''));
+    view.appendChild(h); view.appendChild(meta); view.appendChild(body);
+
+    var atts = Array.isArray(n.attachments) ? n.attachments : [];
+    if (atts.length) {
+      var box = document.createElement('div');
+      box.className = 'atts';
+      for (var i = 0; i < atts.length; i++) {
+        (function (a) {
+          var chip = document.createElement('button');
+          chip.type = 'button';
+          var has = Object.prototype.hasOwnProperty.call(BLOBS, a.file);
+          chip.className = 'att-chip' + (has ? '' : ' off');
+          chip.textContent = (has ? '下载附件 · ' : '未包含(超出预算) · ') + (a.name || a.file);
+          if (has) chip.addEventListener('click', function () { downloadAtt(a); });
+          box.appendChild(chip);
+        })(atts[i]);
+      }
+      view.appendChild(box);
+    }
+    var olds = document.querySelectorAll('.note-it.on');
+    for (var j = 0; j < olds.length; j++) olds[j].classList.remove('on');
+    if (btn) btn.classList.add('on');
+    document.querySelector('.main').scrollTop = 0;
+  }
+
+  function lock() {
+    clearMasks();
+    st.unlocked = null;
+    $('app').hidden = true;
+    $('lock').hidden = false;
+    $('nav').innerHTML = '';
+    $('view').innerHTML = '<div class="empty">解锁后,从左侧选择一篇笔记</div>';
+    $('q').value = '';
+    $('lpwd').value = '';
+    $('lbtn').disabled = false;
+    $('lbtn').textContent = '解锁阅读';
+    lerr('');
+    setTimeout(function () { $('lpwd').focus(); }, 0);
+  }
+
+  async function unlock() {
+    var pw = $('lpwd').value;
+    if (!pw) { lerr('请输入主密码'); return; }
+    lerr('');
+    $('lbtn').disabled = true;
+    $('lbtn').textContent = '解密中…(PBKDF2 需要一两秒)';
+    try {
+      var r = await readerUnlock(DATA, pw);
+      r.attachKey = await rdrAttachKey(r.dek);
+      st.unlocked = r;
+      $('lock').hidden = true;
+      $('app').hidden = false;
+      var nNotes = 0;
+      for (var i = 0; i < r.catalog.categories.length; i++) {
+        nNotes += (r.catalog.categories[i].notes || []).length;
+      }
+      $('expInfo').textContent = '导出于 ' + String(r.exported).slice(0, 10)
+        + ' · ' + r.catalog.categories.length + ' 个分类 ' + nNotes + ' 篇笔记 · 内嵌附件 ' + DATA.nBlobs + ' 个';
+      buildNav('');
+    } catch (e) {
+      lerr(e.message);
+    } finally {
+      $('lbtn').disabled = false;
+      $('lbtn').textContent = '解锁阅读';
+    }
+  }
+
+  $('lbtn').addEventListener('click', unlock);
+  $('lpwd').addEventListener('keydown', function (e) { if (e.key === 'Enter') unlock(); });
+  $('q').addEventListener('input', function () { if (st.unlocked) buildNav($('q').value.trim()); });
+  $('btnLockTop').addEventListener('click', lock);
+  $('view').addEventListener('click', function (e) {
+    var el = e.target;
+    if (!el.classList || !el.classList.contains('secret')) return;
+    if (el.classList.contains('masked')) {
+      el.classList.remove('masked');
+      st.maskTimers.push(setTimeout(function () { el.classList.add('masked'); }, 30000));
+    } else {
+      el.classList.add('masked');
+    }
+  });
+}
+/*READER-SCRIPT-END*/
+<\/script>
+</body>
+</html>
+`;
+
+/* ============================================================
  * DOM 部分 —— Node 测试环境不存在 document,以下不参与纯逻辑导出
  * ============================================================ */
 if (typeof document !== 'undefined') {
@@ -594,7 +1311,7 @@ if (typeof document !== 'undefined') {
   const pwd = $('pwd'), btnGo = $('btnGo'), errBox = $('err');
   const results = $('results'), catList = $('catList'), failList = $('failList');
   const warnList = $('warnList'), btnAll = $('btnAll'), btnReset = $('btnReset');
-  const doneTag = $('doneTag');
+  const doneTag = $('doneTag'), btnReader = $('btnReader'), readerNote = $('readerNote');
 
   let state = { zipBytes: null, result: null };
 
@@ -630,6 +1347,10 @@ if (typeof document !== 'undefined') {
     failList.innerHTML = '';
     warnList.innerHTML = '';
     doneTag.textContent = '';
+    readerNote.style.display = 'none';
+    readerNote.textContent = '';
+    btnReader.disabled = false;
+    btnReader.textContent = '生成离线阅读站（加密）';
     btnGo.disabled = true;
     pwd.value = '';
     showErr('');
@@ -736,6 +1457,28 @@ if (typeof document !== 'undefined') {
     if (!state.result) return;
     const entries = buildExportEntries(state.result);
     download(`R2biji明文_${stamp()}.zip`, zipWriteEntries(entries), 'application/zip');
+  });
+  btnReader.addEventListener('click', async () => {
+    if (!state.result) return;
+    const password = pwd.value;
+    if (!password) { showErr('主密码还在输入框里,生成阅读站需要用它重新包钥匙 —— 先别清空'); return; }
+    showErr('');
+    btnReader.disabled = true;
+    btnReader.textContent = '生成中…(需再跑一次 PBKDF2)';
+    try {
+      const site = await buildReaderSite(state.result, password, state.result.vaultInfo);
+      download(site.name, te.encode(site.html), 'text/html');
+      readerNote.style.display = 'block';
+      readerNote.textContent = `离线阅读站已下载:${site.name}(${fmtBytes(site.bytes)})`
+        + ` · 内嵌附件 ${site.embedded} 个`
+        + (site.skipped.length ? `,超出预算未嵌入 ${site.skipped.length} 个(${site.skipped.join('、')})` : '')
+        + '。文件内只有密文,双击打开输主密码即可像网站一样阅读,请与备份包一起保存。';
+    } catch (e) {
+      showErr(e.message);
+    } finally {
+      btnReader.disabled = false;
+      btnReader.textContent = '生成离线阅读站（加密）';
+    }
   });
   btnReset.addEventListener('click', reset);
 }
