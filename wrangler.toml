@@ -15,9 +15,10 @@ name = "jmbiji"
 main = "worker/worker.js"
 compatibility_date = "2025-09-15"
 
-# 是否保留 <name>.<子域>.workers.dev 这个入口。
-# 配了 WORKER_DOMAIN(自定义域)时,gen-config 会把它改成 false —— 只留一个入口,
-# 少一个「谁都能猜到」的地址面。想两个入口都要 → 部署时设 KEEP_WORKERS_DEV=1。
+# <name>.<子域>.workers.dev 入口开关(默认保留 = true)。
+# 它是「首次绑自定义域、DNS 还没生效」时的验收兜底:CI 会自动退回这个入口完成门禁校验
+# (两个入口指向同一个 Worker)。地址虽可被猜到,但 /api/* 全被 ACCESS_KEY 拦住。
+# 确实只要自定义域一个入口 → 部署时设 HIDE_WORKERS_DEV=1(gen-config 会把这里改成 false)。
 workers_dev = true
 
 # 数据桶:存放 vault.json / 分类密文 / 附件密文 / 备份

@@ -19,7 +19,8 @@
  * 【选填】WORKER_DOMAIN   自定义域名,如 bij.example.com(不带协议头)。
  *                         留空 → 不生成 routes 块,站点走 <name>.<子域>.workers.dev。
  *       BUCKET_NAME      R2 桶名,默认 jmbiji-vault。
- *       KEEP_WORKERS_DEV 设为 1 → 即使配了自定义域也保留 workers.dev 入口(默认关)。
+ *       HIDE_WORKERS_DEV  设为 1 → 关闭 workers.dev 入口。默认保留双入口:首次绑自定义域
+ *                         DNS 未生效时,CI 验收要靠 workers.dev 兜底(见 deploy.yml Verify)。
  *       ALLOW_NO_ACCESS_KEY 设为 1 → 跳过 ACCESS_KEY 校验(与 Worker 的同名开关语义一致,强烈不推荐)。
  *
  * 任一必填项缺失/非法 → 打印原因并 exit 1(CI 因此中断,符合「必填」语义)。
@@ -209,7 +210,10 @@ if (withBucket === null) {
 out = withBucket;
 
 // ② 自定义域路由 + workers.dev 开关
-const keepDev = get('KEEP_WORKERS_DEV') === '1';
+// 默认**双入口**:workers.dev 是首次绑自定义域、DNS 还没生效时的验收兜底
+// (deploy.yml Verify 会自动退回它;两个入口指向同一个 Worker,门完全一致)。
+// 真的只要自定义域一个入口 → 设 HIDE_WORKERS_DEV=1。
+const hideDev = get('HIDE_WORKERS_DEV') === '1';
 const routesBlock = domain
   ? [
       '# 由 scripts/gen-config.mjs 注入:自定义域名入口。',
@@ -228,14 +232,14 @@ if (withRoutes === out) {
 out = withRoutes;
 
 if (domain) {
-  const want = keepDev ? 'true' : 'false';
+  const want = hideDev ? 'false' : 'true';
   const switched = setKey(out, 'workers_dev', want, { quoted: false });
   if (switched === null) {
     console.error('✗ 注入 workers_dev 失败');
     process.exit(1);
   }
   out = switched;
-  if (keepDev) warn('KEEP_WORKERS_DEV=1:自定义域与 workers.dev 两个入口都会保留。');
+  if (hideDev) warn('HIDE_WORKERS_DEV=1:已关闭 workers.dev 入口。首次绑域 DNS 未生效期间,CI 验收将无处兜底。');
 }
 
 out = `# ⚠️ 本文件由 scripts/gen-config.mjs 生成,请勿手改(改动会在下次部署时被覆盖)。\n${out}`;
@@ -249,7 +253,7 @@ const fails = [];
 if (!back.includes(`bucket_name = "${bucket}"`)) fails.push('bucket_name');
 if (domain) {
   if (!back.includes(`pattern = "${domain}"`)) fails.push('routes.pattern');
-  if (!back.includes(`workers_dev = ${keepDev ? 'true' : 'false'}`)) fails.push('workers_dev');
+  if (!back.includes(`workers_dev = ${hideDev ? 'false' : 'true'}`)) fails.push('workers_dev');
 } else if (/^\s*\[\[routes\]\]/m.test(back)) {
   fails.push('意外的 routes 块(未配 WORKER_DOMAIN 却生成了路由)');
 }
@@ -262,7 +266,7 @@ if (fails.length) {
 ok(`已生成 ${OUT}(${out.split('\n').length} 行)`);
 if (accessKey) ok('已确认生成物中不含 ACCESS_KEY');
 if (domain) {
-  console.log(`  · 入口:https://${domain}${keepDev ? `  (另保留 workers.dev)` : '  (workers.dev 已关闭)'}`);
+  console.log(`  · 入口:https://${domain}${hideDev ? '' : '  (另保留 workers.dev 兜底入口)'}`);
 } else {
   console.log('  · 入口:<worker 名>.<你的账户子域>.workers.dev');
 }

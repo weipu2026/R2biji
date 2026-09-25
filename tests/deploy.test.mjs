@@ -109,6 +109,13 @@ test('部署守卫:上线验收 —— 工作流必须真的断言门的三态�
   );
 });
 
+test('部署守卫:首次绑域不红 —— Verify 必须能回退 workers.dev,gen-config 默认双入口', () => {
+  assert.match(workflow, /get_dev_url/, 'Verify 缺少 workers.dev 兜底取址(首次绑域 DNS 未生效会必红)');
+  assert.match(workflow, /URL_NOTE/, 'Verify 缺少「DNS 未生效已回退」的放行出口');
+  assert.match(genSrc, /HIDE_WORKERS_DEV/, 'gen-config 缺少 HIDE_WORKERS_DEV 开关');
+  assert.doesNotMatch(genSrc, /KEEP_WORKERS_DEV/, 'gen-config 仍残留旧开关 KEEP_WORKERS_DEV');
+});
+
 test('部署守卫:工作流里的赋值管道必须有兜底 —— set -e 下非零退出会中止整步', () => {
   // 规则:`X=$(A | B | C)` 这种赋值,在 `set -euo pipefail` 的步骤里,
   // 只要管道里有任何一个环节非零退出(典型:grep 没匹配到、curl 4xx/5xx),

@@ -59,12 +59,12 @@ JMbiji/
 
 | 名称 | 位置 | 必填 | 说明 |
 |---|---|---|---|
-| `CLOUDFLARE_API_TOKEN` | Secrets | ✔ | 权限:`Workers Scripts: Edit` + `Workers R2 Storage: Edit` + `Account Settings: Read`。R2 权限不是可选项——桶不存在时部署会去创建它,缺权限直接失败 |
+| `CLOUDFLARE_API_TOKEN` | Secrets | ✔ | 权限:`Workers Scripts: Edit` + `Workers R2 Storage: Edit` + `Account Settings: Read`;**绑自定义域还需** `Zone: Read` + `DNS: Edit`(`custom_domain` 要让 Cloudflare 自动建 DNS 记录与签发证书,缺 DNS 写权限部署会在写路由一步报错;只用 workers.dev 则不需要)。R2 权限不是可选项——桶不存在时部署会去创建它,缺权限直接失败 |
 | `ACCESS_KEY` | Secrets | ✔ | 访问密钥门,≥16 个 ASCII 字符。会被自动同步到 Worker |
 | `CLOUDFLARE_ACCOUNT_ID` | Variables | | 32 位账户 id;只关联一个账户时可留空 |
-| `WORKER_DOMAIN` | Variables | | 自定义域名,如 `bij.example.com`(不带 `http://`)。留空 → 用 `<worker名>.<你的子域>.workers.dev` |
+| `WORKER_DOMAIN` | Variables | | 自定义域名,如 `bij.example.com`(不带 `http://`)。绑定后 Cloudflare 自动建 DNS 与证书,首次生效需几分钟~几小时。留空 → 用 `<worker名>.<你的子域>.workers.dev` |
 | `BUCKET_NAME` | Variables | | R2 桶名,默认 `jmbiji-vault` |
-| `KEEP_WORKERS_DEV` | Variables | | 设为 `1` 时,配了自定义域也保留 workers.dev 入口(默认只留一个入口) |
+| `HIDE_WORKERS_DEV` | Variables | | 设为 `1` 时关闭 workers.dev 入口。**默认保留双入口**:首次绑域 DNS 未生效时,CI 验收自动退回 workers.dev 完成,「第一次部署」不会失败 |
 
 工作流共 9 个步骤,其中下列 6 个是**硬性校验/验收**,任一不通过就整体失败:
 
@@ -76,6 +76,10 @@ JMbiji/
 | 4 | Sync secret | 把 `ACCESS_KEY` 写成 Worker secret(必须在部署之后,首次部署前 Worker 还不存在) |
 | 5 | Verify live | 真的去请求线上:首页 200 + CSP/X-Frame-Options 齐备 + **无密钥访问 `/api/vault` 必须 401** + 带密钥必须 200/404。结果写进 Actions 的 Summary |
 | 6 | Audit bucket | 用官方 API 查桶的 r2.dev 公开域与自定义域,已确认公开 → 直接失败 |
+
+> ⚠️ **首次绑定自定义域不会「必然失败」**:wrangler 建好 DNS 记录后,全球生效常需几分钟~几小时,
+> 而验收步骤默认会**自动退回 workers.dev** 完成全部门禁校验(两个入口是同一个 Worker,门完全一致),
+> 并在 Summary 里标注「域名生效后自动可用,无需重新部署」。只有自定义域和 workers.dev **同时**不可达才判失败。
 
 ### 主密码在哪设置?—— 首次打开网站时,在浏览器里。GitHub Secrets 里**永远不放**。
 
@@ -107,7 +111,9 @@ export ACCESS_KEY='至少16个ASCII字符'  # gen-config 会校验它,不合法�
 npm run deploy                        # = gen-config(注入域名/桶名)→ wrangler deploy --config wrangler.deploy.toml
 ```
 
-想绑自定义域就加 `WORKER_DOMAIN=bij.example.com`;不设则走 `*.workers.dev`。
+想绑自定义域就加 `WORKER_DOMAIN=bij.example.com`(此时 API Token 还需 `Zone: Read` + `DNS: Edit`);
+不设则走 `*.workers.dev`。默认**双入口并存**(自定义域 + workers.dev),首次绑域 DNS 未生效期间
+CI 验收会自动退回 workers.dev;确实只想要一个入口 → 设 `HIDE_WORKERS_DEV=1`。
 `npm run deploy` 之外单独跑 `npm run gen-config` 可以只看校验与生成结果、不部署。
 
 ⚠️ **顺序不能反**:`ACCESS_KEY` 未设置(或短于 16 字符)时,服务端会 **fail closed**,

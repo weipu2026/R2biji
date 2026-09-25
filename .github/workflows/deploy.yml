@@ -7,6 +7,9 @@
 #                            · Workers Scripts: Edit       (部署 Worker)
 #                            · Workers R2 Storage: Edit    (部署时自动创建桶;只读则部署会失败)
 #                            · Account Settings: Read      (读账户信息)
+#                            · Zone: Read + DNS: Edit      (仅绑自定义域时需要:custom_domain
+#                              会让 Cloudflare 自动创建 DNS 记录并签发证书,没有 DNS 写权限,
+#                              部署会在写路由一步报错;只用 workers.dev 入口则不需要这两项)
 #                          R2 权限不是可选项:桶不存在时 wrangler 会去查询并创建,
 #                          缺权限会直接让部署失败(不是「建不了桶」这么轻)。
 #   ACCESS_KEY             【必填】访问密钥门,≥16 个 ASCII 字符。
@@ -18,7 +21,11 @@
 #   WORKER_DOMAIN           选填,自定义域名(如 bij.example.com,不带 http://)。
 #                           留空 → 站点走 <worker 名>.<你的子域>.workers.dev
 #   BUCKET_NAME             选填,R2 桶名,默认 jmbiji-vault
-#   KEEP_WORKERS_DEV        选填,=1 时即使配了自定义域也保留 workers.dev 入口(默认只留一个)
+#   HIDE_WORKERS_DEV        选填,=1 时关闭 workers.dev 入口(默认保留 —— 它是首次绑域
+#                           DNS 未生效时的验收兜底;两个入口指向同一个 Worker,门完全一致)
+#
+#   首次绑定自定义域:DNS 生效常需几分钟~几小时,Verify 会自动退回 workers.dev 完成验收,
+#   所以「第一次部署」不会因 DNS 未生效而失败;域名生效后自定义域自动可用。
 #
 # 两类变量都支持:同名配置优先读 Variables,其次读 Secrets。
 #
@@ -136,7 +143,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID || secrets.CLOUDFLARE_ACCOUNT_ID }}
           WORKER_DOMAIN: ${{ vars.WORKER_DOMAIN || secrets.WORKER_DOMAIN }}
           BUCKET_NAME: ${{ vars.BUCKET_NAME || secrets.BUCKET_NAME }}
-          KEEP_WORKERS_DEV: ${{ vars.KEEP_WORKERS_DEV || secrets.KEEP_WORKERS_DEV }}
+          HIDE_WORKERS_DEV: ${{ vars.HIDE_WORKERS_DEV || secrets.HIDE_WORKERS_DEV }}
           ACCESS_KEY: ${{ secrets.ACCESS_KEY }}
 
       # 把访问密钥同步为 Cloudflare Worker secret(在 Deploy 之后:Worker 必须先存在)。
@@ -176,6 +183,8 @@ jobs:
       #        200 = 门形同虚设(致命,多半是 ALLOW_NO_ACCESS_KEY 被设了)
       #        503 = ACCESS_KEY 没同步到 Worker
       #   ③ GET /api/vault 带密钥 → 必须 200/404(说明密钥一致,不是 401)
+      #   入口选择:自定义域优先,60s 内未就绪自动退回 workers.dev 完成验收(首次绑域 DNS
+      #   未生效时不再整条变红);两个入口是同一个 Worker,门在哪个域名上验证都等价。
       - name: Verify live site
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -187,36 +196,68 @@ jobs:
           NAME=$(sed -n 's/^name[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' wrangler.deploy.toml 2>/dev/null | head -1 || true)
           [ -n "$NAME" ] || { echo "✗ 未能从 wrangler.deploy.toml 读出 worker 名(生成物缺失或格式变了?)"; exit 1; }
 
-          if [ -n "${WORKER_DOMAIN:-}" ]; then
-            URL="https://${WORKER_DOMAIN}"
-          else
-            # workers.dev 的完整地址含账户子域,只有 API 才知道;查不到就失败,
-            # 不静默跳过 —— 「跳过验收」等于把「可能没装好门」当成功。
-            # 注意 `|| true`:本步骤开了 set -e,而 `curl -f` 在 4xx/5xx 时非零退出。
-            # 不兜住的话赋值会直接中止脚本,下面那句自己写的提示就成了永远执行不到的死代码
-            # (这条是干跑时抓出来的:探针给 403,本来该看到友好提示,结果只看到 set -e 的中止)。
-            SUB=$(curl -fsS -m 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+          # ── 选验收入口:自定义域优先,workers.dev 兜底 ──────────────────────────
+          # 首次绑定自定义域时,DNS 记录由 wrangler 刚创建,全球生效要几分钟~几小时;
+          # 若验收只认自定义域,「第一次部署必然失败」。而两个入口是同一个 Worker,
+          # 门(下面的 ①②③)在哪个域名上验证都等价 —— 所以自定义域探不通就退回
+          # workers.dev 完成验收并显眼告警:把「门没装好」(拦)与「域名没生效」(放行)分开。
+          # 注意 probe 里的 `|| c=000`:本步骤开了 set -e,curl 网络层失败(DNS 解析失败/
+          # 超时)退出码非零,不兜住会直接掀翻整步 —— 2026-09-25 首绑域时真实踩到。
+          get_dev_url() {
+            local sub
+            sub=$(curl -fsS -m 20 -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
               "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/subdomain" \
               2>/dev/null | sed -n 's/.*"subdomain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' || true)
-            if [ -z "$SUB" ]; then
+            [ -n "$sub" ] || return 1
+            printf 'https://%s.%s.workers.dev' "$NAME" "$sub"
+          }
+          probe() { # $1=URL → 输出 http_code;网络失败输出 000,绝不让 set -e 中止
+            local c
+            c=$(curl -s -o /dev/null -w '%{http_code}' -m 12 "$1/" 2>/dev/null) || c=000
+            printf '%s' "$c"
+          }
+          pick() { # $1=URL,单个候选轮询 ~60s;成功时设 URL 并返回 0
+            local u="$1" c i
+            for i in $(seq 1 12); do
+              c=$(probe "$u")
+              [ "$c" = "200" ] && { URL="$u"; return 0; }
+              echo "  … 第 $i 次探测 $u → $c"
+              sleep 5
+            done
+            return 1
+          }
+
+          URL=""
+          URL_NOTE=""
+          if [ -n "${WORKER_DOMAIN:-}" ]; then
+            echo "  · 已配置自定义域:https://${WORKER_DOMAIN}"
+            if pick "https://${WORKER_DOMAIN}"; then
+              : # 自定义域就绪,直接用它验收
+            else
+              echo "  · 自定义域 60s 内未就绪(首次绑定 DNS 生效常需几分钟~几小时),尝试 workers.dev 兜底"
+              DEV=$(get_dev_url || true)
+              if [ -n "${DEV:-}" ] && pick "$DEV"; then
+                URL_NOTE="自定义域 ${WORKER_DOMAIN} 的 DNS 尚未生效,本次在 workers.dev 上完成验收;域名生效后自动可用,无需重新部署。"
+              else
+                echo "✗ 自定义域与 workers.dev 都不可达 —— 门无法验证,不能当作部署成功。"
+                echo "  · wrangler 部署日志报 DNS/权限错 → API Token 需要 Zone:Read + DNS:Edit(绑自定义域必须)。"
+                echo "  · 你设了 HIDE_WORKERS_DEV=1 → 首次绑域请临时去掉它,等域名生效后再关。"
+                echo "  · DNS 还在生效中 → 稍后在 Actions 页 Re-run failed jobs 即可。"
+                exit 1
+              fi
+            fi
+          else
+            DEV=$(get_dev_url) || {
               echo "✗ 未能从 API 取到 workers.dev 子域,无法确定部署地址。"
               echo "  请在 Variables 里显式配置 WORKER_DOMAIN,或确认 API Token 含 Workers Scripts:Read。"
               exit 1
-            fi
-            URL="https://${NAME}.${SUB}.workers.dev"
+            }
+            pick "$DEV" || { echo "✗ workers.dev 入口持续不可达(见上方探测记录)。"; exit 1; }
           fi
-          echo "  验收目标:$URL"
+          echo "  ✓ 验收入口:$URL"
+          root=200
 
           code() { curl -s -o /dev/null -w '%{http_code}' -m 20 "$@"; }
-
-          # 新部署生效有几秒传播延迟,轮询到 200 为止(最多 ~50s)
-          root=000
-          for i in $(seq 1 10); do
-            root=$(code "$URL/")
-            [ "$root" = "200" ] && break
-            echo "  … 第 $i 次探测首页:$root"
-            sleep 5
-          done
 
           fail=0
           if [ "$root" = "200" ]; then
@@ -262,6 +303,11 @@ jobs:
             echo "| 无密钥访问 /api/vault | $no_key(应为 401) |"
             echo "| 带密钥访问 /api/vault | $yes_key(应为 200/404) |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -n "$URL_NOTE" ]; then
+            echo "  ⚠ $URL_NOTE"
+            echo "| 自定义域 | DNS 未生效 —— 已在 workers.dev 上完成验收,域名生效后自动可用(无需重新部署) |" >> "$GITHUB_STEP_SUMMARY"
+          fi
 
           if [ "$fail" != 0 ]; then
             echo "✗ 上线验收未通过 —— 站点可能处于「能打开但门没装好」的状态,请按上面提示处理。"
