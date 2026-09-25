@@ -101,7 +101,9 @@ function bytesFromHex(hex) {
 }
 
 /** etag 进出 HTTP 头时带引号,内部统一裸值 */
-const unquote = (s) => (s || '').replace(/^"|"$/g, '');
+/** etag 归一:剥引号与弱验证器前缀。CF 边缘会对压缩过的 JSON 响应把强 etag 改写成
+ * W/"..."(cache 压缩规则),客户端原样带回会让 vault 的 CAS 永远对不上 —— 一律先归一再比。 */
+const normEtag = (s) => (s || '').replace(/"/g, '').replace(/^W\//i, '').trim();
 const quote = (s) => `"${s}"`;
 
 /** 「仅新建」条件:对象不存在才写入(If-None-Match: * 语义),失败 put() 返回 null。
@@ -122,7 +124,7 @@ async function loadVault(env) {
   const raw = await env.VAULT.get(VAULT_KEY);
   if (!raw) return null;
   const buf = raw instanceof Uint8Array ? raw : new Uint8Array(await raw.arrayBuffer());
-  return { json: JSON.parse(new TextDecoder().decode(buf)), etag: unquote(raw.etag) };
+  return { json: JSON.parse(new TextDecoder().decode(buf)), etag: normEtag(raw.etag) };
 }
 
 /** 列全前缀下的对象。真机 R2 单次最多返回 1000 个键并给游标,
@@ -267,7 +269,7 @@ async function putCategory(method, headers, body, env, name) {
   const r2key = `${CAT_PREFIX}${name}.enc`;
 
   const createOnly = (headers['if-none-match'] || '').trim() === '*';
-  const ifMatch = unquote(headers['if-match']);
+  const ifMatch = normEtag(headers['if-match']);
 
   if (createOnly) {
     // 「仅新建」用官方条件写:R2PutOptions.onlyIf 支持 Headers,按 RFC 7232
@@ -296,7 +298,7 @@ async function deleteCategory(headers, env, name) {
   // 条件删除:带 If-Match 时与 head 比对,不符 → 412。此前删除无任何条件,
   // 设备 A 的删除(或改名的删除半程)会把设备 B 刚保存的新版一并删掉。
   // R2 的 delete 不支持条件参数,head 比对是纯函数核心能做的最强校验。
-  const ifMatch = unquote(headers['if-match']);
+  const ifMatch = normEtag(headers['if-match']);
   if (ifMatch && existing.etag !== ifMatch) {
     return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
   }
@@ -386,10 +388,17 @@ export async function handleApi(method, url, headers, body, env) {
         // 改主密码:If-Match CAS 覆盖。
         // 这里不再额外读一次 vault.json 做存在性判断:能通过 authOk 就说明它存在,
         // 真正的不存在/被改由 R2 的条件写兜底(返回 null → 412)。
-        const ifMatch = unquote(headers['if-match']);
+        const ifMatch = normEtag(headers['if-match']);
         if (!ifMatch) return fail(428, 'need-if-match', '缺少 If-Match');
-        const res = await env.VAULT.put(VAULT_KEY, raw, { onlyIf: { etagMatches: ifMatch } });
-        if (!res) return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
+        // 不用 R2 onlyIf.etagMatches:etag 一旦经 CF 边缘(压缩 JSON 被改成弱验证器
+        // W/"...")往返,客户端带回来的值永远对不上对象真实 etag,表现为「恒 412、
+        // 重新解锁也没用」。改为 head 取当前 etag 自己比 —— 比较语义在本地与生产完全
+        // 一致;head→put 之间极小窗口由单用户场景兜住,真冲突仍以 412 拒绝。
+        const cur = await env.VAULT.head(VAULT_KEY);
+        if (!cur || normEtag(cur.etag) !== ifMatch) {
+          return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
+        }
+        const res = await env.VAULT.put(VAULT_KEY, raw);
         return json({ ok: true, etag: res.etag });
       }
       // 建库:只允许创建一次

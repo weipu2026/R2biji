@@ -92,7 +92,8 @@ export async function fetchVault() {
   const res = await req('/api/vault');
   if (res.status === 404) return { status: 404 };
   if (!res.ok) throw await errFrom(res);
-  return { status: 200, json: await res.json(), etag: (res.headers.get('etag') || '').replace(/"/g, '') };
+  // W/ 前缀 = CF 边缘把压缩响应的强 etag 改写成了弱验证器,必须剥掉,否则 CAS 恒 412
+  return { status: 200, json: await res.json(), etag: (res.headers.get('etag') || '').replace(/"/g, '').replace(/^W\//i, '') };
 }
 
 /** 建库(只允许创建)。返回 { status, etag };etag 供建库后的改密码 CAS 使用。 */

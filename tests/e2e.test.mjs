@@ -476,3 +476,31 @@ test('分类置顶:元信息存 vault.json 跨设备可见;vault 被他人改过
   await a.changeMasterPassword('pw654321');
   assert.equal((await API.fetchVault()).json.catMeta['工作']?.pin, true, '改密码不丢置顶元信息');
 });
+
+test('vault CAS 对弱验证器形态的 etag 免疫(CF 边缘把压缩 JSON 的 etag 改写成 W/"...")', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('pw123456', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await a.rescan();
+
+  /* 模拟边缘改写后客户端可能持有的形态:W/"hex" —— 修复前恒 412,修复后应成功 */
+  const weak = `W/"${created.etag}"`;
+  const mutated = JSON.parse(JSON.stringify(json));
+  mutated.catMeta = { '测试': { pin: true } };
+  const etag = await API.putVaultJson(JSON.stringify(mutated), weak);
+  assert.ok(etag, '弱形态 etag 也应写入成功');
+
+  /* 写入成功后内容与 etag 链一致 */
+  const fresh = await API.fetchVault();
+  assert.equal(fresh.json.catMeta['测试']?.pin, true);
+  /* 新 etag 再走一次 CAS 也应成功(链路持续可用) */
+  const again = JSON.parse(JSON.stringify(fresh.json));
+  again.catMeta['测试二'] = { pin: true };
+  await API.putVaultJson(JSON.stringify(again), fresh.etag);
+  const final = await API.fetchVault();
+  assert.equal(final.json.catMeta['测试二']?.pin, true);
+});
