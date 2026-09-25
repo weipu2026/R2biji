@@ -1380,7 +1380,7 @@ function applyTheme(mode) {
     btn.setAttribute('aria-label', btn.title);
   }
   const meta = document.querySelector && document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', mode === 'dark' ? '#1b1a17' : '#faf9f6');
+  if (meta) meta.setAttribute('content', mode === 'dark' ? '#1e2128' : '#faf8f2');
 }
 
 function initTheme() {
