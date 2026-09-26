@@ -28,7 +28,7 @@
         <div class="field" id="pwConfirmField" hidden>
           <input type="password" id="pwConfirm" placeholder="再输一遍主密码" aria-label="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
         </div>
-        <input type="password" id="pwInput" placeholder="主密码" aria-label="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false">
+        <div class="pw-wrap"><input type="password" id="pwInput" placeholder="主密码" aria-label="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false"><button type="button" id="pwToggle" class="pw-toggle" title="显示密码" aria-label="显示密码"></button></div>
         <div id="pwHint" class="pw-hint" hidden></div>
         <label class="remember-row">
           <input type="checkbox" id="rememberDevice" checked>
@@ -52,13 +52,13 @@
   <!-- 主界面 -->
   <div id="app" hidden>
     <header class="topbar">
-      <button id="btnMenu" class="icon-btn menu-btn" title="打开菜单" aria-label="打开菜单" aria-expanded="false">☰</button>
+      <button id="btnMenu" class="icon-btn menu-btn" title="打开菜单" aria-label="打开菜单" aria-expanded="false"></button>
       <div class="brand-mini">加密笔记</div>
       <div class="search-wrap">
         <input id="searchBox" type="search" placeholder="搜索标题与正文…(Ctrl+K)" aria-label="搜索标题与正文" autocomplete="off">
       </div>
       <span id="saveStatus" class="save-status" data-kind="ok">–</span>
-      <button id="btnTheme" class="top-theme" title="切换为深色" aria-label="切换为深色">☾</button>
+      <button id="btnTheme" class="top-theme" title="切换为深色" aria-label="切换为深色"></button>
       <button id="btnLock" class="btn small" title="锁定并清除本机密钥" aria-label="锁定"><svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>锁定</button>
     </header>
 
@@ -68,7 +68,7 @@
         <div class="side-sec">
           <div class="side-head">
             <span>分类</span>
-            <button id="btnAddCat" class="icon-btn" title="新建分类" aria-label="新建分类">＋</button>
+            <button id="btnAddCat" class="icon-btn" title="新建分类" aria-label="新建分类"></button>
           </div>
           <ul id="catList" class="cat-list"></ul>
         </div>
@@ -77,8 +77,8 @@
           <div class="side-head">
             <span id="activeCatName">未选择分类</span>
             <span class="side-head-btns">
-              <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)" aria-label="重命名分类">✎</button>
-              <button id="btnAddNote" class="icon-btn primary" title="新建笔记" aria-label="新建笔记">＋</button>
+              <button id="btnRenameCat" class="icon-btn" title="重命名分类(只改文件名)" aria-label="重命名分类"></button>
+              <button id="btnAddNote" class="icon-btn primary" title="新建笔记" aria-label="新建笔记"></button>
             </span>
           </div>
           <ul id="noteList" class="note-list"></ul>
@@ -93,7 +93,7 @@
               <option value="30">30 分钟</option>
             </select>
           </label>
-          <button id="btnTrash" class="btn ghost tiny block side-trash" title="查看最近删除的笔记(保留 30 天)">♻ 最近删除</button>
+          <button id="btnTrash" class="btn ghost tiny block side-trash" title="查看最近删除的笔记(保留 30 天)">最近删除</button>
           <div class="foot-icons">
             <button id="btnChangePw" class="icon-btn foot-icon" title="修改主密码" aria-label="修改主密码"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg></button>
             <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg></button>
@@ -112,7 +112,7 @@
           <div class="read-head">
             <h1 id="readTitle"></h1>
             <div class="read-actions">
-              <button id="btnCopyAll" class="btn ghost small">⧉ 复制全文</button>
+              <button id="btnCopyAll" class="btn ghost small">复制全文</button>
               <button id="btnExportMd" class="btn ghost small" title="下载为 .md 文件">.md</button>
               <button id="btnEdit" class="btn primary small">编辑</button>
               <button id="btnDelNote" class="btn ghost small danger">删除</button>

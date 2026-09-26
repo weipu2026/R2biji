@@ -15,6 +15,26 @@ import { TabSync, planSavedCategoryAction } from './tabsync.js';
 const $ = (id) => document.getElementById(id);
 
 const IDLE_SAVE_MS = 4000;               // 改动停止 4 秒后自动保存(输入中每次按键都会重置计时)
+
+/** 单色描边图标:统一用 SVG 而非 emoji/Unicode 字符 ——
+ * 彩色 emoji(📌)与 Unicode 装饰符(☰✎⧉)在 Windows/macOS/Android 上字形各异,
+ * 且与底栏已有的描边图标体系不是一套质感;这里做单一来源。
+ * 颜色一律 currentColor,跟随各处的文字色与主题。 */
+const ICON = {
+  plus: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  up: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>',
+  down: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>',
+  moon: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
+  sun: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  menu: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
+  eye: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  eyeOff: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 3 18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.9 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2"/><path d="M6.2 6.2A17.6 17.6 0 0 0 2 12s3.5 7 10 7c1.2 0 2.3-.2 3.3-.6"/></svg>',
+};
+
 const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
 /* 自动锁屏默认「关闭」。它与「记住本设备」的目的正好相反:前者要「离开就得输密码」,
  * 后者要「打开即用」。默认给后者,想要前者自己去侧栏选 —— 选了之后空闲到点会
@@ -509,7 +529,7 @@ async function enterApp() {
   renderNoteList();
   const hasCats = S.lib.listCategories().length > 0;
   showEmpty(hasCats ? '从左侧选择一个分类' : '还没有分类,先建一个',
-    hasCats ? null : { label: '＋ 新建分类', fn: addCategory });
+    hasCats ? null : { label: '新建分类', fn: addCategory });
   refreshSaveStatus();
   startIdleTimer();
   refreshExportDue();
@@ -569,6 +589,12 @@ function renderCategoryList() {
     label.textContent = name + (info?.conflict ? ' ⚠' : '') + (info?.error ? ' ⛔' : '');
     label.title = info?.conflict ? '疑似同步冲突副本,请核对内容后处理'
       : info?.error ? `无法解密:${info.error}` : name;
+    if (pinned) {
+      const mark = document.createElement('span');
+      mark.className = 'pin-mark';
+      mark.innerHTML = ICON.pin;
+      label.prepend(mark);
+    }
     li.appendChild(label);
 
     const btns = document.createElement('div');
@@ -576,7 +602,7 @@ function renderCategoryList() {
     const pinBtn = document.createElement('button');
     pinBtn.className = 'icon-btn';
     pinBtn.title = pinned ? '取消置顶' : '置顶';
-    pinBtn.textContent = '📌';
+    pinBtn.innerHTML = ICON.pin;
     pinBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
       try {
@@ -621,7 +647,10 @@ async function openCategory(name) {
   renderCategoryList();
   renderNoteList();
   closeDrawer(); // 移动端:选完分类收起抽屉,把屏幕还给内容
-  showEmpty(`「${name}」暂无笔记`, { label: '＋ 新建笔记', fn: addNote });
+  /* 分类里有笔记时不能说「暂无笔记」——那只是还没选中某一篇;选完分类不等于选完笔记 */
+  const noteCount = S.lib.categoryInfo(name)?.data?.notes?.length || 0;
+  showEmpty(noteCount ? '从左侧选择一条笔记' : `「${name}」暂无笔记`,
+    noteCount ? null : { label: '新建笔记', fn: addNote });
 }
 
 async function addCategory() {
@@ -713,6 +742,12 @@ function renderNoteList() {
     title.textContent = note.title || '无标题';
     // 单行清单不展开内容,悬停用原生气泡兜底给出时间与正文概要
     li.title = `${fmtTime(note.updatedAt)} · ${(note.content.trim().replace(/\s+/g, ' ').slice(0, 60)) || '(空)'}`;
+    if (note.pin === true) {
+      const mark = document.createElement('span');
+      mark.className = 'pin-mark';
+      mark.innerHTML = ICON.pin;
+      title.prepend(mark);
+    }
     main.appendChild(title);
     li.appendChild(main);
 
@@ -721,17 +756,17 @@ function renderNoteList() {
     const upBtn = document.createElement('button');
     upBtn.className = 'icon-btn';
     upBtn.title = '上移';
-    upBtn.textContent = '↑';
+    upBtn.innerHTML = ICON.up;
     upBtn.addEventListener('click', (e) => { e.stopPropagation(); moveNote(note.id, -1); });
     const downBtn = document.createElement('button');
     downBtn.className = 'icon-btn';
     downBtn.title = '下移';
-    downBtn.textContent = '↓';
+    downBtn.innerHTML = ICON.down;
     downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveNote(note.id, 1); });
     const pinBtn = document.createElement('button');
     pinBtn.className = 'icon-btn';
     pinBtn.title = note.pin ? '取消置顶' : '置顶';
-    pinBtn.textContent = '📌';
+    pinBtn.innerHTML = ICON.pin;
     pinBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleNotePin(note.id); });
     btns.append(upBtn, downBtn, pinBtn);
     li.appendChild(btns);
@@ -774,7 +809,7 @@ function renderReadView() {
   for (const blk of md.querySelectorAll('.blk')) {
     const btn = document.createElement('button');
     btn.className = 'blk-copy';
-    btn.textContent = '⧉';
+    btn.innerHTML = ICON.copy;
     btn.title = '复制本段';
     btn.addEventListener('click', () => copyText(blk.dataset.copy || blk.textContent, btn));
     blk.appendChild(btn);
@@ -1063,6 +1098,10 @@ async function runSearch() {
     ul.appendChild(li);
   }
   panel.appendChild(ul);
+  /* 窄屏顶栏会 flex-wrap 成两行,硬编码 top:52px 会让面板压在搜索框上;
+   * 按顶栏实际底边定位,窗口尺寸变化时也重算 */
+  const bar = document.querySelector('.topbar');
+  if (bar) panel.style.top = Math.round(bar.getBoundingClientRect().bottom + 6) + 'px';
   panel.hidden = false;
 }
 
@@ -1409,7 +1448,7 @@ function applyTheme(mode) {
   if (root) root.dataset.theme = mode;
   const btn = $('btnTheme');
   if (btn) {
-    btn.textContent = mode === 'dark' ? '☀' : '☾';
+    btn.innerHTML = mode === 'dark' ? ICON.sun : ICON.moon;
     btn.title = mode === 'dark' ? '切换为浅色' : '切换为深色';
     btn.setAttribute('aria-label', btn.title);
   }
@@ -1534,6 +1573,23 @@ function bindEvents() {
   $('pwConfirm').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pwBtn').click(); });
 
   $('btnLock').addEventListener('click', () => lockNow());
+  /* 静态按钮图标统一注入:HTML 里不再放 emoji/Unicode 字符 */
+  $('btnMenu').innerHTML = ICON.menu;
+  $('btnAddCat').innerHTML = ICON.plus;
+  $('btnAddNote').innerHTML = ICON.plus;
+  $('btnRenameCat').innerHTML = ICON.pencil;
+  $('btnTrash').insertAdjacentHTML('afterbegin', ICON.trash + ' ');
+  $('btnCopyAll').insertAdjacentHTML('afterbegin', ICON.copy + ' ');
+  $('pwToggle').innerHTML = ICON.eye;
+  $('pwToggle').addEventListener('click', () => {
+    const inp = $('pwInput');
+    const show = inp.type === 'password';   // 当前是遮挡态 → 本次要显形
+    inp.type = show ? 'text' : 'password';
+    $('pwToggle').innerHTML = show ? ICON.eyeOff : ICON.eye;
+    $('pwToggle').title = show ? '隐藏密码' : '显示密码';
+    $('pwToggle').setAttribute('aria-label', $('pwToggle').title);
+    inp.focus();
+  });
   $('btnAddCat').addEventListener('click', addCategory);
   $('btnRenameCat').addEventListener('click', renameCategory);
   $('btnDelCat').addEventListener('click', deleteCategory);

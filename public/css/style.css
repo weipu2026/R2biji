@@ -291,6 +291,28 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* 移动端抽屉的汉堡键:桌面不显示 */
 .menu-btn { display: none; }
 
+/* 置顶图钉(单色 SVG):跟随强调色,不靠 emoji 的彩色贴图 */
+.pin-mark {
+  display: inline-flex; align-items: center;
+  margin-right: 3px; vertical-align: -1px;
+  color: var(--accent);
+}
+.pin-mark svg { display: block; }
+
+/* 主密码框的显示/隐藏切换:输长密码时能核对一眼 */
+.pw-wrap { position: relative; }
+#lockForm .pw-wrap input { padding-right: 42px; }   /* 给右侧眼睛留位;ID 选择器需压过 #lockForm input */
+.pw-toggle {
+  position: absolute; right: 7px; top: 6px;
+  width: 28px; height: 28px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: none; background: transparent; border-radius: var(--radius);
+  color: var(--muted);
+  transition: color .15s, background .15s;
+}
+.pw-toggle:hover { color: var(--text); background: var(--hover-weak); }
+.pw-toggle:focus-visible { outline: none; box-shadow: var(--ring); }
+
 /* ---------- 顶栏:实线划清的第一道分界 ---------- */
 
 /* 100dvh:移动端浏览器工具栏收展时 100vh 会 taller than viewport,底部被顶出屏幕 */
@@ -348,7 +370,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   background: var(--ok-bg);
   color: var(--ok);
   text-align: center;
-  min-width: 76px;
+  width: 96px;              /* 定宽:文案在「已保存/保存中…/有未保存更改」间切换时不再顶动右侧按钮 */
   white-space: nowrap;
 }
 .save-status[data-kind="dirty"] { background: var(--warn-bg); color: var(--warn); }
@@ -463,6 +485,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   min-height: 0;
 }
 .cat-item {
+  position: relative;   /* 悬停浮层按钮的定位上下文 */
   display: flex; align-items: center; justify-content: space-between;
   padding: 7px 10px;
   border-radius: var(--radius);
@@ -486,6 +509,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 .note-list { flex: 1; }
 .note-item {
+  position: relative;   /* 悬停浮层按钮的定位上下文 */
   display: flex; align-items: center; gap: 6px;
   padding: 7px 8px 7px 10px;
   border-radius: var(--radius);
@@ -504,15 +528,31 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .note-item.active .note-title { color: var(--text); font-weight: 600; }
 /* 置顶标识:标题前的图钉 + 轻底色,与普通项一眼可分 */
-.cat-item.pinned .cat-name::before,
-.note-item.pinned .note-title::before {
-  content: '📌 ';
-  font-size: .82em;
+/* 置顶图钉由 JS 插入 .pin-mark(单色 SVG),不用 emoji:CSS content 无法跟随主题换色 */
+.cat-item.pinned:not(.active), .note-item.pinned:not(.active) { background: var(--accent-weak); }
+/* 操作按钮改绝对定位浮层:原来按钮虽 hover 才显形,却始终占位,
+ * 把标题挤到只剩一百多像素;浮层不占位,标题拿回全宽 */
+.cat-btns {
+  display: flex; gap: 2px;
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  padding: 1px 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  opacity: 0; transition: opacity .12s;
 }
-.cat-item.pinned, .note-item.pinned { background: var(--sel); }
-.cat-btns { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
 .cat-item:hover .cat-btns { opacity: 1; }
-.note-btns { display: flex; gap: 2px; opacity: 0; transition: opacity .12s; }
+.note-btns {
+  display: flex; gap: 2px;
+  position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
+  padding: 1px 2px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  opacity: 0; transition: opacity .12s;
+}
 .note-item:hover .note-btns { opacity: 1; }
 
 /* ---------- 内容区 ---------- */
@@ -917,7 +957,12 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 
 /* 触屏设备没有 hover:操作按钮常显,否则永远点不到 */
 @media (hover: none) {
-  .note-btns, .cat-btns { opacity: 1; }
+  /* 触屏没有 hover:浮层会永久压住标题尾部,按钮改回占位布局常显 */
+  .note-btns, .cat-btns {
+    opacity: 1;
+    position: static; transform: none;
+    background: none; border: none; box-shadow: none; padding: 0;
+  }
   .blk-copy { opacity: .55; }
 }
 

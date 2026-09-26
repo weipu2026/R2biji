@@ -868,7 +868,7 @@ const READER_TEMPLATE = `<!DOCTYPE html>
       <div><b>R2biji · 离线书斋</b><small id="expInfo"></small></div>
     </div>
     <div class="top-actions">
-      <button class="rbtn" id="btnTheme" type="button" title="明暗切换">☾</button>
+      <button class="rbtn" id="btnTheme" type="button" title="明暗切换"></button>
       <button class="rbtn" id="btnLockTop" type="button" title="锁定(清空内存中的明文)">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
       </button>
@@ -1095,9 +1095,13 @@ if (typeof document !== 'undefined') {
     el.textContent = msg || '';
   }
 
+  /* 明暗图标同样用单色 SVG:与相邻的锁定按钮统一,不依赖平台字形 */
+  const ICON_SUN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>';
+  const ICON_MOON = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>';
+
   function setTheme(dark) {
     document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
-    $('btnTheme').textContent = dark ? '☀' : '☾';
+    $('btnTheme').innerHTML = dark ? ICON_SUN : ICON_MOON;
   }
   setTheme(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   $('btnTheme').addEventListener('click', function () {
