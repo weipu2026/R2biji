@@ -349,7 +349,9 @@ function showLock(mode) {
     $('lockErr').hidden = false;
     pendingLockMsg = null;
   }
-  $('lockForm').hidden = false;
+  const loading = mode === 'loading';
+  $('lockLoading').hidden = !loading;
+  $('lockForm').hidden = loading;
   $('rememberDevice').checked = S.settings.rememberDevice !== false;
   const isSetup = mode === 'setup';
   $('pwConfirmField').hidden = !isSetup;
@@ -1441,6 +1443,7 @@ function closeDrawer() {
 async function boot() {
   loadSettings();
   API.loadAccessKey();
+  showLock('loading'); // 首屏即过渡态:主密码框只在该手动解锁时出现,别闪现
   // 拉取 vault.json:404 = 未建库 → 建库流程;其余错误 → 提示
   for (;;) {
     let res;
@@ -1456,13 +1459,13 @@ async function boot() {
         if (key != null && key.trim()) { API.saveAccessKey(key.trim()); continue; }
         $('lockErr').textContent = '未提供访问密钥,无法连接笔记库';
         $('lockErr').hidden = false;
-        $('lockForm').hidden = true;
+        $('lockLoading').hidden = true;
         return;
       }
       // 服务端 fail closed(ACCESS_KEY 未配置/过短):原样显示它给的可操作提示
       $('lockErr').textContent = e.code === 'setup-required' ? e.message : `无法连接服务器:${e.message}`;
       $('lockErr').hidden = false;
-      $('lockForm').hidden = true;
+      $('lockLoading').hidden = true;
       return;
     }
     if (res.status === 404) { showLock('setup'); return; }

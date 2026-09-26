@@ -24,7 +24,7 @@
         </div>
       </div>
 
-      <div id="lockForm">
+      <div id="lockForm" hidden>
         <div class="field" id="pwConfirmField" hidden>
           <input type="password" id="pwConfirm" placeholder="再输一遍主密码" aria-label="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
         </div>
@@ -36,6 +36,11 @@
         </label>
         <p class="remember-hint">钥匙存在本浏览器里:能打开这台电脑的人可直接看到笔记</p>
         <button id="pwBtn" class="btn primary block">解锁</button>
+      </div>
+
+      <div id="lockLoading" class="lock-loading" role="status">
+        <span class="spinner" aria-hidden="true"></span>
+        <span>正在连接笔记库…</span>
       </div>
 
       <div id="lockErr" class="lock-err" hidden></div>
