@@ -94,7 +94,9 @@ button { font: inherit; cursor: pointer; }
 input, textarea, select { font: inherit; color: inherit; caret-color: var(--accent); }
 [hidden] { display: none !important; }
 
+/* 选中文字:亮色主题的黛蓝淡底在墨蓝纸上几乎不可见,需单独覆盖 */
 ::selection { background: rgba(47, 90, 146, .16); }
+:root[data-theme="dark"] ::selection { background: rgba(127, 167, 217, .30); }
 
 /* 数字一律等宽:字数、日期、计数对齐不跳动 */
 .tabnum, .read-meta, .save-status, .cat-count {
@@ -825,10 +827,13 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   box-shadow: var(--shadow-lg);
   padding: 0;
   width: 400px;
+  max-height: 84vh;   /* 内容多时(如最近删除一长串)不能撑出屏幕,否则底部按钮点不到 */
+  overflow: hidden;
   background: var(--panel);
 }
 .modal::backdrop { background: rgba(38, 37, 31, .38); }
-#modalBody { padding: 22px 22px 18px; }
+/* 滚动收在框内:max-height 与 .modal 同档,超出部分内部滚 */
+#modalBody { padding: 22px 22px 18px; max-height: 84vh; overflow-y: auto; }
 #modalBody h3 { margin: 0 0 12px; font-size: 16px; font-family: var(--serif); letter-spacing: .5px; }
 .modal-text { color: var(--muted); line-height: 1.6; margin: 0 0 14px; }
 .modal-input {
