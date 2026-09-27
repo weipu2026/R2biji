@@ -98,10 +98,52 @@ test('部署守卫:密钥只经 env 传递 —— 插值不得出现在 run 脚�
 });
 
 test('部署守卫:上线验收 —— 工作流必须真的断言门的三态与桶的公开域', () => {
-  assert.match(workflow, /\/api\/vault/, '验收步骤没查 /api/vault');
-  assert.match(workflow, /x-access-key/, '验收步骤没带着访问密钥去请求');
-  assert.match(workflow, /401/, '验收步骤没有断言「无密钥必须 401」');
-  assert.match(workflow, /404/, '验收步骤没有断言「带密钥必须 200/404」');
+  /* ⚠️ 这条守卫曾长期失效(2026-09-27 falsify 报「没判别力」)。
+   *   旧写法是 assert.match(workflow, /\/api\/vault/) 这类「文件里出现过某字符串」,
+   *   而 /api/vault、x-access-key、401、404 在注释、echo、summary 表格里到处都是
+   *   —— 把**真正发请求的那两行**掏空(改成不请求 /api/vault、不带密钥),
+   *   其余字符串照样在,断言全绿。
+   *   教训:断言必须落在**请求本身**与**判定分支**上,而不是「文件里有没有这个词」。 */
+
+  // ① 取出真正执行请求的两行,而不是全文搜索
+  const reqLines = workflow.split('\n').filter((l) => /\bcode\b.*\$URL/.test(l) && l.includes('='));
+  const noKeyLine = reqLines.find((l) => /no_key\s*=/.test(l));
+  const yesKeyLine = reqLines.find((l) => /yes_key\s*=/.test(l));
+  assert.ok(noKeyLine, '找不到 no_key 那次请求(无密钥探测)');
+  assert.ok(yesKeyLine, '找不到 yes_key 那次请求(带密钥探测)');
+
+  // ② 两次探测必须打同一个端点 —— 否则「门的三态」比的不是同一件事
+  assert.match(noKeyLine, /\/api\/vault/, '无密钥探测没有请求 /api/vault');
+  assert.match(yesKeyLine, /\/api\/vault/, '带密钥探测没有请求 /api/vault');
+
+  // ③ 关键区分点:带密钥那次必须**真的带上密钥**
+  //    这条是 mutant 的照妖镜 —— 旧写法里 288 行还有一处 x-access-key(重试循环),
+  //    全文 match 抓得到,但被掏空的正是首次请求这一行。
+  assert.match(
+    yesKeyLine,
+    /x-access-key:\s*\$ACCESS_KEY/,
+    '带密钥探测没有真的带上 x-access-key(门的三态就退化成同一件事)',
+  );
+  // ④ 反向:无密钥那次**绝不能**带密钥,否则「无密钥必须 401」验的是个假命题
+  assert.doesNotMatch(
+    noKeyLine,
+    /x-access-key/,
+    '无密钥探测竟然带了访问密钥,「无密钥必须 401」就不成立了',
+  );
+
+  // ⑤ 两次探测必须能取到不同的状态码(变量名不同且都被判过)
+  const noCase = /case\s+"\$no_key"\s+in([\s\S]*?)esac/.exec(workflow);
+  const yesCase = /case\s+"\$yes_key"\s+in([\s\S]*?)esac/.exec(workflow);
+  assert.ok(noCase, '缺少对 $no_key 的分支判定');
+  assert.ok(yesCase, '缺少对 $yes_key 的分支判定');
+  // 三态必须都能判红:否则「门装歪了」会被静默放过
+  assert.match(noCase[1], /401\)/, '$no_key 分支没有 401 这一态(门生效)');
+  assert.match(noCase[1], /200\)[\s\S]*?fail=1/, '$no_key 拿到 200(门没装)时没有判红 —— 最致命的漏判');
+  assert.match(noCase[1], /503\)[\s\S]*?fail=1/, '$no_key 拿到 503(密钥没同步)时没有判红');
+  assert.match(yesCase[1], /200\|404\)/, '$yes_key 分支没有 200|404 这一态(带密钥可访问)');
+  assert.match(yesCase[1], /401\)[\s\S]*?fail=1/, '$yes_key 仍 401(密钥不一致)时没有判红');
+
+  // ⑥ 桶公开域检查(该项原本就有判别力,保留)
   assert.match(
     workflow,
     /domains\/managed/,

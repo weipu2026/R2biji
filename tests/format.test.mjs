@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import {
   sanitizeCategoryName, findCaseCollision,
   looksLikeConflictCopy, backupFileName, parseBackupFileName,
-  planBackupRotation, blobDisplayName, sortNotes, orderBetween,
+  planBackupRotation, sortNotes, orderBetween,
   stripEnc, isEncryptedName, SEAFILE_IGNORE_CONTENT,
   assessPassword, PASSWORD_MIN_LEN, relTime, genPassword,
+  statusAllowsOverride, STATUS_RANK,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -75,11 +76,9 @@ test('备份轮换:同一毫秒写入的多份(带随机后缀)不会互相顶�
   for (const d of toDelete) assert.ok(names.includes(d));
 });
 
-test('附件命名:保留扩展名且限长', () => {
-  assert.equal(blobDisplayName('AbC-123_x', '截图.png'), 'AbC-123_x.png');
-  assert.equal(blobDisplayName('AbC', 'noext'), 'AbC');
-  assert.equal(blobDisplayName('AbC', 'a.very.long.extension'), 'AbC.extension');
-});
+/* 附件命名单测已随 blobDisplayName 删除(2026-09-27 审计 P3-3:与生效的
+ * blobFileNameFor 规则不一致的平行实现,误导维护者)。真实规则的单测在
+ * vault.test.mjs 的 blobFileNameFor 用例里。 */
 
 test('笔记排序与 order 计算', () => {
   const notes = [
@@ -195,4 +194,61 @@ test('relTime:今天带时刻 / 昨天 / 同年月日 / 跨年补年份 / 非法
   assert.equal(relTime(t(8, 24, 23, 0), now), '今天 23:00');
   assert.equal(relTime(Number.NaN, now), '');
   assert.equal(relTime(undefined, now), '');
+});
+
+/* ---------- 状态栏优先级(防「保存失败」被防抖的『已保存』盖掉) ---------- */
+
+test('statusAllowsOverride:低优先级不得覆盖高优先级,error 粘性', () => {
+  assert.equal(STATUS_RANK.error > STATUS_RANK.busy, true, 'error 高于 busy');
+  assert.equal(STATUS_RANK.busy > STATUS_RANK.dirty, true, 'busy 高于 dirty');
+  assert.equal(STATUS_RANK.dirty > STATUS_RANK.ok, true, 'dirty 高于 ok');
+
+  // 未设过(-1)一律放行
+  assert.equal(statusAllowsOverride(-1, 'ok'), true);
+  assert.equal(statusAllowsOverride(-1, 'error'), true);
+
+  // ★ 核心场景:已显示 error(rank 3),防抖回调想写『已保存』(ok, 0)→ 必须拦
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'ok'), false, 'error 不得被 ok 盖');
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'dirty'), false, 'error 不得被 dirty 盖');
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'busy'), false, 'error 不得被 busy 盖');
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'error'), true, 'error 可被新 error 刷新');
+
+  // busy 可被 error 盖(升级);非权威来源不可被 ok/dirty 盖(降级)
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'error'), true);
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'ok'), false);
+
+  // dirty 可被 busy/error 盖(保存开始/失败);非权威来源不可被 ok 盖(降级)
+  assert.equal(statusAllowsOverride(STATUS_RANK.dirty, 'busy'), true);
+  assert.equal(statusAllowsOverride(STATUS_RANK.dirty, 'ok'), false);
+
+  // ok 可被任何状态盖
+  assert.equal(statusAllowsOverride(STATUS_RANK.ok, 'dirty'), true);
+  assert.equal(statusAllowsOverride(STATUS_RANK.ok, 'error'), true);
+  // ok 自身可刷新(连续显示)
+  assert.equal(statusAllowsOverride(STATUS_RANK.ok, 'ok'), true);
+
+  // 未知 kind 按最低优先级处理:不得盖过高优先级
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'whatever'), false);
+});
+
+/* ★ 2026-09-27 回归修复:busy 是过渡态,不许粘住终态收尾。
+ * 背景:上一轮加优先级守卫时,把 busy 也当成了粘性状态 →
+ *   saveAll 里 setStatus('保存中…','busy') 之后,refreshSaveStatus 写的
+ *   「已保存」(rank 0) 被守卫拒掉 → 状态栏**永久卡在「保存中…」**。
+ *   保存其实成功了(PUT 全部 200),用户却以为没存上。此前的单测
+ *   (上面那句 busy→ok 应为 false)恰好把错误行为固化了,所以全绿也没拦住。
+ * 这条用例的存在意义:一旦有人把 authoritative 分支删掉,它必须立刻翻红。 */
+test('statusAllowsOverride:权威终态可收尾过渡态,但永远盖不动 error', () => {
+  // 保存流程跑完 → 权威写入「已保存」/「有未保存更改」,必须能盖掉 busy
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'ok', true), true, '权威 ok 必须能收尾 busy');
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'dirty', true), true, '权威 dirty 必须能收尾 busy');
+  assert.equal(statusAllowsOverride(STATUS_RANK.dirty, 'ok', true), true, '权威 ok 必须能收尾 dirty');
+
+  // ★ 但 error 是唯一粘性状态:权威终态也不许把它改写成假绿
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'ok', true), false, '权威 ok 不得盖 error');
+  assert.equal(statusAllowsOverride(STATUS_RANK.error, 'dirty', true), false, '权威 dirty 不得盖 error');
+
+  // 非权威来源在 busy 前依然要按优先级守规矩(防止中途被静默降级)
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'ok', false), false);
+  assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'dirty', false), false);
 });

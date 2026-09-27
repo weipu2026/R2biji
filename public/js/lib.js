@@ -69,6 +69,21 @@ export class Library {
     return this.vaultJson?.catMeta?.[name]?.pin === true;
   }
 
+  /** 分类元信息的只读视图(不存在则空对象) —— 调用方不必自己防 undefined */
+  catMetaOf(name) {
+    return this.vaultJson?.catMeta?.[name] || {};
+  }
+
+  /**
+   * 分类笔记篇数的本地缓存值。
+   * 冷启动时各分类是懒加载的,本地并不知道有几篇 —— 那时返回 null,
+   * 由 UI 决定「先不显示」而不是显示一个会跳变的 0。
+   */
+  catCount(name) {
+    const n = this.vaultJson?.catMeta?.[name]?.count;
+    return Number.isInteger(n) && n >= 0 ? n : null;
+  }
+
   /**
    * 对 vault.json 做一次元信息变更并落盘(CAS)。
    * 412 = 别的会话刚写过 → 重拉最新 vault、在新内容上重放同一变更(按名字写,幂等)再试一次;
@@ -102,18 +117,42 @@ export class Library {
     throw new LibraryError('vault.json 持续被其他会话修改,请刷新页面后重试', 'conflict');
   }
 
-  /** 分类置顶 / 取消置顶 */
-  async setCatPin(name, pin) {
-    await this.updateVaultMeta((json) => {
+  /**
+   * 通用分类元信息写入(CAS,跨设备同步)。
+   * patch 里值为 undefined / null 的键会被删掉;某分类的条目空了就删条目,
+   * 整个 catMeta 空了就删 catMeta —— 不在 vault.json 里留空壳(与旧 setCatPin 同规矩)。
+   * @param {string} name
+   * @param {Record<string, any>} patch 就地合并的字段(del 语义:传 null)
+   * @returns {Promise<boolean>} 是否真的写了一次云端(无变化时 false)
+   */
+  async setCatMeta(name, patch) {
+    return this.updateVaultMeta((json) => {
       const meta = { ...(json.catMeta || {}) };
       const entry = { ...(meta[name] || {}) };
-      if (pin) entry.pin = true;
-      else delete entry.pin;
+      for (const [k, v] of Object.entries(patch)) {
+        if (v === undefined || v === null) delete entry[k];
+        else entry[k] = v;
+      }
       if (Object.keys(entry).length) meta[name] = entry;
       else delete meta[name];
       if (Object.keys(meta).length) json.catMeta = meta;
       else delete json.catMeta; // 全空就整个摘掉,不在 vault.json 里留空壳
     });
+  }
+
+  /** 分类置顶 / 取消置顶(薄封装,保持旧签名) */
+  async setCatPin(name, pin) {
+    return this.setCatMeta(name, { pin: pin ? true : null });
+  }
+
+  /**
+   * 记录分类的笔记篇数。
+   * ⚠️ 每次写都是一次 vault.json 的条件写(CAS)+ 一次网络往返,绝不能挂在渲染路径上 ——
+   * 只有篇数与本地缓存不一致时才调用它(updateVaultMeta 内部也会比对内容,
+   * 无变化直接返回 false 不写云端,这里再挡一层是为了省掉 JSON 克隆的开销)。
+   */
+  async setCatCount(name, n) {
+    return this.setCatMeta(name, { count: n });
   }
 
   /* ============ 分类:读 ============ */
@@ -247,15 +286,26 @@ export class Library {
     const cat = this.categories.get(name);
     if (!cat) throw new LibraryError(`分类不存在:${name}`, 'missing');
     // 条件删除:带上本地见过的 etag。没打开过的分类没有 etag,先拉一次 ——
-    // 删除本来就该基于当前版本,否则竞态下会把别的设备刚保存的新版静默删掉
+    // 删除本来就该基于当前版本,否则竞态下会把别的设备刚保存的新版静默删掉。
+    // ★ 服务端现在**要求** If-Match(缺头 → 428):拉不到 etag 就不能删,
+    //   必须把原因如实抛给用户,而不是退回「无条件删」——那条路已不存在,
+    //   静默放过只会让用户看到莫名的 428 报错。
     if (!cat.lastSeenEtag) {
-      try { await this.loadCategory(name); } catch { /* 读不出来也要给用户删的机会(不带条件删) */ }
+      try {
+        await this.loadCategory(name);
+      } catch (e) {
+        throw new LibraryError(`无法读取「${name}」的当前版本,未执行删除:${e?.message || e}`, 'stale');
+      }
+    }
+    if (!cat.lastSeenEtag) {
+      throw new LibraryError(`未取到「${name}」的版本号,未执行删除(请刷新后重试)`, 'stale');
     }
     await API.deleteCat(name, cat.lastSeenEtag); // 服务器删除前自动备份;412 = 刚被其他设备改过,上层如实提示
     this.categories.delete(name);
-    // 残留的置顶元信息顺手清掉;失败无害(名字已不在清单里,永不显示)
+    // 残留的分类元信息(置顶 / 篇数)顺手清掉;失败无害(名字已不在清单里,永不显示)
+    // —— 必须整条删、不能只清 pin:否则篇数会跟着同名分类「复活」
     if (this.vaultJson?.catMeta?.[name]) {
-      try { await this.setCatPin(name, false); } catch { /* 忽略 */ }
+      try { await this.setCatMeta(name, { pin: null, count: null }); } catch { /* 忽略 */ }
     }
   }
 

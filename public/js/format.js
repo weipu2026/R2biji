@@ -19,7 +19,12 @@ const ILLEGAL_CHARS = /[/\\:*?"<>|\u0000-\u001f]/g;
  */
 export function sanitizeCategoryName(raw) {
   const cleaned = String(raw ?? '')
+    // ★ 先归一成 NFC:macOS 常给 NFD(「café」= e + 组合重音),不归一就会
+    //   与 NFC 版本在 R2 里各存一份,用户看到两个同形分类、删一个另一个还在。
+    .normalize('NFC')
     .replace(ILLEGAL_CHARS, '')
+    // U+FFFD 只来自非法 UTF-8 解码或用户误粘,一律当非法字符剔除(与服务端一致)
+    .replace(/\ufffd/g, '')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 60);
@@ -29,18 +34,53 @@ export function sanitizeCategoryName(raw) {
 /**
  * 大小写不敏感文件系统(Win/macOS)撞名检测。
  * 「API」与「api」会撞名 —— 返回与之撞名的既有分类名,无则 null。
+ * ★ 先做 NFC 归一:否则 NFD 形态的「café」与 NFC 形态比较会判为不同名,
+ *   而文件系统与 R2 都按码点存,实际会撞。
  */
 export function findCaseCollision(existingNames, name) {
-  const lower = String(name).toLowerCase();
-  return existingNames.find((n) => n !== name && String(n).toLowerCase() === lower) || null;
+  const fold = (s) => String(s).normalize('NFC').toLowerCase();
+  const lower = fold(name);
+  return existingNames.find((n) => n !== name && fold(n) === lower) || null;
 }
 
 export function isEncryptedName(name) {
   return name.endsWith(ENCRYPTED_EXT);
 }
-
 export function stripEnc(name) {
   return name.slice(0, -ENCRYPTED_EXT.length);
+}
+
+/* ---------- 状态栏优先级(纯函数,供单测) ---------- */
+
+/**
+ * 保存状态栏的优先级。error > busy > dirty > ok。
+ * ★ 为什么需要:「保存失败」由 saveAll 直接写入,但 refreshSaveStatus 是 800ms 防抖;
+ *   若此刻还有一次 markDirty 挂起的回调到点(且 dirty 已被清空),它会用「已保存」
+ *   把刚显示的错误盖掉 → 用户看到假绿,以为存上了。
+ *   低优先级不得覆盖高优先级;同/更高可覆盖(进度文案才能刷新)。
+ */
+export const STATUS_RANK = { error: 3, busy: 2, dirty: 1, ok: 0 };
+
+/**
+ * 是否允许用 nextKind 覆盖当前状态(纯决策,不碰 DOM)。
+ * @param {number} currentRank 当前优先级(-1 表示尚未设置过任何状态)
+ * @param {string} nextKind 即将设置的状态种类
+ * @param {boolean} authoritative 是否是「保存流水线的权威终态」
+ *   refreshSaveStatus 的写入属于权威终态:它反映的是保存流程跑完后的真实结果,
+ *   因此允许覆盖过渡态 busy/dirty —— 但**永远不许覆盖 error**(否则就是假绿)。
+ * @returns {boolean}
+ */
+export function statusAllowsOverride(currentRank, nextKind, authoritative = false) {
+  const rank = STATUS_RANK[nextKind] ?? 0;
+  // 尚未设置过(-1)时一律放行
+  if (currentRank <= 0) return true;
+  // ★ error 是唯一粘性状态:任何来源都不得把它改写成非 error(防假绿)
+  if (currentRank === STATUS_RANK.error) return rank >= STATUS_RANK.error;
+  // 权威终态收尾:保存流程已结束,允许 dirty/ok 覆盖过渡态 busy/dirty
+  // (不加这条 → 保存成功后状态栏永久卡在「保存中…」,2026-09-27 实测回归)
+  if (authoritative) return true;
+  // 其余情况:低优先级不许盖高优先级
+  return rank >= currentRank;
 }
 
 /** Seafile / 同步工具生成冲突副本的常见命名特征 */
@@ -92,12 +132,11 @@ export function backupArchiveName(date = new Date()) {
 
 /* ---------- 附件(blob)命名:内容寻址 ---------- */
 
-/** HMAC 结果(base64url) + 保留原扩展名,供 Seafile 端识别图片类型 */
-export function blobDisplayName(hashB64url, originalName) {
-  const dot = originalName.lastIndexOf('.');
-  const ext = dot > 0 ? originalName.slice(dot).slice(0, 12) : '';
-  return hashB64url + ext;
-}
+/* 命名规则唯一实现在 vaultlib.js 的 blobFileNameFor():
+ * HMAC base64url + 白名单扩展名([A-Za-z0-9]{1,12},不合法就不带)。
+ * 此处不要再放平行的「展示名」实现 —— 2026-09-27 审计 P3-3:
+ * 旧 blobDisplayName 的扩展名规则(任意字符截 12)与生效版不一致,
+ * 拿它拼文件名会在服务端 400,已删。 */
 
 /* ---------- 排序 ---------- */
 

@@ -1,7 +1,10 @@
 /* JMbiji 入口 */
-import { start } from './ui.js';
+import { start } from './features/shell.js';
+import { ctx } from './ui.js';
 
-start();
+/* 两步接线:ui.js 负责「组装注入包 + 定义共享基础设施」,
+ * shell.js 负责「启动编排 + 事件绑定」。main.js 只把它们接起来。 */
+start(ctx);
 
 /* PWA:注册 Service Worker(file:// 下不可用,静默跳过) */
 if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {

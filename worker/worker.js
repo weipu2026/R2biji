@@ -217,12 +217,37 @@ async function authOk(headers, env) {
 
 /* ---------------- 名称校验 ---------------- */
 
-/** 分类名:非空、无路径分隔符、≤100 字符。返回合法名或 null */
+/** 分类名:非空、无路径分隔符、≤100 字符。
+ *  ★ 返回**归一后**的名字(NFC),调用方必须用返回值而非入参:
+ *    macOS 上传的文件名常是 NFD(「café」= e + 组合重音),Windows/Linux 是 NFC。
+ *    不归一 → 同一逻辑名在列表里并存两份,删一份另一份还在,用户以为「删不掉」。
+ *  ★ 拒绝 HTML 元字符:分类名会经前端渲染进 DOM,服务端这道校验是纵深防御
+ *    (前端已有转义,但服务端不该把「可注入的串」存进索引,否则任何新渲染点都是洞)。
+ *  ★ 拒绝控制字符与不可见格式字符(含零宽字符):它们会造成「看起来同名却不同」的诡异重名。 */
 function validCatName(raw) {
-  if (!raw || raw === '.' || raw === '..' || raw.length > 100) return null;
-  if (/[/\\]/.test(raw) || /[\u0000-\u001f]/.test(raw)) return null;
-  return raw;
+  if (typeof raw !== 'string') return null;
+  const name = raw.normalize('NFC');
+  if (!name || name === '.' || name === '..' || name.length > 100) return null;
+  if (/[/\\]/.test(name)) return null;
+  // 控制字符 C0/C1 + 零宽/双向控制这类不可见格式字符
+  if (/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/.test(name)) return null;
+  // ★ U+FFFD(替换字符)一律拒绝:它只有两个来源,都不是合法分类名。
+  //   ①查询串里是非法的 UTF-8 字节(如 %FF),URLSearchParams 解码时**不可逆地**
+  //     塌成 U+FFFD —— 于是「%FF」和「真 U+FFFD」归一到同一个键,后者建库时撞 409
+  //     「已存在」,而列表里只显示一条,用户完全无从理解;
+  //   ②用户真的粘了 U+FFFD。两种都不该落盘。
+  if (name.includes('\ufffd')) return null;
+  // HTML 元字符:本应用不需要它们出现在名字里,一律拒绝
+  if (/[<>"'`&]/.test(name)) return null;
+  // 首尾空白会导致「看不见的空格」重名,一律拒绝(而不是静默 trim,静默改用户输入更糟)
+  if (name !== name.trim()) return null;
+  return name;
 }
+
+/** 分类名的「大小写/兼容等价」折叠键。用于在**同一个库内**拒绝仅大小写不同的重名
+ *  (「API」与「api」)。R2 的键名区分大小写,不折叠就会并存两份;
+ *  折叠只用于**冲突检测**,不改变实际存储键(保留用户原始大小写)。 */
+const catNameFold = (name) => name.normalize('NFC').toLowerCase();
 
 /** 附件名:HMAC(32B) 的 base64url(43 字符)+ 可选扩展名(≤12 字符) */
 const BLOB_NAME_RE = /^[A-Za-z0-9_-]{43}(\.[A-Za-z0-9]{1,12})?$/;
@@ -262,6 +287,19 @@ async function bodyBytes(body) {
   return typeof body === 'function' ? body() : body;
 }
 
+/** 从 If-Match 头取裸 etag。
+ *  ★ `*` 走不通:按 RFC 7232,`If-Match: *` 的语义是「只要资源存在就放行」——
+ *    它**不提供任何版本约束**,拿它做条件写等于无条件覆盖(CAS 形同虚设)。
+ *    客户端从来只用真实 etag,出现 `*` 一定是调用方搞错了,必须显式拒绝而非当作通配。
+ *  返回 { ok, etag, wildcard }:wildcard=true 表示调用方传了 `*`,须由调用点拒绝。 */
+function readIfMatch(headers) {
+  const raw = (headers['if-match'] || '').trim();
+  if (raw === '*') return { ok: false, wildcard: true, etag: '' };
+  const etag = normEtag(raw);
+  if (!etag) return { ok: false, wildcard: false, etag: '' };
+  return { ok: true, wildcard: false, etag };
+}
+
 async function putCategory(method, headers, body, env, name) {
   if (method !== 'PUT') return fail(405, 'method', '不支持的请求方法');
   const raw = await bodyBytes(body);
@@ -269,37 +307,63 @@ async function putCategory(method, headers, body, env, name) {
   const r2key = `${CAT_PREFIX}${name}.enc`;
 
   const createOnly = (headers['if-none-match'] || '').trim() === '*';
-  const ifMatch = normEtag(headers['if-match']);
+  const im = readIfMatch(headers);
 
   if (createOnly) {
     // 「仅新建」用官方条件写:R2PutOptions.onlyIf 支持 Headers,按 RFC 7232
     // 语义处理 If-None-Match: *(对象不存在才写入);条件失败 put() 返回 null。
     // ⚠️ 只能走 onlyIf —— 传不存在的选项名会被静默忽略(等于无条件写)。
+    // ★ 先做同库重名(大小写/Unicode 兼容等价)检查:仅大小写不同的名字在 R2 里是两个键,
+    //   不拦就会并存「API」与「api」,用户在界面上分不清哪个是哪个。
+    const dup = await findCatNameConflict(env, name);
+    if (dup) return fail(409, 'exists', `已存在仅大小写不同的分类「${dup}」`);
     const res = await env.VAULT.put(r2key, raw, { onlyIf: onlyIfNoneMatchStar() });
     if (!res) return fail(409, 'exists', '分类已存在');
     return json({ ok: true, etag: res.etag }, 201);
   }
 
-  if (!ifMatch) return fail(428, 'need-if-match', '缺少 If-Match(条件写,防多端互相覆盖)');
+  if (im.wildcard) {
+    // If-Match: * 不做通配(见 readIfMatch 注释):它等于放弃版本约束,不能当条件写用
+    return fail(428, 'need-if-match', 'If-Match: * 不是有效的条件写,请带上真实 etag');
+  }
+  if (!im.ok) return fail(428, 'need-if-match', '缺少 If-Match(条件写,防多端互相覆盖)');
   const current = await env.VAULT.get(r2key);
   if (!current) return fail(404, 'missing', '分类已被其他设备删除');
   const oldBytes = current instanceof Uint8Array ? current : new Uint8Array(await current.arrayBuffer());
-  const res = await env.VAULT.put(r2key, raw, { onlyIf: { etagMatches: ifMatch } });
+  const res = await env.VAULT.put(r2key, raw, { onlyIf: { etagMatches: im.etag } });
   if (!res) return fail(412, 'conflict', '服务器上的版本已变化(其他设备刚保存),请刷新后重试');
   // CAS 成功 → 立即备份被替换的旧版(拒绝写入不产生备份)
   await writeBackup(env, name, oldBytes);
   return json({ ok: true, etag: res.etag });
 }
 
+/** 在同一库内找「与 name 仅大小写/Unicode 兼容等价、但键名不同」的既有分类。
+ *  找到返回那个既有名字(供报错提示),否则返回 null。 */
+async function findCatNameConflict(env, name) {
+  const fold = catNameFold(name);
+  const objects = await listAll(env.VAULT, CAT_PREFIX);
+  for (const o of objects) {
+    const other = o.key.slice(CAT_PREFIX.length, -4);
+    if (other !== name && catNameFold(other) === fold) return other;
+  }
+  return null;
+}
+
 async function deleteCategory(headers, env, name) {
   const r2key = `${CAT_PREFIX}${name}.enc`;
   const existing = await env.VAULT.head(r2key);
   if (!existing) return fail(404, 'missing', '分类不存在');
-  // 条件删除:带 If-Match 时与 head 比对,不符 → 412。此前删除无任何条件,
-  // 设备 A 的删除(或改名的删除半程)会把设备 B 刚保存的新版一并删掉。
-  // R2 的 delete 不支持条件参数,head 比对是纯函数核心能做的最强校验。
-  const ifMatch = normEtag(headers['if-match']);
-  if (ifMatch && existing.etag !== ifMatch) {
+  // ★ 条件删除:**一律要求 If-Match**,与 PUT 对齐。
+  //   此前 delete 缺头时直接跳过全部校验无条件删 —— 与 PUT 的 428 守卫不对称:
+  //   「设备 A 删除」或「改名的删除半程」会把设备 B 刚保存的新版一并删掉,
+  //   且客户端拿不到任何提示,属静默数据丢失。
+  //   R2 的 delete 不支持条件参数,head 比对是纯函数核心能做的最强校验。
+  const im = readIfMatch(headers);
+  if (im.wildcard) {
+    return fail(428, 'need-if-match', 'If-Match: * 不是有效的条件删除,请带上真实 etag');
+  }
+  if (!im.ok) return fail(428, 'need-if-match', '缺少 If-Match(条件删除,防误删其他设备刚存的新版)');
+  if (normEtag(existing.etag) !== im.etag) {
     return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
   }
   const old = await env.VAULT.get(r2key);
@@ -309,11 +373,9 @@ async function deleteCategory(headers, env, name) {
   }
   // delete 前最后核对一次版本:上面 head→get→backup 之间仍可能被并发写插空,
   // 这次比对把竞态窗口压缩到最后一步(R2 的 delete 不支持条件参数,这是极限)
-  if (ifMatch) {
-    const latest = await env.VAULT.head(r2key);
-    if (latest && latest.etag !== ifMatch) {
-      return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
-    }
+  const latest = await env.VAULT.head(r2key);
+  if (latest && normEtag(latest.etag) !== im.etag) {
+    return fail(412, 'conflict', '分类刚被其他设备修改,请重新打开后再删除');
   }
   await env.VAULT.delete(r2key);
   return empty();

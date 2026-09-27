@@ -197,6 +197,35 @@ test('zipWriteEntries:中文名/多条目与项目 zipStore 产出等价可读',
   assert.equal(new TextDecoder().decode(readBack[0].bytes), '# 甲');
 });
 
+/* ---------- innerHTML 插值转义纪律(2026-09-27 审计 P2) ----------
+ * recover.html 是单文件应急页,靠字符串拼 innerHTML 渲染。**每一个**插值都必须
+ * 过 rdrEsc(或本身是受控数字),否则备份包内的字段就能直接注入 HTML。
+ * 历史缺陷:vault.json 的 kdf.iterations 若不是数字,会被原样拼进去。
+ * 这条守卫静态扫描渲染块里的每个 `${...}`,插值里出现裸标识符就报红 ——
+ * 新增字段时的默认要求是「过 rdrEsc」。 */
+test('★ recover.html:innerHTML 里的每个插值都必须转义(防包内字段注入)', () => {
+  // 只看真正拼 innerHTML 的模板(≠ 纯变量赋值),抽取其中全部 ${...}
+  const blocks = [...html.matchAll(/innerHTML\s*=\s*`([\s\S]*?)`;/g)].map((m) => m[1]);
+  assert.ok(blocks.length > 0, '应至少找到一处 innerHTML 模板');
+
+  const offenders = [];
+  // 受信辅助函数:纯数值运算,不可能产出标签。加入前必须逐个人工核过实现。
+  const TRUSTED = /^(fmtBytes|Number)\s*\(/;
+  for (const block of blocks) {
+    for (const { 1: expr } of block.matchAll(/\$\{([^}]*)\}/g)) {
+      const e = expr.trim();
+      // 允许:① 调用了 rdrEsc ② 纯数字字面量 ③ 受信格式化函数 ④ 数组长度
+      const safe = /rdrEsc\s*\(/.test(e)          // 转义过
+        || /^\d+$/.test(e)                        // 纯数字字面量
+        || /\.length$/.test(e)                    // 数组长度,必为数字
+        || TRUSTED.test(e);                       // 受信数值格式化
+      if (!safe) offenders.push(`${e}  ← 在模板: ${block.slice(0, 40).replace(/\s+/g, ' ')}…`);
+    }
+  }
+  assert.deepEqual(offenders, [],
+    `以下插值未过 rdrEsc,存在 HTML 注入风险:\n${offenders.join('\n')}`);
+});
+
 /* ---------- 辅助:标准 deflate zip 打包(测试专用) ---------- */
 
 function zipDeflate(entries) {

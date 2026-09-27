@@ -193,3 +193,21 @@ test('Markdown 渲染与主站同语法,敏感行遮罩,XSS 一律转义', async
   assert.ok(!xss.includes('<img'), 'img 标签必须被转义');
   assert.ok(xss.includes('&lt;img'), '转义后以文本呈现');
 });
+
+test('敏感行遮罩:多行段落的非首行也必须遮(与主站 render.js 的 m 标志对齐)', async () => {
+  const readerCode = extractBetween(
+    mod.READER_TEMPLATE, '/*READER-SCRIPT-START*/', '/*READER-SCRIPT-END*/', 'READER-SCRIPT',
+  );
+  const rd = await import('data:text/javascript,' + encodeURIComponent(
+    readerCode + '\nexport { rdrMd };',
+  ));
+  // rdrMd 把连续行 join('\n') 合成**一个**段落再交给 rdrInline。
+  // 缺 m 标志时 ^...$ 只匹配首行 → 段内第 2 行起的敏感值会明文泄漏。
+  const html = rd.rdrMd('这是第一行说明\n密码: sk-leak-777\n第三行普通文字');
+  assert.ok(html.includes('class="secret masked"'), '段内第 2 行的敏感值必须被遮罩(缺 m 会漏遮)');
+  assert.ok(html.includes('sk-leak-777'), '敏感值仍应在 DOM 里(点击可显形)');
+  // 已知取舍(与主站 render.js 一致,非本缺陷引入):命中敏感行时 rdrInline 提前 return,
+  // 同段落里**该行之外**的文字不进入输出。主站 render.js:95/121 也是整段交给 renderInline,
+  // 行为相同 —— 这里把契约钉住,防止将来单方面「修」成两边不一致。
+  assert.ok(html.includes('密码: '), '命中行的前缀保留(遮罩 span 跟着它)');
+});

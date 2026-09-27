@@ -477,6 +477,56 @@ test('分类置顶:元信息存 vault.json 跨设备可见;vault 被他人改过
   assert.equal((await API.fetchVault()).json.catMeta['工作']?.pin, true, '改密码不丢置顶元信息');
 });
 
+test('分类篇数:存 catMeta.count 跨设备可见;没变化时不写云端;删分类不留残影', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('pw123456', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await a.rescan();
+  await a.createCategory('工作');
+
+  /* 冷启动不知道篇数 → null(UI 据此决定「不显示」而不是画个 0) */
+  assert.equal(a.catCount('工作'), null, '未知时返回 null 而非 0');
+  assert.deepEqual(a.catMetaOf('工作'), {}, '不存在的元信息给空对象');
+
+  /* 写入真实篇数 */
+  assert.equal(await a.setCatCount('工作', 3), true, '首次写入应真的写云端');
+  assert.equal(a.catCount('工作'), 3);
+
+  /* 篇数没变 → 不写云端(否则每次渲染都发一次 CAS,浪费往返) */
+  const etagBefore = a.vaultEtag;
+  assert.equal(await a.setCatCount('工作', 3), false, '篇数未变不应写');
+  assert.equal(a.vaultEtag, etagBefore, '未变时不产生新的 etag');
+
+  /* 篇数变了 → 写,且与置顶共存于同一条 catMeta */
+  await a.setCatPin('工作', true);
+  assert.equal(await a.setCatCount('工作', 5), true);
+  const meta = (await API.fetchVault()).json.catMeta['工作'];
+  assert.equal(meta.count, 5, '篇数落盘');
+  assert.equal(meta.pin, true, '置顶与篇数共存,互不覆盖');
+
+  /* 跨设备可见 */
+  const b = await unlockAs('pw123456');
+  await b.rescan();
+  assert.equal(b.catCount('工作'), 5, '篇数对其他设备可见');
+
+  /* 只清 count 不影响 pin */
+  await a.setCatCount('工作', null);
+  assert.equal(a.catCount('工作'), null, 'count 已清');
+  assert.equal(a.catPin('工作'), true, 'pin 不受影响');
+
+  /* 删分类:整条 catMeta 清掉,别留残影让同名分类「复活」旧篇数 */
+  await a.deleteCategory('工作');
+  assert.equal((await API.fetchVault()).json.catMeta, undefined, '删分类后 catMeta 不留空壳');
+
+  await a.createCategory('工作');
+  assert.equal(a.catCount('工作'), null, '同名新分类不应继承旧篇数');
+});
+
 test('vault CAS 对弱验证器形态的 etag 免疫(CF 边缘把压缩 JSON 的 etag 改写成 W/"...")', async () => {
   freshEnv();
   API.clearToken();

@@ -39,7 +39,17 @@ test('SW 清单:每个条目都真实存在(漏登记 / 写错名都会让离线
 });
 
 test('SW 清单:public/js 下的每个模块都必须登记(新加模块最容易漏)', () => {
-  const onDisk = readdirSync(join(PUBLIC, 'js')).filter((f) => f.endsWith('.js'));
+  // ★ 必须**递归**:重构后 js/ 下多了 features/ 子目录,只扫顶层会漏掉整目录
+  //  (2026-09-27 实测:features/theme.js 漏登记时,只扫顶层的旧写法全绿放过)
+  const walk = (dir, base = '') => {
+    const out = [];
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      if (e.isDirectory()) out.push(...walk(join(dir, e.name), `${base}${e.name}/`));
+      else if (e.name.endsWith('.js')) out.push(`${base}${e.name}`);
+    }
+    return out;
+  };
+  const onDisk = walk(join(PUBLIC, 'js'));
   assert.ok(onDisk.length > 0, 'public/js 下应当有模块');
   const listed = new Set(ASSETS.map((a) => a.replace(/^\.\/js\//, '')));
   const missing = onDisk.filter((f) => !listed.has(f));
@@ -60,4 +70,40 @@ test('CACHE 版本号形如 jmbiji-vN(network-first 后仅为清理旧缓存而�
   const m = /const CACHE = '([^']+)'/.exec(sw);
   assert.ok(m, 'sw.js 里应当有 const CACHE');
   assert.match(m[1], /^jmbiji-v\d+$/, `CACHE 版本号格式异常:${m[1]}`);
+});
+
+/* ---------- 无障碍 / 可用性护栏(2026-09-26 审计) ---------- */
+
+test('index.html 必须有 <noscript> 回退(禁用 JS 时不是一片空白)', () => {
+  const html = readFileSync(join(PUBLIC, 'index.html'), 'utf8');
+  assert.match(html, /<noscript>/, '禁用 JS 时 #lock/#app 全 hidden,没有 noscript 就是纯白屏');
+  // 回退文案的样式必须在外部 CSS 里:CSP 是 style-src 'self',内联 style 属性会被拦掉
+  assert.doesNotMatch(/<noscript>[\s\S]*?<div[^>]*\sstyle=/.exec(html) || '', /[\s\S]/, 'noscript 里不得用内联 style(CSP 会拦掉,等于没写样式)');
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  assert.match(css, /\.noscript-warn\s*\{/, 'noscript 的样式类 .noscript-warn 必须存在于 style.css');
+});
+
+test('reduced-motion 不得停掉状态指示动画(spinner)', () => {
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  const block = /@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(block, '应当存在 prefers-reduced-motion 块');
+  const body = block[1];
+  // 旧写法 `* { animation: none !important }` 会把 .spinner 的旋转也杀掉 → 用户以为卡死。
+  // 判据:不得存在「裸 * 选择器」的块直接停掉 animation(*:not(.spinner) 是允许的例外)。
+  // 用行锚定匹配,避免被注释里的同类文字误导。
+  const bareStar = /^\s*\*\s*\{([^}]*)\}/gm;
+  let m2, bad = false;
+  while ((m2 = bareStar.exec(body)) !== null) {
+    if (/animation:\s*none\s*!important/.test(m2[1])) bad = true;
+  }
+  assert.equal(bad, false, '不得用裸 `*` 选择器停掉全部 animation(spinner 是状态指示,必须保留)');
+  assert.match(body, /\.spinner/, 'spinner 必须在 reduced-motion 下被显式保留');
+});
+
+test('toast 文字色走主题变量,暗色下不得硬编码 #fff', () => {
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  assert.doesNotMatch(css, /\.toast-error\s*\{[^}]*color:\s*#fff/i, 'toast-error 不得硬编码 #fff(暗色下 --danger 是浅色,白字对比仅 3.15:1)');
+  assert.doesNotMatch(css, /\.toast-warn\s*\{[^}]*color:\s*#fff/i, 'toast-warn 不得硬编码 #fff(暗色下 --warn 是浅色,白字对比仅 2.49:1)');
+  assert.match(css, /--toast-error-fg:/, '必须定义 --toast-error-fg 变量');
+  assert.match(css, /--toast-warn-fg:/, '必须定义 --toast-warn-fg 变量');
 });

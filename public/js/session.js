@@ -71,7 +71,7 @@ export function clearSession() {
   try { localStorage.removeItem(SESSION_KEY); } catch { /* 忽略 */ }
 }
 
-/** 本机是否记住了会话(给界面判断用,不暴露密钥) */
+/** 本机是否记住了会话(不暴露密钥)。目前仅测试在用,界面走 loadSession() 直接判断。 */
 export function hasSession() {
   return loadSession() !== null;
 }

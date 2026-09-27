@@ -11,6 +11,30 @@ import { renderMarkdown } from './render.js';
 import { findMatches, renderSearchResult } from './search.js';
 import { saveSession, loadSession, clearSession } from './session.js';
 import { TabSync, planSavedCategoryAction } from './tabsync.js';
+// ★ 会话态统一收口到 store:下方 `S` 是指向 store 的代理,读写语法与原先完全一致,
+//   但状态已汇聚到单一容器(后续按 feature 拆分时可直接订阅)。见 store.js 顶部说明。
+import { store, createProxy } from './store.js';
+// ★ 拆出的 feature 模块(每个只依赖 ctx 注入的共享基础设施,不碰本文件私有变量)
+import { initTheme, toggleTheme } from './features/theme.js';
+import { runSearch, closeSearch } from './features/search.js';
+import { scheduleClipboardWipe, refreshExportDue, openTrash, exportNoteMd, openPwGenerator } from './features/data.js';
+import {
+  showLock, lockNow, doUnlock, doCreateLibrary, resumeSession,
+  rememberNow, downloadVaultBackup,
+} from './features/lock.js';
+import {
+  clickable, renderCategoryList, openCategory, addCategory, renameCategory, deleteCategory,
+  activeNoteData, renderNoteList, openNote, moveNoteSelection,
+} from './features/sidebar.js';
+import {
+  renderReadView, copyWholeNote, enterEditMode, collectEditChanges, exitEditMode,
+  addAttachments, addNote, deleteNote, toggleNotePin, moveNote,
+} from './features/note.js';
+// shell 只导出 boot 给本文件用(「从备份恢复」后要重跑启动流程);
+// 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
+import { boot } from './features/shell.js';
+
+const S = createProxy(store);
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,42 +46,152 @@ const IDLE_SAVE_MS = 4000;               // 改动停止 4 秒后自动保存(�
  * 颜色一律 currentColor,跟随各处的文字色与主题。 */
 const ICON = {
   plus: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
-  pencil: '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
-  copy: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
-  up: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>',
-  down: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>',
-  pin: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>',
+  pencil: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  copy: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
+  up: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>',
+  down: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>',
+  pin: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>',
   moon: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>',
   sun: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>',
-  trash: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
-  menu: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
+  trash: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+  menu: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
   eye: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
+  image: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>',
+  warn: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+  blocked: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>',
+  lock: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
+  key: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.586 17.414A2 2 0 0 0 2 18.828V21a1 1 0 0 0 1 1h3a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h1a1 1 0 0 0 1-1v-1a1 1 0 0 1 1-1h.172a2 2 0 0 0 1.414-.586l.814-.814a6.5 6.5 0 1 0-4-4z"/><circle cx="16.5" cy="7.5" r=".5" fill="currentColor"/></svg>',
+  download: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="3" y2="15"/></svg>',
+  upload: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>',
+  broom: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>',
+  trash2: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>',
+  sparkle: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 14.4 9.6 22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4Z"/></svg>',
+  check: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 3 18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.9 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2"/><path d="M6.2 6.2A17.6 17.6 0 0 0 2 12s3.5 7 10 7c1.2 0 2.3-.2 3.3-.6"/></svg>',
+};
+
+/* ------------------------------------------------------------
+ * feature 上下文(ctx)
+ * ------------------------------------------------------------
+ * 从 ui.js 拆出去的 feature 模块不直接耦合本文件的私有变量,而是通过 ctx
+ * 拿到它们需要的「共享基础设施」。当前注入:
+ *   - dom.byId(id)         取元素(ui.js 的 `$` 的等价物)
+ *   - icons                描边图标表(ICON)
+ *   - toast(msg,kind)      轻提示
+ *   - modal(opts)          通用对话框
+ *   - store                会话态(读/写;见 store.js)
+ *   - openNote(id)         打开某条笔记(sidebar.js)
+ *   - activeNoteData()     取当前笔记对象(sidebar.js)
+ *   - renderNoteList()     重绘笔记列表(sidebar.js)
+ *   - renderCategoryList() 重绘分类列表(sidebar.js)
+ *   - fmtTime(ts)          时间格式化(工具区)
+ *   - markDirty(name)      标记某分类有未保存改动
+ *   - clickable(el,fn)     让元素可点(含键盘可达性)
+ *   - copyText(text,btn)   复制并给按钮反馈
+ *   - downloadBytes(...)   下载字节为文件
+ *   - saveAll()            立刻跑一次保存流水线
+ *   - resetStatusPriority() 清状态栏粘性(error 唯一粘性,见 §8.1.2)
+ *   - stopIdleTimer()      停掉空闲计时(锁定时用)
+ *   - enterApp()           解锁成功后进入应用
+ *   - api                  { setToken, clearToken, createVaultJson }
+ *   - session              { saveSession, loadSession, clearSession }
+ *   - vault                { unlockVault, deriveAllKeys, createVault, dekMatchesVault }
+ *   - Library              Library 构造器(建库 / 解锁时用)
+ *   - addNote()            新建一条笔记(note.js)
+ *   - renderReadView()     重绘阅读视图(note.js)
+ *   - moveNote(id,dir)     笔记上移 / 下移(note.js)
+ *   - toggleNotePin(id)    笔记置顶开关(note.js)
+ *   - showEmpty(...)       空状态区(图标 + 文案 + 可选引导按钮)
+ *   - closeDrawer()        移动端收起左侧抽屉
+ *   - renderMarkdown(text) Markdown → DOM(render.js 的安全子集渲染器)
+ * ★ 跨模块入口一律在这里**绑定 ctx 后再注入**:feature 之间的调用写成
+ *   `ctx.openNote(id)` 而不是 `ctx.openNote(ctx, id)` —— 谁都不必知道「ctx 要透传」
+ *   这件事,接线全部收在本文件。少一层约定就少一类「忘了传 ctx」的运行时崩溃
+ *   (2026-09-27 实测:最初注入裸函数引用,note.js 调 ctx.activeNoteData() 直接
+ *    TypeError: Cannot read properties of undefined (reading 'store'))。
+ * 新增注入项时**只加不删**,避免已拆出的 feature 失效;
+ * 每加一项都要在 tests/features.test.mjs 的 CTX_KEYS 里同步登记(那边会双向对账)。
+ * ------------------------------------------------------------ */
+const ctx = {
+  dom: { byId: $ },
+  icons: ICON,
+  toast,
+  modal,
+  store,
+  markDirty,
+  copyText,
+  downloadBytes,
+  saveAll,
+  resetStatusPriority,
+  stopIdleTimer,
+  enterApp,
+  api: API,
+  session: { saveSession, loadSession, clearSession },
+  vault: V,
+  Library,
+  fmtTime,
+  showEmpty,
+  closeDrawer,
+  renderMarkdown,
+  /* —— 以下为本文件私有、但 shell.js 需要的基础设施 —— */
+  assessPassword: F.assessPassword,      // 建库时的密码强度提示
+  wrapSel,                               // 编辑器「选区包裹」快捷插入
+  prefixLines,                           // 编辑器「行前缀」快捷插入
+  loadSettings,                          // 启动时读自动锁屏偏好
+  saveSettings,
+  saveRememberPref,
+  changePassword,
+  exportFullBackup,
+  importFromBackup,
+  TabSync,                               // shell 在 start() 里 new
+  onTabMessage,                          // 多标签页消息入口
+  // —— 以下为 feature 之间的入口:统一绑定 ctx(见上方说明)
+  // clickable 本身签名就是 (el, fn),不需要绑定 ctx,直接注入裸引用
+  clickable,
+  openNote: (id) => openNote(ctx, id),
+  activeNoteData: () => activeNoteData(ctx),
+  renderNoteList: () => renderNoteList(ctx),
+  renderCategoryList: () => renderCategoryList(ctx),
+  addNote: () => addNote(ctx),
+  renderReadView: () => renderReadView(ctx),
+  moveNote: (id, dir) => moveNote(ctx, id, dir),
+  toggleNotePin: (id) => toggleNotePin(ctx, id),
+  // —— 以下为 shell.js 的入口绑定(一律不带 ctx,由这里接线)——
+  showLock: (mode) => showLock(ctx, mode),
+  lockNow: () => lockNow(ctx),
+  doUnlock: (pw) => doUnlock(ctx, pw),
+  doCreateLibrary: (pw, pw2) => doCreateLibrary(ctx, pw, pw2),
+  resumeSession: () => resumeSession(ctx),
+  addCategory: () => addCategory(ctx),
+  renameCategory: () => renameCategory(ctx),
+  deleteCategory: () => deleteCategory(ctx),
+  openCategory: (n) => openCategory(ctx, n),
+  enterEditMode: () => enterEditMode(ctx),
+  exitEditMode: () => exitEditMode(ctx),
+  collectEditChanges: () => collectEditChanges(ctx),
+  addAttachments: (files) => addAttachments(ctx, files),
+  copyWholeNote: () => copyWholeNote(ctx),
+  deleteNote: () => deleteNote(ctx),
+  moveNoteSelection: (d) => moveNoteSelection(ctx, d),
+  runSearch: () => runSearch(ctx),
+  closeSearch: () => closeSearch(ctx),
+  toggleTheme: () => toggleTheme(ctx),
+  initTheme: () => initTheme(ctx),
+  openTrash: () => openTrash(ctx),
+  openPwGenerator: () => openPwGenerator(ctx),
+  exportNoteMd: () => exportNoteMd(ctx),
 };
 
 const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
 /* 自动锁屏默认「关闭」。它与「记住本设备」的目的正好相反:前者要「离开就得输密码」,
  * 后者要「打开即用」。默认给后者,想要前者自己去侧栏选 —— 选了之后空闲到点会
- * 锁定并**忘掉本机会话**,语义一致:锁定 = 需要重新输主密码。 */
-const DEFAULT_AUTOLOCK_MIN = 0;
+ * 锁定并**忘掉本机会话**,语义一致:锁定 = 需要重新输主密码。
+ * 取值来自 store 的 defaultState(单一出处,别在这里另写字面量)。 */
+const DEFAULT_AUTOLOCK_MIN = store.get('settings').autoLockMinutes;
 
-const S = {
-  lib: null,             // Library 实例(持密钥与明文;锁屏即置 null)
-  vaultJson: null,       // 解锁前拉到的 vault.json(解锁成功后转存进 Library)
-  vaultEtag: null,       // vault.json 的 etag(改密码 CAS 用)
-  activeCat: null,
-  activeNoteId: null,
-  editing: false,
-  dirty: new Set(),      // 有未保存改动的分类名
-  resavePending: false,  // saveAll 运行期间又来了新改动:本轮结束后补跑一轮
-  saving: false,
-  autoSaveTimer: null,
-  statusTimer: null,
-  idleTimer: null,
-  tabs: null,            // TabSync:同一浏览器多个标签页之间的通知(可能不可用)
-  settings: { autoLockMinutes: DEFAULT_AUTOLOCK_MIN, rememberDevice: true },
-  objectUrls: new Map(), // blobName → objectURL(图片展示缓存)
-};
+/* 会话态的定义已迁到 store.js 的 defaultState()(单一出处)。
+ * 原先这里的 `const S = { lib, vaultJson, ... }` 是裸对象,现改为:
+ *   S = createProxy(store)  → 读写语法不变,状态汇聚进 store(可订阅)。 */
 
 /* ================= 工具 ================= */
 
@@ -177,13 +311,50 @@ async function copyText(text, btn) {
     document.execCommand('copy');
     ta.remove();
   }
-  scheduleClipboardWipe();
-  if (btn) {
-    const old = btn.textContent;
-    btn.textContent = '已复制';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = old; btn.classList.remove('copied'); }, 1500);
+  scheduleClipboardWipe(ctx);
+  flashCopied(btn);
+}
+
+/**
+ * 「已复制」反馈。按钮有两种骨架,分开处理:
+ *   · 纯图标按钮(.blk-copy,26×24):把 SVG 换成对勾 —— 尺寸不变、零布局位移。
+ *     原来直接 textContent = '已复制',三个汉字塞进 26px 宽的框里必然溢出。
+ *   · 图标+文字按钮(如「复制全文」):只换文字段,保留前导图标。
+ *     原来整体覆盖会把图标一起抹掉,按钮宽度在 1.5 秒里跳一下。
+ * 判据是「按钮里有没有非空文字」,不靠类名 —— 类名以后改了这里也不会失灵。
+ * 两种都上 .copied 绿色,状态不依赖文字本身传达。
+ */
+function flashCopied(btn) {
+  if (!btn) return;
+  btn.classList.add('copied');
+  const label = btn.querySelector('.btn-label');
+  if (label) {
+    /* 图标 + 文字(复用时按钮已拆好结构):只动文字段 */
+    const old = label.textContent;
+    label.textContent = ' 已复制';
+    setTimeout(() => { label.textContent = old; btn.classList.remove('copied'); }, 1500);
+    return;
   }
+  const hasText = btn.textContent.trim().length > 0;
+  if (!hasText) {
+    /* 纯图标按钮:换对勾,SVG 尺寸与原图标一致(都是 15px),框子不撑不缩 */
+    const prev = btn.innerHTML;
+    btn.innerHTML = ICON.check;
+    setTimeout(() => { btn.innerHTML = prev; btn.classList.remove('copied'); }, 1500);
+    return;
+  }
+  /* 有文字但还没拆过结构:拆成「前导图标 + .btn-label」,以后只动 label */
+  const text = btn.textContent.trim();
+  const iconEl = btn.querySelector('svg');
+  const tail = btn.textContent.slice(btn.textContent.indexOf(text));
+  btn.textContent = '';
+  if (iconEl) btn.insertAdjacentHTML('afterbegin', iconEl.outerHTML);
+  const span = document.createElement('span');
+  span.className = 'btn-label';
+  span.textContent = tail;
+  btn.appendChild(span);
+  span.textContent = ' 已复制';
+  setTimeout(() => { span.textContent = tail; btn.classList.remove('copied'); }, 1500);
 }
 
 /** 编辑器选区包裹:已包裹则剥掉(再点一次 = 取消)。导出仅为可测(tests/edtools.test.mjs) */
@@ -219,24 +390,48 @@ export function prefixLines(ta, prefix) {
 
 /* ================= 保存状态 ================= */
 
-function setStatus(text, kind = 'ok') {
+/**
+ * 状态栏优先级:error > busy > dirty > ok(判据在 F.statusAllowsOverride,可单测)。
+ * ★ 为什么要优先级:refreshSaveStatus 是 800ms 防抖 —— 保存失败时先由 saveAll
+ *   直接 setStatus('保存失败 ×N','error'),若此刻还有一次 markDirty 挂起的防抖回调
+ *   到点(且 S.dirty 已被清空),它会用「已保存」把刚显示的错误盖掉 →
+ *   用户看到「已保存」而实际有分类没存上,是**误导性的假绿**。
+ *   error 因而是「粘性」的:只有同类 error 或显式 resetStatusPriority() 能改变它。
+ */
+let statusRank = -1;
+
+function setStatus(text, kind = 'ok', authoritative = false) {
+  if (!F.statusAllowsOverride(statusRank, kind, authoritative)) return;
+  statusRank = F.STATUS_RANK[kind] ?? 0;
   const el = $('saveStatus');
   el.textContent = text;
   el.dataset.kind = kind;
 }
 
+/** 显式清零优先级:用户新动作(重新编辑 / 解锁 / 回到锁屏)后允许 ok 重新覆盖 */
+function resetStatusPriority() {
+  statusRank = -1;
+}
+
 function refreshSaveStatus() {
   clearTimeout(S.statusTimer);
   S.statusTimer = setTimeout(() => {
-    if (S.dirty.size > 0) setStatus('有未保存更改', 'dirty');
-    else setStatus('已保存', 'ok');
+    // ★ 权威终态:保存流水线已跑完,这里写的才是真实结果。
+    //   必须传 authoritative=true —— 否则上一句 setStatus('保存中…','busy')
+    //   留下的 rank 2 会把「已保存」挡在外面,状态栏永久卡在「保存中…」。
+    //   (error 依然粘住:authoritative 也盖不动 error,防假绿。)
+    if (S.dirty.size > 0) setStatus('有未保存更改', 'dirty', true);
+    else setStatus('已保存', 'ok', true);
   }, SAVE_DEBOUNCE_MS);
 }
 
 /* ================= 保存流水线 ================= */
 
 function markDirty(catName) {
-  S.dirty.add(catName);
+  S.markDirty(catName);
+  // 用户又改了东西 = 进入新一轮保存周期,清掉上一轮残留的 error 粘性,
+  // 否则上次的「保存失败」会永久占住状态栏,即使这次已经存好了
+  resetStatusPriority();
   refreshSaveStatus();
   clearTimeout(S.autoSaveTimer);
   S.autoSaveTimer = setTimeout(() => { saveAll(); }, IDLE_SAVE_MS);
@@ -250,17 +445,23 @@ async function saveAll() {
   const names = [...S.dirty];
   let failed = 0;
   for (const name of names) {
+    // 记下发起保存时该分类的改动代数:await 期间用户若又编辑同一分类,
+    // 代数会变 → 结束时不清脏标记,新改动继续留在队列里等下一轮。
+    // (2026-09-27 审计 P1:此前无条件 delete,窗口期的新编辑会被静默抹掉)
+    const gen = S.dirtyGen.get(name);
     try {
       const res = await S.lib.saveCategory(name);
       if (res.skipped) {
-        S.dirty.delete(name); // 没有内存数据可存(saveCategory 如实上报),移出待保存队列
+        // 没有内存数据可存(saveCategory 如实上报),移出待保存队列
+        S.clearDirtyIfUnchanged(name, gen);
       } else if (res.conflict) {
-        S.dirty.delete(name);
+        S.clearDirtyIfUnchanged(name, gen);
         await handleConflict(name);
       } else {
-        S.dirty.delete(name);
+        S.clearDirtyIfUnchanged(name, gen);
         // 通知其他标签页:这个分类的云端版本变了,它们手里的是旧数据
         S.tabs?.send({ type: 'cat-saved', name });
+        syncCatCount(name);
       }
     } catch (e) {
       failed += 1;
@@ -271,6 +472,22 @@ async function saveAll() {
   if (S.resavePending) { S.resavePending = false; setTimeout(() => { saveAll(); }, 300); return; }
   if (failed > 0) { setStatus(`保存失败 ×${failed}`, 'error'); toast(`${failed} 个分类保存失败,详见控制台`, 'error'); }
   else refreshSaveStatus();
+}
+
+/**
+ * 把某分类的权威篇数写回 catMeta(侧栏徽章的数据源)。
+ * 只在刚保存成功时调用 —— 那一刻内存里的 notes 才是与云端一致的真值。
+ * 有意不 await:徽章晚一拍亮没关系,不能让元信息写的网络往返拖慢保存流水线;
+ * 失败也静默 —— setCatCount 内部已挡「没变化就不写」,真失败就等下次保存再对齐。
+ */
+function syncCatCount(name) {
+  const cat = S.lib?.categoryInfo(name);
+  if (!cat?.data) return;
+  const n = cat.data.notes.length;
+  if (S.lib.catCount(name) === n) return;
+  S.lib.setCatCount(name, n).then(() => {
+    if (S.lib.catCount(name) === n) renderCategoryList(ctx);
+  }).catch(() => { /* 元信息失败不影响正文,下次保存会再试 */ });
 }
 
 async function handleConflict(name) {
@@ -288,19 +505,19 @@ async function handleConflict(name) {
     } catch (e) {
       // 覆盖失败必须把该分类放回待保存队列:saveAll 在弹冲突前已把它移出,
       // 这里若吞掉,改动会永久脱离保存队列、锁定/刷新后无提示丢失
-      S.dirty.add(name);
+      S.markDirty(name);
       toast(`「${name}」覆盖保存失败:${e.message};已保留在待保存列表`, 'error');
     }
   } else if (choice === 'disk') {
     // 丢弃内存改动,重读云端
     cat.data = null; cat.lastSeenEtag = null; cat.error = null;
-    S.dirty.delete(name); // 本地已无未保存改动,别让「未保存」标记一直挂着
+    S.clearDirty(name); // 本地已无未保存改动,别让「未保存」标记一直挂着
     if (S.activeCat === name) {
-      await openCategory(name);
+      await openCategory(ctx, name);
     }
     toast(`「${name}」已改为云端版本,本地未保存的改动已放弃`, 'warn');
   } else {
-    S.dirty.add(name); // 留待稍后
+    S.markDirty(name); // 留待稍后
   }
   refreshSaveStatus();
 }
@@ -315,7 +532,7 @@ async function handleConflict(name) {
  */
 function onTabMessage(msg) {
   // 退出登录是共享的(localStorage 会话),别的标签页锁了,这里也得锁
-  if (msg.type === 'locked') { lockNow({ broadcast: false, confirmDiscard: false }); return; }
+  if (msg.type === 'locked') { lockNow(ctx, { broadcast: false, confirmDiscard: false }); return; }
   if (!S.lib) return;
 
   if (msg.type === 'cats-changed') { rescanFromTabs(); return; }
@@ -331,10 +548,15 @@ function onTabMessage(msg) {
       toast(`「${msg.name}」已在另一个标签页保存;你这里的改动在保存时会提示冲突`, 'warn');
       return;
     }
-    const cat = S.lib.categoryInfo(msg.name);
-    cat.data = null; cat.lastSeenEtag = null; cat.error = null;
-    if (S.activeCat === msg.name) openCategory(msg.name);
-    toast(`「${msg.name}」已在另一个标签页更新,已载入最新版本`);
+    void (async () => {
+      const cat = S.lib.categoryInfo(msg.name);
+      cat.data = null; cat.lastSeenEtag = null; cat.error = null;
+      // ★ 必须 await 重载成功后再报喜,否则加载失败时用户会同时看到
+      //   绿色「已载入最新版本」+ 红色「分类无法打开」两条矛盾 toast
+      //   (2026-09-27 审计 P3-6;与 handleConflict 的 disk 分支同款时序)
+      if (S.activeCat === msg.name) await openCategory(ctx, msg.name);
+      toast(`「${msg.name}」已在另一个标签页更新,已载入最新版本`);
+    })();
   }
 }
 
@@ -345,175 +567,24 @@ async function rescanFromTabs() {
   } catch {
     return; // 网络问题:不打扰用户,下次操作自然会重试
   }
-  renderCategoryList();
+  renderCategoryList(ctx);
   if (S.activeCat && !S.lib.categoryInfo(S.activeCat)) {
     // 本标签页正开着的分类,在别处被删了
     S.activeCat = null; S.activeNoteId = null; S.editing = false;
     $('activeCatName').textContent = '未选择分类';
-    renderNoteList();
+    renderNoteList(ctx);
     showEmpty('该分类已在另一个标签页被删除');
   }
 }
 
 /* ================= 锁屏 ================= */
-
-/** 恢复会话失败时要在锁屏上说明的原因,由 showLock 消费一次后清空 */
-let pendingLockMsg = null;
-
-function showLock(mode) {
-  $('app').hidden = true;
-  $('lock').hidden = false;
-  $('lockErr').hidden = true;
-  if (pendingLockMsg) {
-    $('lockErr').textContent = pendingLockMsg;
-    $('lockErr').hidden = false;
-    pendingLockMsg = null;
-  }
-  const loading = mode === 'loading';
-  $('lockLoading').hidden = !loading;
-  $('lockForm').hidden = loading;
-  $('rememberDevice').checked = S.settings.rememberDevice !== false;
-  const isSetup = mode === 'setup';
-  $('pwConfirmField').hidden = !isSetup;
-  $('pwBtn').textContent = isSetup ? '创建笔记库' : '解锁';
-  const hint = $('pwHint');
-  hint.hidden = !isSetup;
-  hint.textContent = '';
-  hint.className = 'pw-hint';
-  if (isSetup) {
-    $('pwInput').placeholder = '设定主密码';
-    $('pwInput').value = '';
-    $('pwConfirm').value = '';
-  } else {
-    $('pwInput').placeholder = '主密码';
-    $('pwInput').value = '';
-  }
-  $('pwInput').focus();
-  S.lockMode = mode;
-}
-
-/**
- * 锁定 = 退出登录。
- * @param {{broadcast?:boolean, confirmDiscard?:boolean}} [opt]
- *   broadcast:false      = 收到别的标签页的「锁定」通知,不再回声;
- *   confirmDiscard:false = 远端锁定(另一端已结束会话),不弹确认直接锁。
- */
-async function lockNow({ broadcast = true, confirmDiscard = true } = {}) {
-  if (S.dirty.size > 0) {
-    try { await saveAll(); } catch { /* 尽力保存 */ }
-  }
-  // ★ 锁定必毁全部明文,这是安全不变量;但「毁改动」必须经用户确认 ——
-  //   冲突弹窗里刚选过「留待稍后」的分类,转身就在这里被静默清空,等于承诺作废。
-  //   保存/冲突处理完仍有未保存改动时,让人在「放弃改动并锁定」与「暂不锁定」
-  //   之间二选一。远端锁定不问:另一标签页已把会话结束掉,没有可商量的余地。
-  if (confirmDiscard && S.dirty.size > 0) {
-    const yes = await modal({
-      type: 'confirm', danger: true,
-      title: '还有未保存的改动',
-      text: `${S.dirty.size} 个分类的改动尚未保存成功,锁定将放弃这些改动(服务器上的版本不受影响)。确定锁定吗?`,
-    });
-    if (!yes) return;
-  }
-  // 先通知再清:锁定会清掉共享的 localStorage 会话,不通知的话
-  // 另一个标签页还开着就等于「锁定」没生效(它的内存里还留着令牌与明文)
-  if (broadcast) S.tabs?.send({ type: 'locked' });
-  if (S.lib) { S.lib.destroy(); S.lib = null; }
-  API.clearToken();
-  // 锁定 = 忘掉本机记住的会话(真正的「退出登录」)。不清的话「锁定」形同虚设:
-  // 刷新一下又自动进去了。想再次免密,解锁时勾着「记住本设备」即可。
-  clearSession();
-  S.activeCat = null; S.activeNoteId = null; S.editing = false;
-  S.dirty.clear();
-  for (const url of S.objectUrls.values()) URL.revokeObjectURL(url);
-  S.objectUrls.clear();
-  stopIdleTimer();
-  showLock(S.vaultJson ? 'unlock' : 'setup');
-}
-
-/* ================= 「记住本设备」 ================= */
-
-/**
- * 解锁/建库成功后,按用户意愿把会话落盘(勾选了才存)。
- * 与 lockNow 里的 clearSession 是一对:存 → 免密进入,清 → 需要重新输主密码。
- */
-function rememberNow(dek, authKeyHex) {
-  if (!S.settings.rememberDevice) return;
-  if (!saveSession({ dek, authKeyHex })) {
-    // 隐私模式 / 存储被禁:降级为「不记住」。必须说一声 ——
-    // 否则用户以为已经记住了,下次打开发现还要输密码,会以为程序坏了。
-    toast('本浏览器不允许保存登录状态,下次打开仍需输入主密码', 'warn');
-  }
-}
-
-/* ================= 解锁 / 建库 ================= */
-
-/** vault.json 备份:浏览器下载一份到本地(建库后 / 改密码后自动触发) */
-function downloadVaultBackup(json) {
-  const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'vault.json';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-}
-
-async function doUnlock(password) {
-  const err = $('lockErr');
-  err.hidden = true;
-  try {
-    const res = await V.unlockVault(S.vaultJson, password);
-    if (!res.ok) {
-      err.textContent = res.reason === 'password' ? '主密码错误' : 'vault.json 已损坏,请从备份恢复';
-      err.hidden = false;
-      return;
-    }
-    const keys = await V.deriveAllKeys(res.dek);
-    API.setToken(res.authKeyHex);
-    S.lib = new Library(keys, S.vaultJson, res.dek, S.vaultEtag);
-    await S.lib.rescan();
-    if (res.weakKdf) toast('注意:本库的密钥派生迭代次数低于当前建议值', 'warn');
-    rememberNow(res.dek, res.authKeyHex);
-    await enterApp();
-  } catch (e) {
-    err.textContent = `打开失败:${e.message}`;
-    err.hidden = false;
-  }
-}
-
-async function doCreateLibrary(password, password2) {
-  const err = $('lockErr');
-  err.hidden = true;
-  const policy = F.assessPassword(password);
-  if (!policy.ok) { err.textContent = policy.msg; err.hidden = false; return; }
-  if (password !== password2) { err.textContent = '两次输入的密码不一致'; err.hidden = false; return; }
-  try {
-    const { json, dek, authKeyHex } = await V.createVault(password);
-    const { status, etag } = await API.createVaultJson(JSON.stringify(json, null, 2));
-    if (status === 409) {
-      err.textContent = '服务器上已存在笔记库,请直接解锁';
-      err.hidden = false;
-      S.vaultJson = null; // 重新走 boot 拉取
-      S.lockMode = 'unlock';
-      $('pwConfirmField').hidden = true;
-      $('pwBtn').textContent = '解锁';
-      $('pwInput').value = '';
-      $('pwInput').focus();
-      return;
-    }
-    const keys = await V.deriveAllKeys(dek);
-    API.setToken(authKeyHex);
-    S.lib = new Library(keys, json, dek, etag);
-    S.vaultJson = json;
-    await S.lib.rescan();
-    rememberNow(dek, authKeyHex);
-    downloadVaultBackup(json);
-    toast('笔记库已创建。vault.json 备份已开始下载,请妥善保存(全库钥匙的唯一载体)');
-    await enterApp();
-  } catch (e) {
-    err.textContent = `创建失败:${e.message}`;
-    err.hidden = false;
-  }
-}
+/* ================= 锁屏 / 解锁 / 建库 ================= */
+/* 已迁出到 features/lock.js(依赖 ctx.store / ctx.modal / ctx.saveAll / ctx.stopIdleTimer
+ * / ctx.enterApp / ctx.api / ctx.session / ctx.vault / ctx.Library;F.assessPassword 由
+ * 该模块直接 import format.js)。
+ * 原先的 pendingLockMsg / showLock / lockNow / rememberNow / downloadVaultBackup
+ * / doUnlock / doCreateLibrary / resumeSession 定义在这里,现改为 import ——
+ * ★ resumeSession 一并迁走:它与解锁同属密钥生命周期,散在两处最容易「一半清了一半没清」。 */
 
 /* ================= 进入应用 ================= */
 
@@ -522,29 +593,42 @@ async function enterApp() {
   $('app').hidden = false;
   $('searchBox').value = '';
   $('searchPanel').hidden = true;
-  renderCategoryList();
+  renderCategoryList(ctx);
   S.activeCat = null;
   S.activeNoteId = null;
   S.editing = false;
-  renderNoteList();
+  renderNoteList(ctx);
   const hasCats = S.lib.listCategories().length > 0;
   showEmpty(hasCats ? '从左侧选择一个分类' : '还没有分类,先建一个',
-    hasCats ? null : { label: '新建分类', fn: addCategory });
+    hasCats ? null : { label: '新建分类', fn: () => addCategory(ctx) });
   refreshSaveStatus();
   startIdleTimer();
-  refreshExportDue();
+  refreshExportDue(ctx);
 }
 
 /**
  * 空状态文案 + 可选引导按钮:没有分类/笔记时直接把下一步递到用户手上,
  * 而不是只留一句让人自己找入口的提示。
  */
-function showEmpty(text, action) {
+/**
+ * 空状态:一个图标 + 一句说明 + (可选)一个入口按钮。
+ * 图标现在由这里注入 —— 原先 CSS 的 .empty::before 里写死了一个 ❖ 字符,
+ * 文案与按钮却在这里,同一个视觉组件散在两处;而 ❖ 属 Unicode 装饰符,
+ * 与本项目的描边图标体系不是一套质感。现在统一走 ICON。
+ * @param {string} text 说明文案
+ * @param {{label:string, fn:Function}|null} [action] 引导按钮(没有就只显示文案)
+ * @param {string} [iconKey] ICON 内的键名,默认 sparkle
+ */
+function showEmpty(text, action, iconKey = 'sparkle') {
   const box = $('emptyState');
   box.hidden = false;
   $('readView').hidden = true;
   $('editView').hidden = true;
   box.textContent = '';
+  const deco = document.createElement('div');
+  deco.className = 'empty-deco';
+  deco.innerHTML = ICON[iconKey] || ICON.sparkle;
+  box.appendChild(deco);
   const p = document.createElement('p');
   p.textContent = text;
   box.appendChild(p);
@@ -557,554 +641,27 @@ function showEmpty(text, action) {
   }
 }
 
-/* ================= 左侧:分类 ================= */
-
-/** 列表项统一可点:键盘可达(Tab 聚焦 + Enter/空格触发),而非只认鼠标 click */
-function clickable(el, fn) {
-  el.tabIndex = 0;
-  el.setAttribute('role', 'button');
-  el.addEventListener('click', fn);
-  el.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(e); }
-  });
-}
-
-function renderCategoryList() {
-  const ul = $('catList');
-  ul.textContent = '';
-  const names = S.lib.listCategories();
-  // 置顶优先,组内按名称排序(与云端清单字典序一致,顺序可预期)
-  names.sort((a, b) => ((S.lib.catPin(b) === true) - (S.lib.catPin(a) === true)) || a.localeCompare(b));
-  for (const name of names) {
-    const info = S.lib.categoryInfo(name);
-    const pinned = S.lib.catPin(name);
-    const li = document.createElement('li');
-    li.className = 'cat-item' + (name === S.activeCat ? ' active' : '');
-    li.classList.toggle('pinned', pinned);
-    if (info?.conflict) li.classList.add('warn');
-    if (info?.error) li.classList.add('broken');
-
-    const label = document.createElement('span');
-    label.className = 'cat-name';
-    label.textContent = name + (info?.conflict ? ' ⚠' : '') + (info?.error ? ' ⛔' : '');
-    label.title = info?.conflict ? '疑似同步冲突副本,请核对内容后处理'
-      : info?.error ? `无法解密:${info.error}` : name;
-    if (pinned) {
-      const mark = document.createElement('span');
-      mark.className = 'pin-mark';
-      mark.innerHTML = ICON.pin;
-      label.prepend(mark);
-    }
-    li.appendChild(label);
-
-    const btns = document.createElement('div');
-    btns.className = 'cat-btns';
-    const pinBtn = document.createElement('button');
-    pinBtn.className = 'icon-btn';
-    pinBtn.title = pinned ? '取消置顶' : '置顶';
-    pinBtn.innerHTML = ICON.pin;
-    pinBtn.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try {
-        await S.lib.setCatPin(name, !pinned);
-        toast(pinned ? `已取消置顶「${name}」` : `已置顶「${name}」`);
-      } catch (err) {
-        toast(`置顶失败:${err.message}`, 'error');
-      }
-      renderCategoryList();
-    });
-    btns.appendChild(pinBtn);
-    li.appendChild(btns);
-
-    clickable(li, () => openCategory(name));
-    ul.appendChild(li);
-  }
-  if (!names.length) {
-    const li = document.createElement('li');
-    li.className = 'cat-item none';
-    li.textContent = '暂无分类,点上方 + 新建';
-    ul.appendChild(li);
-  }
-}
-
-let catOpenSeq = 0; // 打开分类的序号守卫:慢请求后到不得覆盖用户后选的分类
-
-async function openCategory(name) {
-  const seq = ++catOpenSeq;
-  try {
-    await S.lib.loadCategory(name);
-  } catch (e) {
-    if (seq !== catOpenSeq) return; // 期间用户已换分类,这个失败不必再弹
-    toast(`分类「${name}」无法打开:${e.message}`, 'error');
-    renderCategoryList();
-    return;
-  }
-  if (seq !== catOpenSeq) return; // 慢的分类请求后到:放弃,别覆盖用户新选的分类
-  if (S.editing) S.editing = false;
-  S.activeCat = name;
-  S.activeNoteId = null;
-  $('activeCatName').textContent = name;
-  renderCategoryList();
-  renderNoteList();
-  closeDrawer(); // 移动端:选完分类收起抽屉,把屏幕还给内容
-  /* 分类里有笔记时不能说「暂无笔记」——那只是还没选中某一篇;选完分类不等于选完笔记 */
-  const noteCount = S.lib.categoryInfo(name)?.data?.notes?.length || 0;
-  showEmpty(noteCount ? '从左侧选择一条笔记' : `「${name}」暂无笔记`,
-    noteCount ? null : { label: '新建笔记', fn: addNote });
-}
-
-async function addCategory() {
-  const name = await modal({ type: 'prompt', title: '新建分类', label: '分类名,如:秘钥 / 攻略' });
-  if (name == null) return;
-  try {
-    const created = await S.lib.createCategory(name);
-    S.tabs?.send({ type: 'cats-changed' });
-    await openCategory(created);
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
-
-async function renameCategory() {
-  if (!S.activeCat) return;
-  const name = await modal({ type: 'prompt', title: '重命名分类', value: S.activeCat, text: '改名只换文件名,笔记内容零改动、零重加密传输' });
-  if (name == null || name === S.activeCat) return;
-  try {
-    const created = await S.lib.renameCategory(S.activeCat, name);
-    // 未保存的改动跟着搬到新名字:重命名只是换键名,本地这份改过的数据
-    // 仍是最新内容;脏标记留在旧名上等于让它脱离保存队列(静默丢失)
-    if (S.dirty.delete(S.activeCat)) S.dirty.add(created);
-    S.tabs?.send({ type: 'cats-changed' });
-    S.activeCat = created;
-    renderCategoryList();
-    renderNoteList();
-    $('activeCatName').textContent = created;
-    toast(`已重命名为「${created}」`);
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
-
-async function deleteCategory() {
-  if (!S.activeCat) {
-    toast('先选择一个要删除的分类', 'warn');
-    return;
-  }
-  const yes = await modal({
-    type: 'confirm', danger: true,
-    title: `删除分类「${S.activeCat}」`,
-    text: '分类文件将从服务器删除,删除前会自动备份(每分类保留最近 10 份)。引用的图片不会自动删,可稍后手动「清理未引用图片」。',
-  });
-  if (!yes) return;
-  try {
-    await S.lib.deleteCategory(S.activeCat);
-    S.dirty.delete(S.activeCat);
-    S.tabs?.send({ type: 'cats-changed' });
-    S.activeCat = null; S.activeNoteId = null;
-    renderCategoryList();
-    renderNoteList();
-    $('activeCatName').textContent = '未选择分类';
-    showEmpty('从左侧选择一个分类');
-    toast('分类已删除(旧版本已自动备份到服务器)');
-  } catch (e) {
-    toast(e.message, 'error');
-  }
-}
-
-/* ================= 左侧:笔记列表 ================= */
-
-function activeNoteData() {
-  if (!S.activeCat) return null;
-  const cat = S.lib.categoryInfo(S.activeCat);
-  if (!cat?.data) return null;
-  return cat.data.notes.find((n) => n.id === S.activeNoteId) || null;
-}
-
-function renderNoteList() {
-  const ul = $('noteList');
-  ul.textContent = '';
-  const cat = S.activeCat && S.lib.categoryInfo(S.activeCat);
-  if (!cat?.data) { $('activeCatName').textContent = S.activeCat || '未选择分类'; return; }
-
-  const notes = F.sortNotes(cat.data.notes);
-  // 侧栏标题带上篇数:规模一眼可见,不用点进去数
-  $('activeCatName').textContent = `${S.activeCat} · ${notes.length} 篇`;
-  for (const note of notes) {
-    const li = document.createElement('li');
-    li.className = 'note-item' + (note.id === S.activeNoteId ? ' active' : '');
-    li.classList.toggle('pinned', note.pin === true);
-
-    const main = document.createElement('div');
-    main.className = 'note-main';
-
-    const title = document.createElement('div');
-    title.className = 'note-title';
-    title.textContent = note.title || '无标题';
-    // 单行清单不展开内容,悬停用原生气泡兜底给出时间与正文概要
-    li.title = `${fmtTime(note.updatedAt)} · ${(note.content.trim().replace(/\s+/g, ' ').slice(0, 60)) || '(空)'}`;
-    if (note.pin === true) {
-      const mark = document.createElement('span');
-      mark.className = 'pin-mark';
-      mark.innerHTML = ICON.pin;
-      title.prepend(mark);
-    }
-    main.appendChild(title);
-    li.appendChild(main);
-
-    const btns = document.createElement('div');
-    btns.className = 'note-btns';
-    const upBtn = document.createElement('button');
-    upBtn.className = 'icon-btn';
-    upBtn.title = '上移';
-    upBtn.innerHTML = ICON.up;
-    upBtn.addEventListener('click', (e) => { e.stopPropagation(); moveNote(note.id, -1); });
-    const downBtn = document.createElement('button');
-    downBtn.className = 'icon-btn';
-    downBtn.title = '下移';
-    downBtn.innerHTML = ICON.down;
-    downBtn.addEventListener('click', (e) => { e.stopPropagation(); moveNote(note.id, 1); });
-    const pinBtn = document.createElement('button');
-    pinBtn.className = 'icon-btn';
-    pinBtn.title = note.pin ? '取消置顶' : '置顶';
-    pinBtn.innerHTML = ICON.pin;
-    pinBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleNotePin(note.id); });
-    btns.append(upBtn, downBtn, pinBtn);
-    li.appendChild(btns);
-
-    clickable(li, () => openNote(note.id));
-    ul.appendChild(li);
-  }
-  if (!notes.length) {
-    const li = document.createElement('li');
-    li.className = 'note-item none';
-    li.textContent = '暂无笔记';
-    ul.appendChild(li);
-  }
-}
-
-function openNote(noteId) {
-  closeDrawer(); // 移动端:选完笔记收起抽屉
-  if (S.editing) S.editing = false;
-  S.activeNoteId = noteId;
-  renderNoteList();
-  renderReadView();
-}
-
-/* ================= 阅读视图 ================= */
-
-function renderReadView() {
-  const note = activeNoteData();
-  if (!note) { showEmpty('从左侧选择一条笔记'); return; }
-  $('emptyState').hidden = true;
-  $('editView').hidden = true;
-  const view = $('readView');
-  view.hidden = false;
-
-  $('readTitle').textContent = note.title || '无标题';
-  $('readMeta').textContent = `更新于 ${fmtTime(note.updatedAt)}${note.attachments.length ? ` · ${note.attachments.length} 个附件` : ''}`;
-
-  const body = $('readBody');
-  body.textContent = '';
-  const md = renderMarkdown(note.content);
-  for (const blk of md.querySelectorAll('.blk')) {
-    const btn = document.createElement('button');
-    btn.className = 'blk-copy';
-    btn.innerHTML = ICON.copy;
-    btn.title = '复制本段';
-    btn.addEventListener('click', () => copyText(blk.dataset.copy || blk.textContent, btn));
-    blk.appendChild(btn);
-  }
-  body.appendChild(md);
-  if (!note.content.trim()) {
-    const hint = document.createElement('p');
-    hint.className = 'read-empty';
-    hint.textContent = '(空笔记,点「编辑」写点东西)';
-    body.appendChild(hint);
-  }
-
-  renderReadAttachments(note);
-}
-
-function renderReadAttachments(note) {
-  const box = $('readAtts');
-  box.textContent = '';
-  if (!note.attachments.length) return;
-  const head = document.createElement('div');
-  head.className = 'atts-head';
-  head.textContent = '附件';
-  box.appendChild(head);
-  for (const att of note.attachments) {
-    const chip = document.createElement('button');
-    chip.className = 'att-chip';
-    chip.textContent = `🖼 ${att.name}`;
-    chip.title = '点击解密并显示';
-    chip.addEventListener('click', () => toggleAttachmentImage(att, chip));
-    box.appendChild(chip);
-  }
-}
-
-const attLoading = new Set(); // 解密中的附件:防双击竞态重复贴图
-
-async function toggleAttachmentImage(att, chip) {
-  const existing = S.objectUrls.get(att.file);
-  const next = chip.nextElementSibling;
-  if (next && next.classList.contains('att-img')) { next.remove(); return; }
-  if (attLoading.has(att.file)) return;
-  attLoading.add(att.file);
-  try {
-    let url = existing;
-    if (!url) {
-      const bytes = await S.lib.readAttachment(att.file);
-      url = URL.createObjectURL(new Blob([bytes], { type: guessMime(att.name) }));
-      S.objectUrls.set(att.file, url);
-    }
-    const wrap = document.createElement('div');
-    wrap.className = 'att-img';
-    const img = document.createElement('img');
-    img.src = url;
-    img.alt = att.name;
-    wrap.appendChild(img);
-    const dl = document.createElement('a');
-    dl.href = url; dl.download = att.name; dl.textContent = '下载';
-    dl.className = 'att-dl';
-    wrap.appendChild(dl);
-    chip.after(wrap);
-  } catch (e) {
-    toast(`附件解密失败:${e.message}`, 'error');
-  } finally {
-    attLoading.delete(att.file);
-  }
-}
-
-function guessMime(name) {
-  const ext = (name.split('.').pop() || '').toLowerCase();
-  return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp' }[ext] || 'application/octet-stream';
-}
-
-async function copyWholeNote() {
-  const note = activeNoteData();
-  if (!note) return;
-  copyText(`${note.title}\n\n${note.content}`, $('btnCopyAll'));
-}
-
-/* ================= 编辑视图 ================= */
-
-function enterEditMode() {
-  const note = activeNoteData();
-  if (!note) return;
-  S.editing = true;
-  $('readView').hidden = true;
-  $('emptyState').hidden = true;
-  $('editView').hidden = false;
-  $('editTitle').value = note.title;
-  $('editBody').value = note.content;
-  renderEditAttachments(note);
-  $('editTitle').focus();
-}
-
-function collectEditChanges() {
-  const note = activeNoteData();
-  if (!note) return;
-  const title = $('editTitle').value.trim() || '无标题';
-  const content = $('editBody').value;
-  if (title !== note.title || content !== note.content) {
-    note.title = title;
-    note.content = content;
-    note.updatedAt = Date.now();
-    markDirty(S.activeCat);
-  }
-  renderEditAttachments(note);
-}
-
-function exitEditMode() {
-  collectEditChanges();
-  saveAll(); // 「完成」即收尾:立刻上传,别让顶部挂着「有未保存更改」等 4 秒兜底
-  S.editing = false;
-  renderReadView();
-  renderNoteList();
-}
-
-function renderEditAttachments(note) {
-  const box = $('editAtts');
-  box.textContent = '';
-  if (!note.attachments.length) return;
-  for (const [i, att] of note.attachments.entries()) {
-    const chip = document.createElement('span');
-    chip.className = 'att-chip editable';
-    chip.textContent = `🖼 ${att.name}`;
-    const del = document.createElement('button');
-    del.className = 'att-del';
-    del.textContent = '×';
-    del.title = '从本笔记移除(图片文件保留,可稍后清理)';
-    del.addEventListener('click', () => {
-      note.attachments.splice(i, 1);
-      note.updatedAt = Date.now();
-      markDirty(S.activeCat);
-      renderEditAttachments(note);
-    });
-    chip.appendChild(del);
-    box.appendChild(chip);
-  }
-}
-
-async function addAttachments(files) {
-  const cat = S.lib.categoryInfo(S.activeCat);
-  const note = activeNoteData();
-  if (!cat || !note) return;
-  const added = [];
-  for (const file of files) {
-    try {
-      const bytes = new Uint8Array(await file.arrayBuffer());
-      const { file: blobName } = await S.lib.addAttachment(bytes, file.name);
-      const entry = { file: blobName, name: file.name };
-      added.push(entry);
-      note.attachments.push(entry);
-    } catch (e) {
-      toast(`「${file.name}」入库失败:${e.message}`, 'error');
-    }
-  }
-  if (!added.length) return;
-  // 上传途中可能收到另一标签页的 cat-saved → cat.data 被整体换掉(置 null 或换新
-  // 对象),对旧引用直接解引用曾在这里 TypeError、已入库附件引用悬空。
-  // 改为把已入库的附件合并进最新数据对象:
-  if (cat.data) {
-    const live = cat.data.notes.find((n) => n.id === note.id);
-    if (live) {
-      const have = new Set(live.attachments.map((a) => a.file));
-      for (const a of added) if (!have.has(a.file)) live.attachments.push(a);
-      live.updatedAt = Date.now();
-      markDirty(S.activeCat);
-      renderEditAttachments(live);
-      return;
-    }
-  }
-  toast('图片已入库,但该分类刚被其他标签页更新;重新打开分类后再查看', 'warn');
-}
-
-/* ================= 笔记增删排序 ================= */
-
-let addingNote = false;
-
-async function addNote() {
-  if (addingNote) return; // 双击会造出两条「无标题」:忙态守卫
-  if (!S.activeCat) { toast('先选择一个分类', 'warn'); return; }
-  addingNote = true;
-  try {
-    const cat = S.lib.categoryInfo(S.activeCat);
-    if (!cat) return;
-    await S.lib.loadCategory(S.activeCat);
-    if (!cat.data) return; // 加载失败已在下面提示,这里别再解引用
-    const sorted = F.sortNotes(cat.data.notes);
-    const note = {
-      id: `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`,
-      title: '无标题',
-      content: '',
-      order: F.orderBetween(sorted.length ? sorted[sorted.length - 1].order : null, null),
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      attachments: [],
-    };
-    cat.data.notes.push(note);
-    markDirty(S.activeCat);
-    openNote(note.id);
-    enterEditMode();
-  } catch (e) {
-    // 分类加载失败以前是无提示的 unhandled rejection
-    toast(`无法新建笔记:${e.message}`, 'error');
-  } finally {
-    addingNote = false;
-  }
-}
-
-async function deleteNote() {
-  const note = activeNoteData();
-  if (!note) return;
-  const yes = await modal({ type: 'confirm', danger: true, title: '删除笔记', text: `「${note.title || '无标题'}」将被删除(保存后生效,云端旧版有自动备份)。` });
-  if (!yes) return;
-  const cat = S.lib.categoryInfo(S.activeCat);
-  // 延期删除:先进本分类密文内的回收站,30 天内可恢复;真正清除由
-  // normalizeNoteData 在读取时按 deletedAt 过期裁剪,与多端自然同步
-  cat.data.trash = cat.data.trash || [];
-  cat.data.trash.push({ ...note, deletedAt: Date.now() });
-  cat.data.notes = cat.data.notes.filter((n) => n.id !== note.id);
-  markDirty(S.activeCat);
-  S.activeNoteId = null;
-  S.editing = false;
-  renderNoteList();
-  showEmpty('笔记已移入「最近删除」,30 天内可恢复(保存后生效)');
-}
-
-function toggleNotePin(noteId) {
-  const cat = S.lib.categoryInfo(S.activeCat);
-  const note = cat?.data?.notes.find((n) => n.id === noteId);
-  if (!note) return;
-  note.pin = !note.pin;
-  markDirty(S.activeCat); // pin 存在分类密文里,随保存多端同步
-  renderNoteList();
-}
-
-function moveNote(noteId, dir) {
-  const cat = S.lib.categoryInfo(S.activeCat);
-  const sorted = F.sortNotes(cat.data.notes);
-  const idx = sorted.findIndex((n) => n.id === noteId);
-  if (idx < 0) return;
-  const target = dir < 0 ? idx - 1 : idx + 1;
-  if (target < 0 || target >= sorted.length) return;
-  // 不跨置顶分区移动:分区由 pin 优先排序保证,跨区交换不会有视觉反馈
-  if ((sorted[target].pin === true) !== (sorted[idx].pin === true)) return;
-  // 相邻交换 order 值:所见即所得,且不产生中值新数(order 永不漂移)
-  const a = sorted[idx].order;
-  sorted[idx].order = sorted[target].order;
-  sorted[target].order = a;
-  markDirty(S.activeCat);
-  renderNoteList();
-}
-
+/* ================= 左侧:分类 + 笔记列表 ================= */
+/* 已迁出到 features/sidebar.js(依赖 ctx.store / ctx.icons / ctx.toast / ctx.modal
+ * / ctx.showEmpty / ctx.closeDrawer / ctx.fmtTime,以及 note.js 的 ctx.addNote /
+ * ctx.renderReadView / ctx.moveNote / ctx.toggleNotePin)。
+ * 原先的 clickable / renderCategoryList / openCategory / addCategory / renameCategory
+ * / deleteCategory / activeNoteData / renderNoteList / openNote / moveNoteSelection
+ * 定义在这里,现改为 import —— 调用点名保持不变。
+ * ★ 与 note.js 互为依赖,靠 ctx 解开循环:两个模块都不 import 对方,由本文件组装。 */
+/* ================= 阅读 / 编辑 / 笔记增删排序 ================= */
+/* 已迁出到 features/note.js(依赖 ctx.store / ctx.icons / ctx.toast / ctx.modal
+ * / ctx.activeNoteData / ctx.renderNoteList / ctx.openNote / ctx.markDirty / ctx.saveAll
+ * / ctx.copyText / ctx.showEmpty / ctx.fmtTime / ctx.renderMarkdown;F.sortNotes 与
+ * F.orderBetween 由该模块直接 import format.js)。
+ * 原先的 renderReadView / renderReadAttachments / toggleAttachmentImage / guessMime
+ * / copyWholeNote / enterEditMode / collectEditChanges / exitEditMode / renderEditAttachments
+ * / addAttachments / addNote / deleteNote / toggleNotePin / moveNote 定义在这里,现改为 import。
+ * ★ note.js 与 sidebar.js 互为依赖,靠 ctx 解开循环(见 sidebar.js 顶部的说明)。 */
 /* ================= 搜索 ================= */
-
-let searchSeq = 0; // 搜索序号守卫:慢查询后到不得覆盖新查询的结果
-
-async function runSearch() {
-  const q = $('searchBox').value.trim();
-  const panel = $('searchPanel');
-  if (!q) { panel.hidden = true; panel.textContent = ''; return; }
-  if (!S.lib) return;
-  const seq = ++searchSeq;
-  await S.lib.loadAllCategories();
-  if (seq !== searchSeq) return; // 期间用户又输入了:这轮结果作废
-  const notesByCat = new Map();
-  for (const name of S.lib.listCategories()) {
-    const cat = S.lib.categoryInfo(name);
-    if (cat.data) notesByCat.set(name, cat.data.notes);
-  }
-  const results = findMatches(notesByCat, q);
-  panel.textContent = '';
-  const head = document.createElement('div');
-  head.className = 'search-head';
-  head.textContent = `${results.length} 条匹配`;
-  panel.appendChild(head);
-  const ul = document.createElement('ul');
-  ul.className = 'search-list';
-  for (const r of results.slice(0, 50)) {
-    const li = renderSearchResult(r, q);
-    clickable(li, () => {
-      S.activeCat = r.cat;
-      openNote(r.note.id);
-      renderCategoryList();
-      $('activeCatName').textContent = r.cat;
-      panel.hidden = true;
-      $('searchBox').value = '';
-    });
-    ul.appendChild(li);
-  }
-  panel.appendChild(ul);
-  /* 窄屏顶栏会 flex-wrap 成两行,硬编码 top:52px 会让面板压在搜索框上;
-   * 按顶栏实际底边定位,窗口尺寸变化时也重算 */
-  const bar = document.querySelector('.topbar');
-  if (bar) panel.style.top = Math.round(bar.getBoundingClientRect().bottom + 6) + 'px';
-  panel.hidden = false;
-}
-
+/* 已迁出到 features/search.js(依赖 ctx.store / ctx.openNote / ctx.renderCategoryList
+ * / ctx.clickable;findMatches 与 renderSearchResult 由该模块直接 import search.js)。
+ * 原先的 searchSeq 与 runSearch 定义在这里,现改为 import —— 调用点名保持不变。 */
 /* ================= 自动锁屏 ================= */
 
 const IDLE_EVENTS = ['pointerdown', 'keydown', 'wheel'];
@@ -1112,7 +669,7 @@ const IDLE_EVENTS = ['pointerdown', 'keydown', 'wheel'];
 function resetIdleTimer() {
   if (S.settings.autoLockMinutes <= 0 || !S.lib) return;
   clearTimeout(S.idleTimer);
-  S.idleTimer = setTimeout(() => { lockNow(); toast('已自动锁屏', 'warn'); }, S.settings.autoLockMinutes * 60 * 1000);
+  S.idleTimer = setTimeout(() => { lockNow(ctx); toast('已自动锁屏', 'warn'); }, S.settings.autoLockMinutes * 60 * 1000);
 }
 function startIdleTimer() {
   stopIdleTimer();
@@ -1125,164 +682,11 @@ function stopIdleTimer() {
 }
 
 /* ================= 最近删除 / 密码生成器 / 导出 .md ================= */
-
-/** 剪贴板自动清除:密码本里复制的内容多半是敏感值,60 秒后自动清空 ——
- * 不给「复制完忘了、剪贴板被任意应用读走」留口子。
- * 清空要求页面保持前台,失败(失焦等)即放弃,不打扰。 */
-let clipWipeTimer = null;
-function scheduleClipboardWipe(seconds = 60) {
-  clearTimeout(clipWipeTimer);
-  toast(`已复制,${seconds} 秒后自动清空剪贴板`);
-  clipWipeTimer = setTimeout(async () => {
-    try { await navigator.clipboard.writeText(' '); } catch { /* 失焦等场景清不掉,放弃 */ }
-  }, seconds * 1000);
-}
-
-/** 导出备份到期提醒:30 天没导出(或从未导出)就给「导出」图标挂小红点 */
-function refreshExportDue() {
-  const last = Number(S.settings.lastExportAt) || 0;
-  const due = S.lib.listCategories().length > 0
-    && (!last || Date.now() - last > 30 * 86400000);
-  $('btnExport').classList.toggle('due', due);
-  if (due && !last) toast('还没导出过全库备份,建议先导出一份(左下角下载图标)', 'warn');
-}
-
-/** 最近删除:回收站存在各分类密文内部的 trash 数组里,
- * 与笔记同一条加密 / CAS / 备份流水线,不新增任何服务端键 */
-async function openTrash() {
-  if (!S.lib) return;
-  await S.lib.loadAllCategories().catch(() => {}); // 没解密过的分类补齐(个人库量小)
-  const entries = [];
-  for (const [name, cat] of S.lib.categories) {
-    for (const t of cat.data?.trash || []) entries.push({ catName: name, note: t });
-  }
-  entries.sort((a, b) => b.note.deletedAt - a.note.deletedAt);
-
-  await modal({
-    type: 'custom',
-    title: `最近删除(${entries.length} 条,保留 ${F.TRASH_DAYS} 天)`,
-    text: entries.length ? '恢复即回到原分类;「彻底删除」不可恢复。' : '回收站是空的。',
-    build: (body) => {
-      for (const { catName, note } of entries) {
-        const row = document.createElement('div');
-        row.className = 'trash-row';
-        const info = document.createElement('div');
-        info.className = 'trash-info';
-        const t = document.createElement('div');
-        t.className = 'trash-title';
-        t.textContent = note.title || '无标题';
-        const meta = document.createElement('div');
-        meta.className = 'trash-meta';
-        meta.textContent = `${catName} · 删除于 ${F.relTime(note.deletedAt)}`;
-        info.append(t, meta);
-        const ops = document.createElement('div');
-        ops.className = 'trash-ops';
-        const restore = document.createElement('button');
-        restore.className = 'btn small primary';
-        restore.textContent = '恢复';
-        restore.addEventListener('click', () => restoreFromTrash(catName, note, row));
-        const purge = document.createElement('button');
-        purge.className = 'btn small ghost danger';
-        purge.textContent = '彻底删除';
-        purge.addEventListener('click', () => purgeFromTrash(catName, note, row));
-        ops.append(restore, purge);
-        row.append(info, ops);
-        body.appendChild(row);
-      }
-    },
-  });
-}
-
-function restoreFromTrash(catName, note, row) {
-  const cat = S.lib.categoryInfo(catName);
-  if (!cat?.data) { toast('原分类已不可读,无法恢复', 'error'); return; }
-  cat.data.trash = (cat.data.trash || []).filter((t) => t.id !== note.id);
-  delete note.deletedAt;
-  const maxOrder = cat.data.notes.reduce((m, n) => Math.max(m, n.order), 0);
-  note.order = F.orderBetween(maxOrder, null); // 排到分类末尾
-  cat.data.notes.push(note);
-  markDirty(catName);
-  row.remove();
-  if (S.activeCat === catName) renderNoteList();
-  toast(`已恢复到「${catName}」`);
-}
-
-function purgeFromTrash(catName, note, row) {
-  const cat = S.lib.categoryInfo(catName);
-  if (!cat?.data) return;
-  cat.data.trash = (cat.data.trash || []).filter((t) => t.id !== note.id);
-  markDirty(catName);
-  row.remove();
-  toast('已彻底删除(保存后生效)');
-}
-
-/** 单篇导出为 .md 文件(纯正文,不加密 —— 由用户自己决定放哪) */
-function exportNoteMd() {
-  const note = activeNoteData();
-  if (!note) return;
-  const name = (note.title || '无标题').replace(/[\\/:*?"<>|]+/g, '_').slice(0, 60);
-  downloadBytes(new TextEncoder().encode(note.content), `${name}.md`, 'text/markdown');
-}
-
-/** 随机密码生成器:Web Crypto + 拒绝采样,生成只在本机内存里进行 */
-async function openPwGenerator() {
-  await modal({
-    type: 'custom',
-    title: '随机密码生成器',
-    text: 'Web Crypto 生成,已剔除易混淆字符(0/O、1/l/I);生成只在本机内存里进行。',
-    build: (body) => {
-      const opts = document.createElement('div');
-      opts.className = 'gen-opts';
-      const lenLabel = document.createElement('label');
-      lenLabel.className = 'gen-opt';
-      lenLabel.textContent = '长度';
-      const lenSel = document.createElement('select');
-      for (const n of [12, 16, 20, 24, 32]) {
-        const o = document.createElement('option');
-        o.value = String(n);
-        o.textContent = `${n} 位`;
-        if (n === 16) o.selected = true;
-        lenSel.appendChild(o);
-      }
-      lenLabel.appendChild(lenSel);
-      const symLabel = document.createElement('label');
-      symLabel.className = 'gen-opt';
-      const symChk = document.createElement('input');
-      symChk.type = 'checkbox';
-      symChk.checked = true;
-      symLabel.append(symChk, document.createTextNode(' 含符号'));
-      opts.append(lenLabel, symLabel);
-
-      const out = document.createElement('input');
-      out.className = 'modal-input';
-      out.readOnly = true;
-      out.setAttribute('aria-label', '生成的密码');
-      out.style.fontFamily = 'var(--mono)';
-      out.style.fontSize = '15px';
-
-      const ops = document.createElement('div');
-      ops.className = 'modal-btns';
-      ops.style.justifyContent = 'flex-start';
-      const regen = document.createElement('button');
-      regen.className = 'btn ghost';
-      regen.textContent = '换一个';
-      const copy = document.createElement('button');
-      copy.className = 'btn primary';
-      copy.textContent = '复制';
-      ops.append(regen, copy);
-
-      const gen = () => { out.value = F.genPassword(Number(lenSel.value), { symbols: symChk.checked }); };
-      regen.addEventListener('click', gen);
-      lenSel.addEventListener('change', gen);
-      symChk.addEventListener('change', gen);
-      copy.addEventListener('click', () => copyText(out.value, copy));
-
-      body.append(opts, out, ops);
-      gen();
-    },
-  });
-}
-
+/* 已迁出到 features/data.js(依赖 ctx.modal / ctx.markDirty / ctx.renderNoteList
+ * / ctx.activeNoteData / ctx.copyText / ctx.downloadBytes;F.TRASH_DAYS 与
+ * F.genPassword 由该模块直接 import format.js)。
+ * 原先的 scheduleClipboardWipe / refreshExportDue / openTrash / restoreFromTrash
+ * / purgeFromTrash / exportNoteMd / openPwGenerator 定义在这里,现改为 import。 */
 /* ================= 设置 ================= */
 
 function loadSettings() {
@@ -1321,7 +725,7 @@ async function changePassword() {
     const json = await S.lib.changeMasterPassword(pw);
     // 改密码换了鉴权令牌(DEK 不变)。本机记住的会话必须同步更新,
     // 否则下次打开会拿旧令牌去请求 → 401 → 被迫重输主密码(等于白记了)。
-    rememberNow(S.lib.dek, API.getToken());
+    rememberNow(ctx, S.lib.dek, API.getToken());
     downloadVaultBackup(json);
     toast('主密码已修改。新的 vault.json 备份已开始下载,请替换手头旧备份!', 'warn');
   } catch (e) {
@@ -1414,13 +818,13 @@ async function importFromBackup(file) {
       // 且 S.vaultJson 还是旧的,得让 boot() 重新拉一次,否则解锁会读到「已损坏」。
       S.vaultJson = null;
       S.vaultEtag = null;
-      await lockNow({ broadcast: false });
-      await boot();
+      await lockNow(ctx, { broadcast: false });
+      await boot(ctx);   // 重跑启动流程(见 features/shell.js 的 boot 说明)
       toast(`恢复完成(${parts.join(', ')})。请用这份备份对应的主密码解锁`, 'warn');
       return;
     }
     await S.lib.rescan();
-    renderCategoryList();
+    renderCategoryList(ctx);
     refreshSaveStatus();
     toast(`恢复完成:${parts.join(', ')}`);
   } catch (e) {
@@ -1430,42 +834,10 @@ async function importFromBackup(file) {
 }
 
 /* ================= 深浅色主题 ================= */
-
-/* 手动选择存 localStorage 并优先于系统;未选择时跟随系统,系统切换实时跟进。
- * 只写 <html data-theme> 一个开关,CSS 侧就只需要一份暗色变量块。 */
-const THEME_KEY = 'jmbiji.theme';
-
-function loadThemePref() {
-  try { return localStorage.getItem(THEME_KEY); } catch { return null; }
-}
-
-function setThemePref(mode) {
-  try { localStorage.setItem(THEME_KEY, mode); } catch { /* 隐私模式:仅本次会话生效 */ }
-}
-
-function applyTheme(mode) {
-  const root = document.documentElement;
-  if (root) root.dataset.theme = mode;
-  const btn = $('btnTheme');
-  if (btn) {
-    btn.innerHTML = mode === 'dark' ? ICON.sun : ICON.moon;
-    btn.title = mode === 'dark' ? '切换为浅色' : '切换为深色';
-    btn.setAttribute('aria-label', btn.title);
-  }
-  const meta = document.querySelector && document.querySelector('meta[name="theme-color"]');
-  if (meta) meta.setAttribute('content', mode === 'dark' ? '#1e2128' : '#faf8f2');
-}
-
-function initTheme() {
-  const pref = loadThemePref();
-  const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
-  applyTheme(pref || (mq && mq.matches ? 'dark' : 'light'));
-  if (!pref && mq && mq.addEventListener) {
-    mq.addEventListener('change', (e) => {
-      if (!loadThemePref()) applyTheme(e.matches ? 'dark' : 'light');
-    });
-  }
-}
+/* 已迁出到 features/theme.js(零 store 依赖,只依赖 ctx.dom / ctx.icons)。
+ * 原先的 THEME_KEY / loadThemePref / setThemePref / applyTheme / initTheme
+ * 五个定义在这里,现改为从模块 import(见文件顶部 import 区)——
+ * 调用点名保持 applyTheme/initTheme 不变。 */
 
 /** 移动端抽屉收起。桌面同样无害(没有 open 类,backdrop 本来就 hidden)。 */
 function closeDrawer() {
@@ -1478,258 +850,16 @@ function closeDrawer() {
 }
 
 /* ================= 启动与事件绑定 ================= */
-
-async function boot() {
-  loadSettings();
-  API.loadAccessKey();
-  showLock('loading'); // 首屏即过渡态:主密码框只在该手动解锁时出现,别闪现
-  // 拉取 vault.json:404 = 未建库 → 建库流程;其余错误 → 提示
-  for (;;) {
-    let res;
-    try {
-      res = await API.fetchVault();
-    } catch (e) {
-      if (e.code === 'access-key') {
-        const key = await modal({
-          type: 'prompt', title: '访问密钥',
-          label: `输入部署时设置的 ACCESS_KEY(≥16 字符)`,
-          text: '此服务器启用了访问密钥(与主密码是两回事)。密钥只保存在本机浏览器里,换设备/换浏览器需再输一次。',
-        });
-        if (key != null && key.trim()) { API.saveAccessKey(key.trim()); continue; }
-        $('lockErr').textContent = '未提供访问密钥,无法连接笔记库';
-        $('lockErr').hidden = false;
-        $('lockLoading').hidden = true;
-        return;
-      }
-      // 服务端 fail closed(ACCESS_KEY 未配置/过短):原样显示它给的可操作提示
-      $('lockErr').textContent = e.code === 'setup-required' ? e.message : `无法连接服务器:${e.message}`;
-      $('lockErr').hidden = false;
-      $('lockLoading').hidden = true;
-      return;
-    }
-    if (res.status === 404) { showLock('setup'); return; }
-    S.vaultJson = res.json;
-    S.vaultEtag = res.etag;
-    // 「记住本设备」:本机有可用会话就直接进,不问主密码(失败会自己回落锁屏)
-    if (S.settings.rememberDevice && await resumeSession()) return;
-    showLock('unlock');
-    return;
-  }
-}
-
-/**
- * 用本机记住的会话直接进入应用。
- * @returns {boolean} true = 已进入;false = 回落锁屏(不可用的会话已清掉)
+/* 已迁出到 features/shell.js(启动编排 boot / 事件绑定 bindEvents / 入口 start)。
+ * 新增 DOM 事件监听一律加在 shell.js;此处只保留共享基础设施与 ctx 组装。
  *
- * 两种失败都要清掉会话并说明原因,不能静默:
- *  · 钥匙与库不匹配(桶换过 / vault.json 被别的库覆盖)→ 不清就会「进去了但每个分类都打不开」
- *  · 令牌失效(多半是别的设备改过主密码)→ 不清就会每次打开都失败一次
- */
-async function resumeSession() {
-  const sess = loadSession();
-  if (!sess) return false;
-  try {
-    if (!(await V.dekMatchesVault(S.vaultJson, sess.dek))) {
-      clearSession();
-      pendingLockMsg = '本机记住的钥匙与这个库不匹配(可能换过桶或被别的库覆盖),已清除,请重新输入主密码';
-      return false;
-    }
-    API.setToken(sess.authKeyHex);
-    const keys = await V.deriveAllKeys(sess.dek);
-    S.lib = new Library(keys, S.vaultJson, sess.dek, S.vaultEtag);
-    await S.lib.rescan(); // 令牌过期 → 401 在这里抛出来
-    await enterApp();
-    return true;
-  } catch (e) {
-    if (S.lib) { S.lib.destroy(); S.lib = null; }
-    API.clearToken();
-    clearSession();
-    pendingLockMsg = e?.status === 401
-      ? '登录令牌已失效(可能在其他设备改过主密码),请重新输入主密码'
-      : `无法恢复上次的登录状态(${e.message}),请重新输入主密码`;
-    return false;
-  }
-}
+ * 入口接线(public/js/main.js):
+ *     import { start } from './features/shell.js';
+ *     import { ctx } from './ui.js';
+ *     start(ctx);
+ * 让 main.js 负责「组装 + 启动」这两步,ui.js 就不必再持有启动知识。 */
 
-function bindEvents() {
-  // 建库时实时反馈密码强度(解锁态不提示:那是既有密码,提示也无从改)
-  const updatePwHint = () => {
-    if (S.lockMode !== 'setup') return;
-    const hint = $('pwHint');
-    const pw = $('pwInput').value;
-    if (!pw) { hint.textContent = ''; hint.className = 'pw-hint'; return; }
-    const a = F.assessPassword(pw);
-    hint.textContent = a.msg;
-    hint.className = `pw-hint ${a.level}`;
-  };
-  $('pwInput').addEventListener('input', updatePwHint);
-
-  $('pwBtn').addEventListener('click', () => {
-    const pw = $('pwInput').value;
-    if (S.lockMode === 'setup') doCreateLibrary(pw, $('pwConfirm').value);
-    else doUnlock(pw);
-  });
-  $('pwInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pwBtn').click(); });
-  $('pwConfirm').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('pwBtn').click(); });
-
-  $('btnLock').addEventListener('click', () => lockNow());
-  /* 静态按钮图标统一注入:HTML 里不再放 emoji/Unicode 字符 */
-  $('btnMenu').innerHTML = ICON.menu;
-  $('btnAddCat').innerHTML = ICON.plus;
-  $('btnAddNote').innerHTML = ICON.plus;
-  $('btnRenameCat').innerHTML = ICON.pencil;
-  $('btnTrash').insertAdjacentHTML('afterbegin', ICON.trash + ' ');
-  $('btnCopyAll').insertAdjacentHTML('afterbegin', ICON.copy + ' ');
-  $('pwToggle').innerHTML = ICON.eye;
-  $('pwToggle').addEventListener('click', () => {
-    const inp = $('pwInput');
-    const show = inp.type === 'password';   // 当前是遮挡态 → 本次要显形
-    inp.type = show ? 'text' : 'password';
-    $('pwToggle').innerHTML = show ? ICON.eyeOff : ICON.eye;
-    $('pwToggle').title = show ? '隐藏密码' : '显示密码';
-    $('pwToggle').setAttribute('aria-label', $('pwToggle').title);
-    inp.focus();
-  });
-  $('btnAddCat').addEventListener('click', addCategory);
-  $('btnRenameCat').addEventListener('click', renameCategory);
-  $('btnDelCat').addEventListener('click', deleteCategory);
-  $('btnAddNote').addEventListener('click', addNote);
-  $('btnEdit').addEventListener('click', enterEditMode);
-  $('btnDone').addEventListener('click', exitEditMode);
-  // 显式保存:先把输入框里的内容收进内存态,再走与 Ctrl+S 同一条上传流水线
-  $('btnSaveNow').addEventListener('click', () => {
-    collectEditChanges();
-    saveAll();
-  });
-  $('btnCopyAll').addEventListener('click', copyWholeNote);
-  $('btnDelNote').addEventListener('click', deleteNote);
-  $('btnAddAtt').addEventListener('click', () => $('attInput').click());
-  $('attInput').addEventListener('change', (e) => {
-    addAttachments([...e.target.files]);
-    e.target.value = '';
-  });
-  $('btnCleanBlobs').addEventListener('click', async () => {
-    if (!S.lib) return;
-    const yes = await modal({ type: 'confirm', title: '清理未引用图片', text: '将解密全部分类并删除没被任何笔记引用的图片文件。继续?' });
-    if (!yes) return;
-    try {
-      const removed = await S.lib.cleanupOrphanBlobs();
-      renderCategoryList(); // 清理前会重新拉一次清单,界面跟着对齐
-      toast(removed.length ? `已清理 ${removed.length} 张未引用图片` : '没有需要清理的图片');
-    } catch (e) {
-      // 清理是 fail closed 的:读不全就一张不删。这条提示必须看得清、看得久,
-      // 否则用户会以为「点过了就等于清干净了」。
-      toast(`清理已中止:${e.message}`, 'error');
-    }
-  });
-  $('btnExport').addEventListener('click', exportFullBackup);
-  $('btnImport').addEventListener('click', () => $('importInput').click());
-  $('importInput').addEventListener('change', (e) => {
-    const file = e.target.files && e.target.files[0];
-    e.target.value = '';
-    if (file) importFromBackup(file);
-  });
-
-  $('autoLock').addEventListener('change', saveSettings);
-  $('rememberDevice').addEventListener('change', saveRememberPref);
-
-  // 深浅色切换:点一次就固定下来(写入偏好,之后不再跟随系统变化)
-  $('btnTheme').addEventListener('click', () => {
-    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
-    setThemePref(next);
-    applyTheme(next);
-  });
-
-  // 移动端抽屉:汉堡键开,遮罩点击关
-  $('btnMenu').addEventListener('click', () => {
-    const open = !$('sidebar').classList.contains('open');
-    $('sidebar').classList.toggle('open', open);
-    $('sideBackdrop').hidden = !open;
-    $('btnMenu').setAttribute('aria-expanded', String(open));
-  });
-  $('sideBackdrop').addEventListener('click', closeDrawer);
-
-  // Markdown 快捷插入:选区包裹 / 行前缀,写完立刻算改动
-  for (const b of document.querySelectorAll('#edTools .ed-btn')) {
-    b.addEventListener('click', () => {
-      if (!S.editing) return;
-      const ta = $('editBody');
-      if (b.dataset.wrap) wrapSel(ta, b.dataset.wrap);
-      else if (b.dataset.prefix) prefixLines(ta, b.dataset.prefix);
-      ta.focus();
-      collectEditChanges();
-    });
-  }
-
-  // 编辑器里 Tab 是缩进,不是「把焦点跳走」
-  $('editBody').addEventListener('keydown', (e) => {
-    if (e.key !== 'Tab' || e.ctrlKey || e.metaKey || e.altKey) return;
-    e.preventDefault();
-    e.target.setRangeText('  ', e.target.selectionStart, e.target.selectionEnd, 'end');
-    collectEditChanges();
-  });
-
-  // 修改主密码:左下角图标排里的「钥」(HTML 侧定义,这里只绑事件)
-  $('btnChangePw').addEventListener('click', changePassword);
-  $('btnTrash').addEventListener('click', openTrash);
-  $('btnExportMd').addEventListener('click', exportNoteMd);
-  // 随机密码生成器(ed-tools 里的 pw 按钮,不走 wrap/prefix 委托)
-  document.querySelector('#edTools [data-genpw]')?.addEventListener('click', openPwGenerator);
-  // 敏感行:点击显形 / 遮回;显形 30 秒后自动遮回
-  $('readBody').addEventListener('click', (e) => {
-    const t = e.target.closest('.secret');
-    if (!t) return;
-    const masked = t.classList.toggle('masked');
-    clearTimeout(t._remask);
-    if (!masked) t._remask = setTimeout(() => t.classList.add('masked'), 30000);
-  });
-
-  $('editTitle').addEventListener('input', () => { collectEditChanges(); });
-  $('editBody').addEventListener('input', () => { collectEditChanges(); });
-
-  let searchTimer = null;
-  $('searchBox').addEventListener('input', () => {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(runSearch, 160);
-  });
-  document.addEventListener('click', (e) => {
-    if (!$('searchPanel').hidden && !$('searchPanel').contains(e.target) && e.target !== $('searchBox')) {
-      $('searchPanel').hidden = true;
-    }
-  });
-
-  document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-      e.preventDefault();
-      saveAll();
-    }
-    // Ctrl+K 聚焦搜索(比浏览器默认的「搜索 with 引擎」在这里有用得多)
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-      e.preventDefault();
-      $('searchBox').focus();
-      $('searchBox').select();
-    }
-    // Ctrl+Enter = 完成(退出编辑),写完一大段不用伸手去够右下角
-    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter' && S.editing) {
-      e.preventDefault();
-      exitEditMode();
-    }
-  });
-
-  document.addEventListener('visibilitychange', () => {
-    if (document.hidden && S.dirty.size > 0) saveAll();
-  });
-
-  window.addEventListener('beforeunload', (e) => {
-    if (S.dirty.size > 0) { e.preventDefault(); e.returnValue = ''; }
-  });
-}
-
-export async function start() {
-  initTheme(); // 先定深浅色:锁屏第一屏就应该是用户要的样子
-  bindEvents();
-  // 多标签页同步:BroadcastChannel 不可用时 TabSync 会静默降级(S.tabs.enabled === false),
-  // 其余功能一律照常 —— 同步是锦上添花,不是必需品。
-  S.tabs = new TabSync({ onMessage: onTabMessage });
-  await boot();
-}
+/** 组装好的注入包:交给 features/shell.js 的 start() 用。
+ *  ⚠️ 导出的是**原始 store**(在 ctx.store 上),不是本文件那个 Proxy S ——
+ *     外部(含所有 feature)一律用 ctx.store.get('x') 读,属性赋值写。 */
+export { ctx };

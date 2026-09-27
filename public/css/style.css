@@ -26,6 +26,9 @@
   --warn-bg: #f7ecd8;
   --ok: #3f6f4f;
   --ok-bg: #e7efe4;
+  /* toast 文字色:亮色主题下 --danger/--warn 本身够深,配白字对比达标(7.07 / 5.86) */
+  --toast-error-fg: #fff;
+  --toast-warn-fg: #fff;
   --mark-bg: #f7ecd8;       /* 高亮:淡琥珀 */
   --code-bg: #f4f1e9;
   --radius: 6px;
@@ -66,10 +69,20 @@
   --warn-bg: rgba(210, 154, 63, .12);
   --ok: #7fb99a;
   --ok-bg: rgba(127, 185, 154, .13);
+  /* toast 文字色:暗色主题的 --danger(#d8756b)/--warn(#d29a3f)是**提亮**过的浅色,
+   * 配白字对比只有 3.15:1 / 2.49:1(低于 WCAG AA 4.5:1),文字糊在底色里看不清。
+   * 改用深墨字:与浅底形成反向高对比,实测 #3a1f1b on #d8756b = 4.80:1、
+   * #3a2a0c on #d29a3f = 5.56:1,双双达标。 */
+  --toast-error-fg: #3a1f1b;
+  --toast-warn-fg: #3a2a0c;
   --mark-bg: #4a3f1c;
   --code-bg: #262a32;
-  --grad1: #1e2128;
-  --grad2: #1e2128;
+  /* 锁屏纸面层次:浅色下 grad1/grad2 都比 --bg 略深,靠两层 radial-gradient 做出
+   * 「纸放在桌面上」的受光感。暗色原本把两个都写成 --bg 同值 → 渐变渲染成纯色,
+   * 锁屏退化成一块平板(实测:两层叠加后与 --bg 逐像素相同)。这里给一对有明暗差的
+   * 墨蓝:grad1 稍亮(左上方光源)、grad2 稍沉,差值刻意压小(≈4/6 级)以保持纸感而非灯效。 */
+  --grad1: #262a33;
+  --grad2: #191c22;
   --edge: #2e333c;
   --edge-shadow: 2px 0 6px rgba(0, 0, 0, .3);
   --shadow: 0 1px 2px rgba(0, 0, 0, .4);
@@ -158,6 +171,22 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .icon-btn.danger:hover { color: var(--danger); background: var(--danger-weak); }
 
 /* ---------- 锁屏:一张纸放在象牙白桌面上 ---------- */
+
+/* 无 JS 回退:禁用 JS 时 #lock/#app 都 hidden,页面会全空白,用户以为网站坏了。
+   这条给出原因与出路。样式必须在这里(CSP style-src 'self' 会拦掉内联 style 属性)。 */
+.noscript-warn {
+  max-width: 520px;
+  margin: 15vh auto;
+  padding: 24px;
+  line-height: 1.7;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+.noscript-warn h1 { margin: 0 0 12px; font-size: 18px; font-weight: 600; }
+.noscript-warn p { margin: 0 0 10px; }
+.noscript-warn .noscript-hint { margin: 0; color: var(--muted); font-size: 13px; }
 
 .lock {
   min-height: 100vh;
@@ -294,10 +323,39 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* 置顶图钉(单色 SVG):跟随强调色,不靠 emoji 的彩色贴图 */
 .pin-mark {
   display: inline-flex; align-items: center;
-  margin-right: 3px; vertical-align: -1px;
   color: var(--accent);
 }
 .pin-mark svg { display: block; }
+/* 图钉槽位:挂在标题之后。定宽 + 左对齐 ⇒ 多个置顶项图标纵向对齐成一条竖线;
+ * 未置顶项保留同宽空槽 ⇒ 悬停浮层显隐、置顶切换都不会让标题宽度跳动。
+ *
+ * ⚠️ 槽位必须躲在悬停浮层按钮的左边 —— 否则悬停时按钮压在图钉上,
+ *    点「置顶」命中的是被盖住的图钉,会静默变成「取消置顶」(实测踩过:两列都被压住)。
+ *    每行给槽位预留的净空写死在下面两条规则里(实测值):
+ *      分类列 1 个按钮 → 槽位右外边距 8px
+ *      笔记列 3 个按钮 → 槽位右外边距 34px
+ *    按钮宽度/尺寸若调整,这两个数要跟着改(真机脚本 pin-tail-verify.mjs 的 ⑧ 会翻红提醒)。 */
+.pin-slot {
+  flex: 0 0 auto;
+  width: 15px;
+  display: inline-flex; align-items: center; justify-content: flex-start;
+}
+/* 状态告警槽位(⚠ 冲突 / ⛔ 无法解密):与图钉槽位同款 —— 定宽 15px。
+ * 无告警时留空槽,有告警时图标落在同一竖线上,不推挤分类名。 */
+.warn-slot {
+  flex: 0 0 auto;
+  width: 15px;
+  display: inline-flex; align-items: center; justify-content: flex-start;
+}
+.warn-slot.warn { color: var(--warn); }
+.warn-slot.blocked { color: var(--danger); }
+.warn-slot svg { display: block; }
+/* 分类行:warn-slot 紧贴名字右侧(4px),两侧的槽位一起退到悬停浮层左边 */
+.cat-item .warn-slot { margin-left: 4px; margin-right: 8px; }
+/* 分类列:浮层宽 ≈34px(28 按钮 + 4 内边距 + 2 边框),槽位再退 8px 呼吸 → 右外距 8px */
+.cat-item .pin-slot { margin-right: 8px; }
+/* 笔记列:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框)→ 右外距 34px */
+.note-item .pin-slot { margin-right: 34px; }
 
 /* 主密码框的显示/隐藏切换:输长密码时能核对一眼 */
 .pw-wrap { position: relative; }
@@ -486,11 +544,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .cat-item {
   position: relative;   /* 悬停浮层按钮的定位上下文 */
-  display: flex; align-items: center; justify-content: space-between;
+  display: flex; align-items: center;
   padding: 7px 10px;
   border-radius: var(--radius);
   cursor: pointer;
-  gap: 8px;
   transition: background .12s;
 }
 .cat-item:hover { background: var(--hover); }
@@ -505,7 +562,25 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .cat-item.broken .cat-name { color: var(--danger); }
 .cat-item.none, .note-item.none { color: var(--muted); cursor: default; font-size: 12.5px; }
 .cat-item.none:hover, .note-item.none:hover { background: none; }
-.cat-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cat-name {
+  flex: 1 1 auto; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 分类名右侧的篇数徽章:与名字同一行、名字超长时优先让名字截断。
+ * 定宽不收缩 + 右对齐,让多位数的个位对齐成一条竖线(否则 9 / 10 宽度不同会参差)。 */
+.cat-count {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  min-width: 1.6em;
+  text-align: right;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;   /* 等宽数字,数字变化不抖动 */
+  color: var(--muted);
+  letter-spacing: 0;
+}
+.cat-item.active .cat-count { color: var(--accent); }
+/* 分类/笔记两列的浮层按钮宽度差别很大(分类 1 个 ≈34px、笔记 3 个 ≈94px),
+ * 每列槽位预留的净空定义在 .pin-slot 那条规则附近(见文件上方),此处不再重复 */
 
 .note-list { flex: 1; }
 .note-item {
@@ -521,13 +596,14 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   background: var(--sel);
   box-shadow: inset 3px 0 0 var(--accent);
 }
-.note-main { flex: 1; min-width: 0; }
+.note-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; }
 .note-title {
   font-weight: 500;
+  flex: 1 1 auto; min-width: 0;   /* 可收缩,长标题才会走到 ellipsis */
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .note-item.active .note-title { color: var(--text); font-weight: 600; }
-/* 置顶标识:标题前的图钉 + 轻底色,与普通项一眼可分 */
+/* 置顶标识:标题后的图钉 + 轻底色,与普通项一眼可分 */
 /* 置顶图钉由 JS 插入 .pin-mark(单色 SVG),不用 emoji:CSS content 无法跟随主题换色 */
 .cat-item.pinned:not(.active), .note-item.pinned:not(.active) { background: var(--accent-weak); }
 /* 操作按钮改绝对定位浮层:原来按钮虽 hover 才显形,却始终占位,
@@ -571,14 +647,15 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   color: var(--muted);
   font-size: 14px;
 }
-.empty::before {
-  content: "❖";
-  font-family: var(--serif);
-  font-size: 30px;
+/* 空状态的水印图标:由 showEmpty() 注入 SVG(此前是 CSS content 里的 ❖ 字符)。
+ * opacity 保持在 .45 —— 它是背景性的点缀,不该抢正文的注意力。 */
+.empty-deco {
+  display: inline-flex;
   color: var(--accent);
   opacity: .45;
   line-height: 1;
 }
+.empty-deco svg { display: block; }
 
 /* 写作/阅读面板:通栏铺满内容区的「纸」,内部超出时纸面自滚 */
 #readView, #editView {
@@ -698,11 +775,23 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .blk:hover .blk-copy { opacity: 1; }
 .blk-copy:hover { color: var(--accent); border-color: var(--accent); }
 .blk-copy.copied { color: var(--ok); border-color: var(--ok); opacity: 1; }
+/* 「已复制」反馈:靠颜色而非尺寸传达状态,因此能套在任意形态的按钮上 */
+.btn.copied, .icon-btn.copied { color: var(--ok); border-color: var(--ok); }
+/* 图标+文字按钮里的文字段:独立成节点,复制反馈只替换它,不动图标 */
+.btn .btn-label { white-space: nowrap; }
 
 /* ---------- 附件 ---------- */
 
 .read-atts, .edit-atts { margin-top: 22px; }
 .atts-head { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 8px; }
+/* 附件 chip 里的图标 + 文件名:图标 currentColor、与文字基线居中对齐,
+ * 长文件名截断但保留全名在 title 上(由 JS 写入)。 */
+.att-chip svg { flex: 0 0 auto; }
+.att-chip .att-name {
+  min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
 .att-chip {
   display: inline-flex; align-items: center; gap: 4px;
   border: 1px solid var(--border);
@@ -911,8 +1000,8 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   animation: toast-in .18s ease-out;
   max-width: 80vw;
 }
-.toast-error { background: var(--danger); color: #fff; }
-.toast-warn { background: var(--warn); color: #fff; }
+.toast-error { background: var(--danger); color: var(--toast-error-fg); }
+.toast-warn { background: var(--warn); color: var(--toast-warn-fg); }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
@@ -968,5 +1057,19 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 
 /* 尊重系统减动效偏好 */
 @media (prefers-reduced-motion: reduce) {
-  * { transition: none !important; animation: none !important; }
+  /* ★ 只停**装饰性**动画,不能连状态指示一起停。
+   * 原写法 `* { animation: none !important }` 会把 .spinner 的旋转也杀掉 ——
+   * 解锁/恢复过程在减弱动效用户眼里变成「一个静止的圈」,看起来就是卡死了,
+   * 比有动画更糟(这是可用性问题,不是审美问题)。
+   * spinner 是**唯一**的状态指示动画,单独保留;它表达的是「正在进行」,
+   * 属 reduced-motion 规范明确允许保留的「必要动效」。
+   * 用 :not(.spinner) 排除,并在其后单独重新声明 spinner 的动画 —— 双保险,
+   * 避免将来别的规则把 spinner 改成带动画的子元素时又被误伤。 */
+  *:not(.spinner) {
+    transition: none !important;
+    animation: none !important;
+  }
+  .spinner {
+    animation: lock-spin .8s linear infinite !important;
+  }
 }

@@ -163,7 +163,7 @@
 
 | 功能 | 行为 |
 |---|---|
-| 阅读态优先 | 打开即阅读态;点「编辑」或双击才进入编辑态 |
+| 阅读态优先 | 打开即阅读态;点「编辑」或在正文上双击才进入编辑态 |
 | 全文复制 | 每条笔记一键复制全文 |
 | 字段级复制 | 行内代码/代码块、`key: value` 行、列表项逐项提供复制入口 |
 | 复制反馈 | 按钮变「已复制」约 1.5 秒 |
@@ -201,16 +201,58 @@
 | 时机 | 动作 |
 |---|---|
 | 手动 | 保存按钮 / Ctrl+S |
-| 兜底 | 改动停止后 **5 分钟**自动保存 |
+| 兜底 | 改动停止后 **4 秒**自动保存(输入中每次按键都会重置计时) |
 | 切走页面 | `visibilitychange` hidden → 立即保存一次 |
 | 关闭页面 | 有未保存改动 → 浏览器确认框 |
+
+### 8.1.1 键盘快捷键
+
+| 按键 | 场景 | 动作 |
+|---|---|---|
+| `Ctrl/⌘ + S` | 任意 | 立即保存 |
+| `Ctrl/⌘ + K` | 任意 | 聚焦搜索框 |
+| `Ctrl/⌘ + Enter` | 编辑态 | 完成编辑 |
+| `J` / `K` | 读态 | 下一条 / 上一条笔记 |
+| `Alt + ↓` / `Alt + ↑` | 读态 | 同上(J/K 的等价形式,更好发现) |
+| `Enter` / `Space` | 侧栏列表项聚焦时 | 打开该分类 / 笔记 |
+
+单键快捷键(J / K)一律**避开输入类元素**:焦点在 `input`、`textarea`、可编辑区,
+或搜索面板、编辑态打开时,这些键原样落给输入 —— 否则打字会变成跳转。
+切换顺序与侧栏渲染同源(`format.js` 的 `sortNotes`),不跨分类,到头即停。
+
+### 8.1.2 保存状态栏的优先级契约
+
+状态栏文案共有四类,优先级 `error > busy > dirty > ok`,判据是纯函数
+`statusAllowsOverride(currentRank, nextKind, authoritative)`(在 `format.js`,可单测):
+
+| 种类 | 文案 | 含义 |
+|---|---|---|
+| `error` | 保存失败 ×N | 有分类没存上 |
+| `busy` | 保存中… / 导出中… / 恢复中… | 长任务进行中(过渡态) |
+| `dirty` | 有未保存更改 | 有改动待上传 |
+| `ok` | 已保存 / 已导出 | 一切就绪 |
+
+**两条不变量(缺一不可,都由单测钉住):**
+
+1. **`error` 是唯一粘性状态** —— 任何来源都不许把 `error` 改写成非 error。
+   理由:`refreshSaveStatus` 有 800ms 防抖,若失败后有一次 `markDirty` 挂起的回调到点
+   (此刻 `dirty` 已被清空),它会写「已保存」把刚显示的错误盖掉 → **用户看到假绿**。
+   解冻 `error` 只能靠显式 `resetStatusPriority()`(用户重新编辑 / 解锁 / 回锁屏)。
+2. **`busy` 不粘性,必须能被终态收尾** —— `refreshSaveStatus` 的写入传
+   `authoritative=true`,表示「保存流水线已跑完,这是真实结果」,允许覆盖 `busy`/`dirty`。
+   ⚠️ 反例(2026-09-27 实测回归):守卫只写 `rank >= currentRank` 时,
+   `saveAll` 留下的 `busy`(rank 2)会把「已保存」(rank 0)永久挡住 →
+   **保存成功但状态栏卡在「保存中…」**。但 `authoritative` **也盖不动 `error`**(不变量 1 优先)。
 
 ### 8.2 写入纪律(每次保存都必须执行)
 
 1. **CAS 条件写**:PUT 带 `If-Match`(上次见到的 etag);服务器版本已变 → 412 → 弹冲突三选(**用我的版本覆盖** / 以云端为准 / 取消),绝不静默覆盖。「强制覆盖」走重读当前 etag 后再写,服务器仍先把旧版送进 `backup/`。
-2. **仅新建**:`If-None-Match: *` 语义(R2 `onlyIf: { etagDoesNotMatch: '*' }`,workerd 特判 `*` 为通配符);已存在 → 409。
-3. **服务端备份**:CAS 成功的覆盖、删除,服务器先把旧对象写入 `backup/<分类名>/`,滚动保留 **10 份**(轮换逻辑复用前端 `format.js` 纯函数,单一出处)。被拒绝的写入不产生备份。
-4. R2 强一致:写成功后任何后续读立即可见,无最终一致窗口。
+   - ⚠️ **`If-Match: *` 不是通配、一律拒绝(428)**:按 RFC 7232 它只表示「资源存在即可」,不含任何版本约束,当条件写用等于无条件覆盖。PUT 与 DELETE 走同一 `readIfMatch()` 判定。
+   - **DELETE 必须带 `If-Match`**(缺头或 `*` → 428):此前删除缺头时**跳过全部校验无条件删**,会把另一台设备刚保存的新版静默抹掉。
+2. **分类名**:服务端 `validCatName` 返回 **NFC 归一后**的名字(客户端必须用返回值);拒绝 `U+FFFD`(非法 UTF-8 解码残留,如 `%FF`)、HTML 元字符 `<>"'`&`、控制字符与零宽/双向控制字符、首尾空白。同一库内**仅大小写不同**的名字按 409 拒绝(`catNameFold`,只用于冲突检测,不改存储键)。
+3. **仅新建**:`If-None-Match: *` 语义(R2 `onlyIf: { etagDoesNotMatch: '*' }`,workerd 特判 `*` 为通配符);已存在 → 409。
+4. **服务端备份**:CAS 成功的覆盖、删除,服务器先把旧对象写入 `backup/<分类名>/`,滚动保留 **10 份**(轮换逻辑复用前端 `format.js` 纯函数,单一出处)。被拒绝的写入不产生备份。
+5. R2 强一致:写成功后任何后续读立即可见,无最终一致窗口。
 
 ### 8.3 多端边界
 
@@ -293,6 +335,107 @@ A 保存之后 B 手里就是旧数据,B 再保存必撞 412 弹窗,而「用我
 | 公开仓库 | 只监听 `push(main)` 与 `workflow_dispatch`,**禁止** `pull_request*`(公开仓库下 `pull_request_target` 会把 Secrets 交给 fork 的代码执行);权限固定 `contents: read`;checkout 关凭据落盘;密钥只经 `env:` 传入、不内联进脚本正文。以上均由 `tests/deploy.test.mjs` 的文本断言钉住,并已用变异测试确认会变红 |
 | 量化数字 | 报告里的速率/耗时一律由本机实测反推并写明推导链,不引用未经核对的二手基准(初稿「2 万次/秒」即因此被修正掉一个数量级) |
 
+## 10.5 前端架构:store 与 feature 的边界
+
+2026-09-27 起,前端从「一个 2000 行 `ui.js`」拆为「薄壳 + store + features」:
+
+```
+public/js/
+  main.js            入口:import shell 的 start + ui 的 ctx,两步接起来
+  ui.js              共享基础设施(toast/modal/工具/保存流水线/设置/备份)+ ctx 组装
+  store.js           会话态单一容器(Store 类 + createProxy)
+  lib.js             领域层(Library:加解密 / CAS / 分类笔记)
+  crypto|format|api|zip|render|search|session|tabsync|vaultlib   底层(零依赖或近零)
+  features/
+    shell.js         启动编排 + 全部 DOM 事件绑定(唯一知道所有 id 的模块)
+    theme.js         深浅色主题
+    search.js        全局搜索
+    data.js          回收站 / 密码生成器 / 导出 .md / 剪贴板清理
+    lock.js          锁屏 / 记住本设备 / 解锁建库 / resumeSession
+    sidebar.js       分类列 + 笔记列表
+    note.js          阅读视图 + 编辑视图 + 笔记增删排序
+```
+
+`ui.js` 由 1782 行降至 **854 行**(-52%);每个迁出的区块在原位留**指针注释**
+(说明去哪个模块、依赖哪些 ctx 字段),便于按旧行号溯源。
+
+**三层的职责边界**:
+- `main.js` = 接线(只有 3 行逻辑);
+- `ui.js` = 共享基础设施 + 组装 ctx(**不碰任何 DOM 事件与启动流程**);
+- `features/*` = 具体功能;`shell` 把事件转成对其它 feature 的一次调用。
+
+### 三条硬约定
+
+1. **会话态只存 `store`**。`ui.js` 里的 `S` 是 `createProxy(store)` 的代理 ——
+   读写语法与普通对象一致,但状态真实汇聚在单一容器,可 `subscribe`。
+   **新状态字段必须先在 `store.js` 的 `defaultState()` 声明**。
+   两道互补的守卫:
+   - `tests/store.test.mjs` ——「白名单」式:名单里的字段必须都在;
+   - `tests/store-discipline.test.mjs` ——「反向扫描」式:代码里每个 `.set('x')` /
+     `patch({ x })` 的字面量键都必须在 `defaultState()` 里。
+     ⚠️ 只有前者是不够的:它证明不了「没写别的字段」。`lockMode` 曾用了半年没进名单,
+     白名单守卫一直是绿的 —— 反向扫描这道就是为此补的。
+
+   ⚠️ **代理与原始对象的边界(两处踩过的坑)**:
+   - `S` **只有属性赋值**,没有 `set()` / `get()` 方法 —— `S.set('k', v)` 报 `TypeError`。
+     写入一律写 `S.k = v`。**这条特权只属于 `ui.js` 内部**。
+   - 更隐蔽的是 `S.get('k')` **不报错,静默返回 `undefined`**(代理的 `get` 陷阱把 `get`
+     当成普通字段名去查)。
+   - **feature 拿到的是原始 `store`**,状态全在 `_state` 里、实例上没有任何字段,
+     因此只能 `ctx.store.get('x')` 读 / `ctx.store.set('x', v)` 写。
+     直访字段(读或写)都是错的:写只是挂了个没人读的实例属性,读恒为 undefined。
+     ⚠️ 2026-09-27 在 `shell.js` 上真踩过:把 `S.vaultJson = res.json` 机械改写成
+     `ctx.store.vaultJson = res.json` → 状态没进 store → 建库后进不去应用(护栏抓到)。
+     现由 `tests/store-discipline.test.mjs` 的第二条用例拦住。
+   - 调试时要把 store 暴露到 window,暴露**原始 `store`**,不要暴露 `S`。
+
+2. **feature 不得 import `ui.js`**(会与 ui.js 的 import 形成循环依赖)。
+   需要 ui.js 的东西一律走 `ctx` 注入。
+   `ctx` 字段与 `tests/features.test.mjs` 的 `CTX_KEYS` **双向对账**:
+   任何一边加了字段另一边没跟上,测试就红。
+   `ctx` **只加不删** —— 删字段会让已拆出的 feature 失效。
+
+   ⚠️ **feature 之间互相调用,入口必须在 ctx 里绑定好 ctx**:
+   ```js
+   openNote:          (id) => openNote(ctx, id),
+   activeNoteData:    ()    => activeNoteData(ctx),
+   ```
+   而不是 `openNote`(裸函数引用)。否则 `note.js` 里写 `ctx.activeNoteData()`(不带参数)
+   会拿到 `undefined` 当 ctx → `TypeError: Cannot read properties of undefined (reading 'store')`。
+   **口径统一:feature 内部一律写 `ctx.fn(x)`。**
+   两个 feature 互为依赖(如 `sidebar ↔ note`)时不 import 对方,全靠这条约定解开。
+
+   ⚠️ 反向依赖的例外写法:`shell.js` 的 `boot` 被 `ui.js` import(「从备份恢复」后
+   要重跑启动流程)。方向是 **ui.js → shell.js**,而 shell 不 import ui.js,
+   所以不构成循环 —— 关键是**方向**,不是禁止一切跨文件引用。
+
+3. **新增 feature 模块必须同步登记进 `public/sw.js` 的 `ASSETS`**。
+   `tests/assets.test.mjs` 会**递归**核对 `public/js/**` 与清单
+   —— 这是离线可用性的唯一保证(漏登记时联网无感,离线白屏)。
+
+4. **「改了笔记」必须自己负责标脏与重绘**。笔记的标题/正文/附件都是**原地改**
+   `cat.data.notes[i]` 的属性,不走 `store.set` → 不触发订阅通知(刻意如此:否则每敲一键
+   都要重建整个数组)。代价是 `note.js` 里**每一处改动后面都必须跟**
+   `ctx.markDirty(activeCat)` + 重绘。漏一处的症状是「改动静默丢失」。
+   ⇢ 因此 `note.js` 里凡涉及列表**顺序**的读取,一律走 `F.sortNotes(...)`,
+   不要直接遍历 `cat.data.notes`(数组是插入序,`order` 字段才是显示序;
+   两者只在从未拖过序时恰好一致)。
+
+### store 的一个已知契约
+
+`set()` 做值相等短路(`Object.is`),因此**原地修改容器/对象属性不会触发通知**
+(`S.dirty.add(x)` / `S.settings.k = 1`)。既有代码即如此使用,故行为不变。
+**但凡是有人 `subscribe` 的字段,必须整体换新对象**
+(`store.set('settings', { ...S.settings, k: 1 })`),否则订阅者静默失联。
+
+### feature 的推荐形态
+
+```js
+// 依赖经 ctx 传入;纯函数依赖(如 format/search)直接 import
+export async function runSearch(ctx) { ... }
+```
+函数式传参(而非模块级持有 ctx)的好处:依赖一目了然,且模块可被单测直接调用。
+
 ## 11. 已知限制(界面与文档需明示)
 
 1. 主密码忘记 = 数据不可恢复,无任何后门。
@@ -307,7 +450,7 @@ A 保存之后 B 手里就是旧数据,B 再保存必撞 412 弹窗,而「用我
    审计结论为**不修**:改键名只防「能读不能写」的窄窗口,挡不住能改代码者(那是云端零知识方案的
    共同上限),却会带来迁移、逐文件解密与丧失控制台抢救便利。零成本替代:分类名用中性串。
    若将来要改,范围见 `AUDIT.md` 文末。
-6. 浏览器崩溃且恰在保存间隔内,最多丢本次未保存的编辑(5 分钟兜底已压到最低)。
+6. 浏览器崩溃且恰在保存间隔内,最多丢本次未保存的编辑(4 秒兜底已压到最低)。
 7. 限流按 **isolate** 计:冷启动、换代、多机房各算一份,是尽力而为而非硬保证。
    要更硬的限流需接 Workers Rate Limiting 绑定或 Durable Object(都会引入配置/依赖,暂不引入)。
 8. 定长比较的**时序性质无法用功能测试判别** —— 任何功能等价写法都得到相同的通过/拒绝结果,

@@ -782,3 +782,391 @@ falsify 的锚点是硬编码字符串,代码改过就失配;失配时它打印 
 | CSP 真机 | Edge headless + CDP:recover.html 完整可用、index.html 仍严格、拦截 0 条 |
 | 工作区 | 探针全部清理,git status 只剩预期修复文件 |
 
+
+---
+
+## 第 20 轮审计(2026-09-26)· 全站复查:缺陷 + 逻辑错误 + 冗余 + 升级建议
+
+> 方法:三路并行子代理侦察 → **逐条复核(读原文 + 跑探针定论)**。
+> 子代理结论一律视为假设,本轮据此**否决了 4 条误报**(见下),并**证伪了自己一度以为的 P0**。
+
+### 已实测确认的缺陷
+
+| # | 位置 | 级别 | 问题 | 证据 |
+|---|---|---|---|---|
+| 1 | `ui.js:466-496` lockNow | P2 | 锁屏只 `stopIdleTimer()`,**不清 `S.autoSaveTimer`** → 锁屏后 4 秒定时器仍触发 `saveAll()`(靠 `if(!S.lib)return` 兜住,无数据损坏,但属计时器泄漏) | 真机 CDP 劫持 setTimeout:created:8521 / fired:12529(锁屏 ~8600) |
+| 2 | `worker.js:272-288` putCategory | **P1** | `If-Match: *` 未被识别为通配,**绕过 CAS 直接覆盖** | probe 实测 status=200,读回为通配符覆盖内容 |
+| 3 | `worker.js:294-320` deleteCategory | **P1** | **不带 `If-Match` 时跳过全部校验无条件删**(PUT 有 428 守卫,DELETE 没有);带 `*` 反而 412 | probe:无头 → 204 真删;带 `*` → 412 |
+| 4 | `worker.js:430/455` | P2 | 非法 UTF-8 键 `%FF` 与真 U+FFFD 归一成同一 key | `%FF` 建 201 → 真 U+FFFD 得 409「已存在」 |
+| 5 | `worker.js:221-225` validCatName | P2 | 服务端零 HTML 元字符校验、不做 Unicode NFC 归一、不查大小写冲突 | `<img src=x onerror=...>` 201 落盘;`café`(NFC) 与 `cafe´`(NFD) 并存;路径穿越 `../` → 400 正确拦 |
+| 6 | `recover.html:1000` RDR_SECRET_RE | **P1** | 与 `render.js:22` 分叉:**缺 `m` 标志** → 多行段落里非首行的敏感行**不遮罩、明文泄漏** | 真实部署串下:段落内第 2 行敏感值原样输出;render.js 同输入正常遮罩(其源码注释明确写了加 m 的理由) |
+| 7 | `style.css:978-979` toast | P2 | 暗色下 `.toast-error/.toast-warn` 硬编码 `#fff` 文字,**对比度 3.15:1 / 2.49:1**,低于 WCAG AA(4.5:1);亮色正常(7.07/5.86) | 亮度公式计算 |
+| 8 | `style.css:1034-1036` reduced-motion | P2 | `* { animation: none !important }` 把**加载 spinner 也停转** → 减弱动画用户看到「卡住」 | 源码 |
+| 9 | `ui.js:276-282` refreshSaveStatus | P2 | 800ms 防抖窗口内,若此刻 `dirty.size===0`(如保存失败已清 dirty),会用「已保存」**覆盖刚显示的错误状态** | 源码 + SAVE_DEBOUNCE_MS=800 |
+| 10 | `index.html` | P3 | 无 `<noscript>` 回退;禁用 JS 时白屏无提示 | grep 计数 0 |
+
+### 已排除的误报(复核后否决)
+
+| 子代理结论 | 否决理由 |
+|---|---|
+| P0-1 `saveAll` 把 `res.skipped` 当成功清 dirty | `markDirty` 全部 9 处调用点都在 `activeNoteData()/categoryInfo()` 返回的**活对象守卫内**;`cat.data===null` 时 `addAttachments` 走 warn 分支**根本不调 markDirty** → 不可达 |
+| P0-2 `recover.html` 里 `\\n` 是字面双反斜杠 → reader 全会崩 | **我自己的误判**:从**源码**抽取拿到的是**未求值的模板原文**;`READER_TEMPLATE` 是模板串,`\\n` **求值后正是 `\n`**。用真实部署串重跑,reader 10 项断言**全 PASS**。⚠️ 教训:抽 reader 段**必须从 `READER_TEMPLATE` 的求值结果抽**,不能从 recover.html 源码直切(测试注释早已写明) |
+| SVG 附件 blob: XSS 可读 accessKey | 真机 Edge 三条对照实验:`image/svg+xml` blob 加载后 `document.title` 未变、localStorage 无被窃值;`<object>` 同;`application/octet-stream` 对照同 → **CSP `script-src 'self'` 不允许 blob: 内联脚本**。降级为「若将来放宽 CSP 则变可利用」的潜在风险 |
+| `style.css:583` `.pinned:not(.active)` 特异性抬高覆盖选中态 | **是刻意设计**:作者用 `:not(.active)` **主动排除**选中态,让 `.active`(有独立 `--sel` 底)胜出,避免特异性打架 |
+| J/K 快捷键漏守卫 | 子代理自查已撤回(守卫含 !e.shiftKey、焦点检查、searchPanel 检查、S.editing 检查) |
+| `addAttachments` 并发重复引用 | 上传后合并 + 内容寻址去重,已堵住 |
+
+### 验证方式
+- 缺陷 1:真机 CDP 劫持 `setTimeout` 记录创建/触发时间戳
+- 缺陷 2/3/4/5:以仓库自身 `handleApi` 写 probe(带完整 Bearer 鉴权),走真实 R2 mock
+- 缺陷 6:从 `READER_TEMPLATE` **求值**后抽取 reader 段,与 `render.js` 同输入对照
+- 缺陷 7:WCAG 亮度对比度公式核算
+- **审计全程未修改任何产品文件**;探针脚本已全部清理,`git status` 仅剩既有改动
+
+### 第 20 轮 · 修复落地(用户选「全修含 P3」)
+
+| 缺陷 | 修复 | 位置 | 验证 |
+|---|---|---|---|
+| P1-2 If-Match:* 绕过 CAS | 抽 `readIfMatch()`,`*` 一律 428 不当通配 | worker.js | 单测 #17 + 真机 e2e |
+| P1-3 DELETE 无条件删 | 强制 If-Match(缺头/`*` → 428),与 PUT 对齐 | worker.js | 单测 #22 + 真机 e2e |
+| P1-1 reader 敏感行泄漏 | RDR_SECRET_RE 补 `m` 标志 | recover.html | 单测 #6 + 反向探针翻红 |
+| P2-4 %FF 键归一冲突 | 拒 U+FFFD 名 | worker.js | 单测 #20 + 真机 e2e |
+| P2-5 分类名校验空洞 | NFC 归一 + 拒 HTML 元字符/空白/控制字符;拦大小写重名 | worker.js + format.js | 单测 #18/#19/#20 + 真机 e2e |
+| P2-1 lockNow 计时器泄漏 | 补 clearTimeout(autoSaveTimer/statusTimer) | ui.js | 代码复核 |
+| P2-6 toast 对比度不足 | 走 `--toast-*-fg` 变量(暗色 4.80/5.56:1) | style.css | assets 护栏 #8 + 反向探针 |
+| P2-7 spinner 被停转 | `*:not(.spinner)` + 单独保留 | style.css | assets 护栏 #7 + 反向探针 |
+| P2-3 状态被防抖覆盖 | `statusAllowsOverride` 优先级(error 粘性) | format.js + ui.js | format 单测 #15 + 反向探针 |
+| P3-1 无 noscript | 补回退(样式走外部 CSS,规避 CSP) | index.html + style.css | assets 护栏 #6 |
+
+```
+npm test          → 180/180 全绿(175 基线 + 5 组新用例)
+npm run test:falsify → 新守卫全部有判别力(唯一红灯为既存 falsify.mjs:251,与本次无关)
+真机 e2e          → 13/13 通过(dev-server + 真实 HTTP,覆盖 5 条 worker 修复)
+反向探针          → 4 条注入全部如期翻红,还原后复绿
+工作区            → 探针全清;diff 均小范围,无整文件行尾重写
+```
+
+---
+
+## 第 21 轮:`busy` 粘性回归 —— 保存成功后状态栏永久卡在「保存中…」(2026-09-27)
+
+> 发现路径:为「允许重构」先建 S0 行为快照护栏(真实浏览器 CDP 驱动完整流程),
+> 护栏首跑即抓到此缺陷。**证明:纯 node 单测与既有 e2e 都覆盖不到它** —— ui.js 此前零测试覆盖。
+
+### 缺陷(用户可见,P1)
+
+**现象**:新建笔记 → 点「保存」→ 云端 PUT 全部 200 成功、内容确实落盘,
+但顶部状态栏**永远停在「保存中…」**,8 秒以上不消失。用户会以为没存上。
+
+**根因(上一轮修复引入的回归)**:第 20 轮为修「error 被 800ms 防抖的『已保存』盖掉」
+引入了优先级守卫 `statusAllowsOverride(currentRank, nextKind)`,但把 **busy 也当成了粘性状态**:
+
+```
+saveAll():  setStatus('保存中…', 'busy')   → statusRank = 2
+            ...保存成功...
+            refreshSaveStatus() → 800ms 后 setStatus('已保存', 'ok')   ← rank 0
+守卫判定:   currentRank(2) <= 0 ? 否 ; rank(0) >= 2 ? 否  →  return false 被拒
+```
+
+状态栏从此只能等**用户再次编辑**(markDirty → resetStatusPriority)才解冻。
+
+**为什么单测没拦住**:第 20 轮新增的单测里有一条
+`assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'ok'), false)`
+—— 它把「busy 拦住 ok」**当成了期望行为**并固化下来。
+这是典型的「测试固化了错误行为」:全绿不等于正确。
+
+### 证据链(全部实测,非推断)
+
+| 实验 | 结果 |
+|---|---|
+| 拦截页面 fetch,记录保存阶段请求 | `PUT /api/cat?...` → 200,`PUT /api/vault` → 200(**保存确实成功**) |
+| 采样状态栏 8 秒(每 200ms) | 恒为 `保存中… / kind=busy`,从未变「已保存」 |
+| 保存后再敲一个字(`markDirty`) | 立刻变为「有未保存更改」→ **证明是守卫粘住,而非 UI 未刷新** |
+| 模态框是否打开 | false(排除 handleConflict 等待用户) |
+
+### 修复
+
+引入「权威终态」概念:`refreshSaveStatus` 的写入反映保存流水线跑完后的**真实结果**,
+允许覆盖过渡态 busy/dirty,**但永远不许覆盖 error**(error 仍粘性,假绿问题不回退)。
+
+```js
+// format.js
+export function statusAllowsOverride(currentRank, nextKind, authoritative = false) {
+  const rank = STATUS_RANK[nextKind] ?? 0;
+  if (currentRank <= 0) return true;
+  if (currentRank === STATUS_RANK.error) return rank >= STATUS_RANK.error; // error 唯一粘性
+  if (authoritative) return true;                                          // 权威终态可收尾
+  return rank >= currentRank;
+}
+```
+
+```js
+// ui.js refreshSaveStatus: 传 authoritative=true
+if (S.dirty.size > 0) setStatus('有未保存更改', 'dirty', true);
+else setStatus('已保存', 'ok', true);
+```
+
+### 验证(正反双向)
+
+```
+npm test                         → 181/181 全绿(180 基线 + 新增 1 条)
+S0 行为快照(CDP 真机)           → 30/30 全绿(修复前 24/26,2 条红即此缺陷)
+反向探针 A:ui.js 去掉 authoritative → 单测仍 181 绿(纯函数未变,证明单测抓不到)
+                                     CDP 护栏翻红(卡在「保存完成」超时)✓ 有判别力
+反向探针 B:format.js 注释掉 authoritative → 单测 #73 精确翻红 ✓ 有判别力
+还原后 sha1 比对                 → 与修复版逐字节一致
+行尾复核                         → format.js/ui.js 纯 CRLF;format.test.mjs 保持 LF;无整文件重写
+```
+
+### 副产物:S0 行为快照护栏(重构前哨)
+
+位置 `.ui-tests/`(被 gitignore,不进仓库):
+- `cdp.mjs` —— 零依赖 CDP 驱动器(Edge headless,自建 WebSocket + Page/Runtime 域)
+- `s0-guardrail.mjs` —— 11 大节、30 条断言,覆盖:冷启动锁屏 → 建库 → 建分类 →
+  建笔记保存 → 阅读渲染(Markdown) → 搜索(含点击跳转) → 主题切换 →
+  刷新后数据仍在 → 锁定 → 解锁 → 错误密码被拒
+
+**跑法**:`node .ui-tests/s0-guardrail.mjs`(脚本内自启 dev-server,跑完自动收尾)。
+
+---
+
+## 第 22 轮:S1/S2 重构落地 —— 状态收口 + 三个 feature 抽出(2026-09-27)
+
+> 用户授权「方案 A」全量重构(分 5 阶段,S0 护栏先行)。本轮完成 **S1 + S2**。
+> 每阶段结束都跑「单测 + S0 真机护栏」双绿才进下一阶段。
+
+### S1:会话态收口到 store(272 处访问点零改动)
+
+**问题**:`ui.js` 散着 245 处 `S.xxx` 直访(226 读 + 46 写,共 272 处引用),
+改状态的地方与读状态的地方混在 2000 行文件里,「设了值但忘了刷 UI」没有任何机制兜底。
+
+**方案(用户选 Proxy)**:新增 `public/js/store.js`(Store 类 + `createProxy` 工厂),
+`ui.js` 里 `const S = createProxy(store)` —— **272 处访问点一字未改**,
+行为 100% 等价,但状态已汇聚进单一容器且可订阅(`subscribe` / `subscribeAny` / `patch`)。
+
+**关键设计**:
+- `set()` 做**值相等短路**(`Object.is`)。这是订阅机制的安全底线 ——
+  没有它,订阅回调里 `set` 同值会直接把调用链打成死循环。
+- 已知契约:**原地修改容器/对象属性不触发通知**(`S.dirty.add()` / `S.settings.x = 1`)。
+  既有代码就是这么用的,故行为不变;但 S3 引入订阅时,凡被订阅的字段必须**整体换新对象**。
+  该契约已用单测钉住(不是隐性陷阱)。
+- `defaultState()` 是字段的单一出处,含 5 个流程控制字段(saving/resavePending/三个 timer),
+  因为经 Proxy 读写都会落进 store,与其留成隐式字段不如显式声明、由单测「字段齐全」护栏兜住。
+
+### S2:抽出三个 feature(ui.js 1971 → 1782 行)
+
+引入 `ctx`(feature 上下文)概念:`ui.js` 把共享基础设施注入给 feature,
+feature **不碰 ui.js 私有变量**(否则会循环依赖)。
+
+| feature | 行数 | 依赖 ctx |
+|---|---|---|
+| `features/theme.js` | 58 | dom, icons(**零 store 依赖,故最先抽**) |
+| `features/search.js` | 70 | + store, openNote, renderCategoryList, clickable |
+| `features/data.js` | 181 | + modal, markDirty, renderNoteList, activeNoteData, copyText, downloadBytes |
+
+抽取顺序按「依赖从少到多」,不是原计划的 search→data→shell —— 先抽零依赖的 theme 验证模式跑通。
+
+### ⚠️ 本轮发现并修复的两个守卫盲区
+
+1. **`assets.test.mjs` 只扫 `public/js/` 顶层,不递归** → `features/` 子目录里的模块
+   漏登记进 SW `ASSETS` 时**全绿放过**(离线才白屏)。已改为**递归遍历**,
+   并用探针验证判别力(精确报出 `features/theme.js`)。
+2. **`createProxy` 完全没有单测覆盖** → 探针把 proxy 的 `set` 改成静默丢弃后,
+   单测 192 全绿而只有真机护栏翻红。已补 3 条用例(含「写入必须真的落进 store」)。
+
+### 新增守卫(共 3 个文件 / 28 条用例)
+
+- `tests/store.test.mjs`(14 条):短路语义、防递归、patch 原子性、订阅异常隔离、
+  原地修改契约、`createProxy` 读写与通知、默认字段齐全。
+- `tests/features.test.mjs`(5 条):feature 不得 import ui.js(防循环依赖)、
+  引用的 `ctx.xxx` 必须已注入、`ui.js` 的 ctx 字段与测试里的 `CTX_KEYS` **双向对账**、
+  每个 feature 必须被 ui.js import(防「拆出去没接上」)。
+- `tests/assets.test.mjs`(改):递归扫描。
+
+### 验证(每阶段双绿)
+
+```
+S1 后:  单测 195/195  ·  S0 真机护栏 30/30
+S2 后:  单测 200/200  ·  S0 真机护栏 30/30
+反向探针(全部如期翻红):
+  · store 去掉 Object.is 短路        → 单测 2 条红(短路 + 防递归)
+  · store 的 proxy set 丢弃写入      → 补测前:单测全绿(盲区!)+ 护栏红;补测后:单测 3 条红
+  · sw.js 移除 features/theme.js     → assets 递归守卫红
+  · feature 引用 ctx.notInjected     → features 契约守卫红
+  · ui.js 删掉 data.js 的 import     → features「必须 import」守卫红
+行尾复核:新增 6 个文件全部 CRLF(与 public/** 一致);无整文件重写
+```
+
+### ⚠️ 又一次真实教训:反向探针用中文标识符 → 假绿
+
+验证「feature 引用未注入的 ctx 字段」时,第一次注入写的是 `ctx.不存在的字段` ——
+而守卫的正则是 `/ctx\.([a-zA-Z_][a-zA-Z0-9_]*)/g`,**中文标识符不匹配** → 测试全绿,
+看起来像「守卫没判别力」。改用 ASCII 的 `ctx.notInjected` 后精确翻红。
+**教训:反向探针跑出全绿时,第一反应必须是「注入是否真的生效」,而不是「守卫无效」或「问题已解决」。**
+
+### 剩余阶段
+
+- **S4**:`ui.js` 只剩薄壳 controller;删兼容层;核对 ASSETS;线上逐字节比对
+
+
+---
+
+## S3 落地(抽核心 feature:lock / sidebar / note)
+
+`ui.js` **1782 → 1077 行**(-40%)。三个 feature 全部抽出并三重验证(单测 + 真机护栏 + 反向探针)。
+
+| 模块 | 行数 | 迁出的区块 |
+|---|---|---|
+| `features/lock.js` | 261 | 锁屏 / 记住本设备 / 解锁建库 **+ `resumeSession`**(与解锁同属密钥生命周期) |
+| `features/sidebar.js` | 346 | 左侧分类列 + 笔记列表 |
+| `features/note.js` | 318 | 阅读视图 + 编辑视图 + 笔记增删排序 |
+
+### 抓到的两个真缺陷(单测都看不见,只有真机护栏抓到)
+
+1. **`S.set(...)` TypeError**
+   `S = createProxy(store)` 是 **Proxy,只有属性赋值会触发写入,没有 `set()` / `get()` 方法**。
+   我把 `S.vaultJson = res.json` 改成 `S.set('vaultJson', res.json)` 后,护栏「刷新后自动回到应用」
+   「用原主密码可解锁」两条翻红。
+   ⚠️ **更隐蔽的一面**:`S.get('x')` 不报错,而是**静默返回 `undefined`**(Proxy 的 `get` 陷阱
+   把它当成字段名 `get` 去查)。诊断期我就踩了一次:`window.__diagStore = S` 后调 `S.get(...)`
+   报 `S.get is not a function` —— 因为我暴露的是 **Proxy** 而非原始 `store`。
+   → **面向 feature 注入的永远是原始 `store`(有 `.get`);`S` 只在 ui.js 内部用。**
+
+2. **`renderNoteList` 漏掉 `F.sortNotes`(排序改动在界面上不可见)**
+   `moveNote` 正确交换了各项的 `order` 值,`sortNotes` 也能正确排序,但 `renderNoteList`
+   直接遍历 `cat.data.notes` 的**存储顺序** → 用户点「上移」**界面纹丝不动**,
+   要等下次从密文重载才看见效果。
+   真机取证的现场:store 里 `orders = [2000, 1000]`(已互换),而 DOM 顺序仍是 `[一, 二]`。
+   修法:`const notes = F.sortNotes(cat.data.notes)` —— **与同文件 `moveNoteSelection`(:341) 同源**,
+   视觉第几行就是第几个。
+
+### ctx 注入的两条硬约定(写进 code 注释)
+
+- **feature 之间不互相 import**,循环依赖由 ui.js 的 `ctx` 解开。
+- **ctx 里的跨模块入口必须绑定 ctx**:`openNote: (id) => openNote(ctx, id)`。
+  若直接注入裸函数引用,feature 内部写 `ctx.activeNoteData()`(无参)会拿到 `undefined` 作 ctx
+  → `TypeError: Cannot read properties of undefined (reading 'store')`。本轮实测:护栏 **9 条同时翻红**
+  (编辑态 / 阅读视图 / 搜索全部失效)。统一口径:**feature 内部一律写 `ctx.fn(x)`**。
+
+### 护栏盲区补全(反向探针发现 4 条,已全部补齐并翻红验证)
+
+| # | 盲区 | 为什么原断言看不出 | 补的断言 |
+|---|---|---|---|
+| ① | 分类排序 | 两个中文名(甲/乙)的**插入序恰等于字典序** | 第二个分类改用「丙」(字形序在「甲」之前) |
+| ② | 切分类重置笔记 | `showEmpty` 本身就会隐藏 readView,`activeNoteId` 没清也照样绿 | 切**回来**时不自动选中任何笔记 |
+| ③ | 笔记排序 | 只有 1 条笔记,「排序」无从观测 | 建第二条 → 上移 → 顺序必须真的变 |
+| ④ | markDirty | 状态栏停在原值「已保存」与「没变」**无法区分** | 先确认已保存,再改一个字,状态栏必须离开 |
+| ⑥ | 删除分类 | 护栏压根没这个场景 | 删完 `activeCat` 必须复位 + 回空状态 |
+
+⚠️ 补 ① 时踩到一个**平台事实**:`localeCompare` 在默认 locale 下**中文排在拉丁字母之前**
+(`['AAA-x','中文'].sort(localeCompare)` → `['中文','AAA-x']`),所以用 ASCII 前缀反而造不出差异。
+最终用「丙」——它按字形序排在「甲」**之前**。
+
+### 验证(双绿 + 反向探针)
+
+```
+单测       205/205      (含新增 tests/lock.test.mjs 5 条 —— 专测 releaseSession)
+S0 真机护栏 49/49       (从 30 涨到 49)
+反向探针    6/6 全部如期翻红(且每条翻红的都是目标断言)
+  · ① 删分类排序    → 分类按名称排序 红
+  · ② 不重置笔记    → 切回来不自动选中 红
+  · ③ 绕过 sortNotes→ 上移后顺序真的变了 红
+  · ④ 不标脏        → 改动后离开「已保存」 红
+  · ⑤ 不渲染 MD     → Markdown 列表已渲染为 <li> 红
+  · ⑥ 不清 activeCat→ 删除后当前分类名复位 红
+  · releaseSession 单测反向探针 4/4 红
+```
+
+### ⚠️ 探针自身的两个安全网(本轮踩到才加)
+
+1. **探针被中断会污染工作区**:每个 case 跑一遍完整护栏(≈40s),全部 6 个超工具超时 → SIGTERM
+   → `finally` 没执行 → 源文件残留 `MUTANT:`。
+   **次轮运行会把脏代码当基线**,表现为「锚点未找到」+「还原后仍 2 条红」,极易误判。
+   → 已加:① 启动时**污染自检**(发现 `MUTANT:` 立即报错退出);② 注册 `SIGTERM`/`SIGINT` 兜底还原;
+   ③ 支持 `ONLY=1,2` 分批跑,避免触发超时。
+2. **护栏绝不能并发跑**:同一数据目录下两个护栏进程互相覆盖,表现为「分类没建出来」等
+   看似真缺陷的假红。**必须串行。**
+
+---
+
+## S4 落地(抽 shell + 加固 store 纪律)
+
+`ui.js` **1077 → 854 行**;累计从重构起点的 1782 行降至 **854 行(-52%)**。
+
+| 模块 | 行数 | 职责 |
+|---|---|---|
+| `features/shell.js` | 311 | 启动编排(`boot`)+ 全部 DOM 事件绑定(`bindEvents`)+ 入口(`start`) |
+| `main.js` | 25 | 接线:`start(ctx)`,3 行逻辑 |
+| `ui.js` | 854 | 共享基础设施(toast/modal/工具/保存流水线/设置/备份)+ ctx 组装 |
+
+**三层边界**:main 接线 → ui 组装 → features 干活。`shell.js` 是**唯一**知道所有 DOM id 的模块,
+每个监听都只是「DOM 事件 → 一次 `ctx.<feature>` 调用」的胶水,不含业务逻辑。
+
+### 🔴 抓到的真缺陷:`ctx.store.x = v` 静默丢状态
+
+`ui.js` 里的 `S = createProxy(store)` 支持 `S.x = v` 直访(代理把属性赋值转成 `set()`)——
+**那是 ui.js 的特权**。我机械改写时把 `S.vaultJson = res.json` 变成了
+`ctx.store.vaultJson = res.json`,而 `ctx.store` 是**原始 store 实例**:
+状态全在 `_state` 里,**实例上根本没有字段**。
+
+结果:写只是挂了个没人读的实例属性 → `store.get('vaultJson')` 读不到 → **建库后进不去应用**。
+表现是护栏「建库后进入应用」20s 超时(S0 护栏又一次证明了它的价值)。
+
+修法:feature 一律 `ctx.store.get('x')` / `ctx.store.set('x', v)`。
+共修正 **13 处**。
+
+### 🔴 顺带发现:一条「文档里写着、代码里不存在」的守卫
+
+DESIGN.md §10.5 一直写着「`defaultState` 漏声明会红」,查证后发现:
+`tests/store.test.mjs` 里那条是**硬编码白名单**(只有名单里的字段在不在),
+**证明不了「代码里没写别的字段」** —— 所以 `lockMode` 用了**半年**、从未在 `defaultState()`
+里声明过,一路无人拦。
+
+修补(三件事):
+1. `store.js` 的 `defaultState()` 补上 `lockMode` 及其取值说明;
+2. 新增 **`tests/store-discipline.test.mjs`**(2 条反向扫描守卫):
+   - 代码里每个 `.set('x')` / `patch({ x })` 的**字面量键**都必须在 `defaultState()` 中;
+   - feature 不得直访 `ctx.store.<字段>`(必须走 get/set)。
+3. `store.test.mjs` 的白名单补 `lockMode`,并在注释里写明它与新守卫是**互补**关系。
+
+⚠️ 首版 patch 键提取正则写成 `/(?:\s)([A-Za-z_]\w*)\s*[:,]/`,把**值**也当成了键
+(`{ activeCat: null, ... }` 里的 `null` 前面正好有空格),报出「patch({ null })」这种假阳性。
+改为 `[{,]\s*([A-Za-z_]\w*)\s*:` —— 键只出现在 `{` 或 `,` 之后且紧跟冒号。
+
+### 护栏盲区补全(反向探针发现 2 条,已补齐并翻红验证)
+
+| # | 盲区 | 为什么原断言看不出 | 补的断言 |
+|---|---|---|---|
+| ③ | 主题初始化 | 护栏默认就是浅色,`initTheme` 整段删掉也照样浅色 → **恒绿** | **预置 `localStorage['jmbiji.theme']='dark'` 再刷新**,首屏必须是深色;并断言按钮已按深色态更新 |
+| ④ | 多标签页同步 | 只开一个标签,没有「第二方」可观测 | **开第二个页面**(共享 localStorage → 自动进应用),在 A 建分类,B 必须自己刷出来 |
+
+### 验证(双绿 + 反向探针 7/7 + falsify 全绿)
+
+```
+单测        207/207     (205 + store-discipline 2 条)
+S0 真机护栏  53/53       (从 49 → 53;新增 主题 2 条 + TabSync 2 条)
+反向探针     7/7 全部如期翻红(每条翻红的都是目标断言)
+  · ① bindEvents 不再被调用     → 主密码输入框存在 红
+  · ② boot 写 store 改直访      → 建库后进入应用 红(复现本轮真缺陷)
+  · ③ 跳过 initTheme            → 主题 2 条红
+  · ④ 不初始化 TabSync          → 第二个标签 红
+  · ⑤ store 写入未声明字段      → store-discipline 红
+  · ⑥ feature 直访 store 字段   → store-discipline 红
+  · ⑦ shell.js 漏登记 ASSETS    → assets 递归守卫红
+npm run test:falsify          全部守卫具备判别力 ✓(含本轮修好的「上线验收」)
+行尾:public/js/** 全量 20 文件纯 CRLF,无一混合
+```
+
+### 修掉的历史遗留:falsify 的「验收步骤被掏空」失效守卫
+
+**根因**:旧断言是 `assert.match(workflow, /\/api\/vault/)` 这类「文件里出现过某字符串」,
+而 `/api/vault`、`x-access-key`、`401`、`404` 在**注释、echo、summary 表格**里到处都是 ——
+把真正发请求的那两行掏空,其余字符串照样在,断言全绿。
+
+**修法**:断言改落在**请求本身**与**判定分支**上:
+- 取出真正执行请求的两行(而不是全文搜索),断言两次探测都打 `/api/vault`;
+- 带密钥那行**必须真的含** `x-access-key: $ACCESS_KEY`;
+- 无密钥那行**绝不能**含 `x-access-key`;
+- `case "$no_key"` / `case "$yes_key"` 的分支必须覆盖三态,且每个「坏」态都必须 `fail=1`。
+
+**教训**:断言必须落在「**我发出的请求**」与「**判定逻辑**」上,不是「文件里有没有这个词」。

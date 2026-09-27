@@ -328,6 +328,73 @@ test('分类覆盖:无 If-Match → 428;旧 etag → 412;正确 etag → 200,且
   assert.match(bkeys[0], /^backup\/攻略\/攻略\.\d{13,}-[0-9a-z]{2,8}\.enc$/, `备份名缺随机后缀:${bkeys[0]}`);
 });
 
+test('分类覆盖:If-Match: * 不得当通配放行(必须 428,且不能覆盖)', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  const url = `/api/cat?key=${encodeURIComponent('通配')}`;
+  await call(env, 'PUT', url, { body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' } });
+  // RFC 7232 里 If-Match: * 只表示「资源存在即可」,不含版本约束 → 拿它做条件写=无条件覆盖。
+  // 必须拒绝,否则 CAS 形同虚设,多端并发会静默互相覆盖。
+  const res = await call(env, 'PUT', url, { body: new Uint8Array([7, 7, 7]), headers: { ...h, 'if-match': '*' } });
+  assert.equal(res.status, 428, 'If-Match: * 必须被拒(428),不能返回 200 覆盖');
+  const got = await call(env, 'GET', url, { headers: h });
+  assert.equal((await got.arrayBuffer()).byteLength, 1, '内容必须还是原来的 1 字节(没被通配覆盖)');
+});
+
+test('分类名:大小写/Unicode 兼容等价的重名被拒(409),不会并存两份', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('API')}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  });
+  // 仅大小写不同:R2 键名区分大小写,不拦就会并存「API」与「api」,用户在界面分不清
+  const dup = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('api')}`, {
+    body: new Uint8Array([2]), headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal(dup.status, 409, '仅大小写不同的分类必须被拒');
+  const cats = (await (await call(env, 'GET', '/api/cats', { headers: h })).json()).cats;
+  assert.equal(cats.length, 1, '不得并存两份');
+});
+
+test('分类名:NFC/NFD 同形被归一(NFD 创建后按 NFC 可读),避免「删不掉」的幽灵副本', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  const nfc = 'café';                 // e + 预组合重音
+  const nfd = 'cafe\u0301';           // e + 组合重音(视觉同形)
+  assert.notEqual(nfc, nfd, '前置条件:两串字节确实不同');
+  const a = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent(nfd)}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal(a.status, 201);
+  // 落盘名必须是 NFC 归一后的;否则 NFD/NFC 会各存一份
+  const cats = (await (await call(env, 'GET', '/api/cats', { headers: h })).json()).cats;
+  assert.deepEqual(cats.map((c) => c.name), [nfc], `落盘名应为 NFC:${JSON.stringify(cats.map((c) => c.name))}`);
+  // 再用 NFC 建 → 撞 409(不是并存两份)
+  assert.equal(
+    (await call(env, 'PUT', `/api/cat?key=${encodeURIComponent(nfc)}`, {
+      body: new Uint8Array([2]), headers: { ...h, 'if-none-match': '*' },
+    })).status, 409,
+  );
+});
+
+test('分类名:HTML 元字符 / 控制字符 / 非法 UTF-8(%FF) 一律拒收', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  const mk = (key) => call(env, 'PUT', `/api/cat?key=${encodeURIComponent(key)}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal((await mk('<img src=x onerror=alert(1)>')).status, 400, 'HTML 元字符必须拒收');
+  assert.equal((await mk('a&b')).status, 400);
+  assert.equal((await mk('a\u0000b')).status, 400, '控制字符必须拒收');
+  assert.equal((await mk(' 前后空格 ')).status, 400, '首尾空白必须拒收(否则会造成看不见的重名)');
+  // %FF 不是合法 UTF-8,URLSearchParams 会不可逆地塌成 U+FFFD;
+  // 若不拒收,它会与「真 U+FFFD」归一到同一个键,用户完全无从理解
+  assert.equal((await call(env, 'PUT', '/api/cat?key=%FF', {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  })).status, 400, '非法 UTF-8 字节必须拒收');
+  assert.equal((await mk('\ufffd')).status, 400, '真 U+FFFD 也必须拒收');
+});
+
 test('备份滚动:同一分类反复覆盖,备份保留上限 10 份', async () => {
   const { env, token } = await setup();
   const h = auth(token);
@@ -344,16 +411,37 @@ test('备份滚动:同一分类反复覆盖,备份保留上限 10 份', async ()
   assert.equal(env.VAULT.backupCount('日志'), 10);
 });
 
-test('分类删除:备份后删除,GET → 404', async () => {
+test('分类删除:必须带 If-Match(缺头 → 428),备份后删除,GET → 404', async () => {
   const { env, token } = await setup();
   const h = auth(token);
-  await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('临时')}`, {
+  const created = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('临时')}`, {
     body: new Uint8Array([9]), headers: { ...h, 'if-none-match': '*' },
   });
-  assert.equal((await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('临时')}`, { headers: h })).status, 204);
+  const etag = (await created.json()).etag; // PUT 的 etag 在 JSON body 里(不在响应头)
+  // ★ 不带 If-Match 一律拒绝:此前无条件删会静默删掉其他设备刚存的新版
+  assert.equal(
+    (await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('临时')}`, { headers: h })).status, 428,
+    '缺 If-Match 的删除必须 428(与 PUT 对齐),不能无条件删',
+  );
+  assert.equal(
+    (await call(env, 'GET', `/api/cat?key=${encodeURIComponent('临时')}`, { headers: h })).status, 200,
+    '428 之后对象必须还在',
+  );
+  // If-Match: * 不是有效条件删除(等于放弃版本约束),须 428 而非通配放行
+  assert.equal(
+    (await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('临时')}`, {
+      headers: { ...h, 'if-match': '*' },
+    })).status, 428,
+    'If-Match: * 不能当作通配放行',
+  );
+  assert.equal(
+    (await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('临时')}`, {
+      headers: { ...h, 'if-match': `"${etag}"` },
+    })).status, 204,
+  );
   assert.equal((await call(env, 'GET', `/api/cat?key=${encodeURIComponent('临时')}`, { headers: h })).status, 404);
   assert.equal(env.VAULT.backupCount('临时'), 1, '删除前应备份');
-  assert.equal((await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('不存在')}`, { headers: h })).status, 404);
+  assert.equal((await call(env, 'DELETE', `/api/cat?key=${encodeURIComponent('不存在')}`, { headers: { ...h, 'if-match': '"x"' } })).status, 404);
 });
 
 test('分类列表:名称、大小正确返回', async () => {
