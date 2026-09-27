@@ -1,8 +1,11 @@
 /* ============================================================
  * R2biji 样式 —— 「拾贝 · 编辑部」设计
  * 象牙白纸面 / 1px 实线分区 / 衬线标题 / 黛蓝强调色(仅主按钮·选中条·光标)
- * 原则:精致来自秩序 —— 8px 间距基准、圆角 6/10 两档、描边 0.5-1px,
+ * 原则:精致来自秩序 —— 8px 间距基准、圆角 6/12 两档、描边 0.5-1px,
  *       无渐变堆砌;所有交互态(悬停/聚焦/禁用/错误)成对设计。
+ * 玻璃:backdrop-filter 只给「浮起来的东西」(锁屏卡/搜索面板/弹窗/toast/
+ *       悬停胶囊/移动端抽屉),纸面本体保持实色 —— 玻璃是深度的暗示,
+ *       大面积铺开就成了毛玻璃糊墙。不支持毛玻璃的浏览器回落近实色(见文末)。
  * 暗色:墨蓝纸 #1e2128,强调色提亮为 #7fa7d9,正文对比度 ≈9:1。
  * ============================================================ */
 
@@ -32,7 +35,7 @@
   --mark-bg: #f7ecd8;       /* 高亮:淡琥珀 */
   --code-bg: #f4f1e9;
   --radius: 6px;
-  --radius-lg: 10px;
+  --radius-lg: 12px;
   --shadow: 0 1px 2px rgba(60, 50, 30, .05);
   --shadow-lg: 0 10px 30px rgba(60, 50, 30, .10);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Courier New", monospace;
@@ -45,6 +48,16 @@
   --edge-shadow: 2px 0 6px rgba(60, 50, 30, .04);
   /* 焦点圈(键盘可达性的可见承诺) */
   --ring: 0 0 0 3px rgba(47, 90, 146, .15);
+  /* 玻璃层(strong 给文字密集面,普通给装饰面):隔着一层磨砂能透出底色 */
+  --glass: rgba(255, 255, 255, .72);
+  --glass-strong: rgba(255, 255, 255, .84);
+  --glass-border: rgba(255, 255, 255, .65);
+  /* 阴影分层:近处一道锐影定边界,远处一片软影定悬浮高度 */
+  --glass-shadow: 0 12px 40px rgba(60, 50, 30, .16);
+  --glass-shadow-sm: 0 4px 16px rgba(60, 50, 30, .14);
+  --paper-shadow: 0 1px 2px rgba(60, 50, 30, .05), 0 8px 28px rgba(60, 50, 30, .07);
+  /* 微交互缓动:快出慢收,比 linear 高级一档 */
+  --ease: cubic-bezier(.25, .6, .3, 1);
 }
 
 /* 暗色主题:墨蓝纸,不是冷黑也不是暖黑 */
@@ -88,6 +101,13 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, .4);
   --shadow-lg: 0 10px 30px rgba(0, 0, 0, .5);
   --ring: 0 0 0 3px rgba(127, 167, 217, .2);
+  /* 暗色玻璃:墨蓝纸隔着磨砂透出来,不是纯黑压顶;白描边只留一线 */
+  --glass: rgba(30, 33, 40, .66);
+  --glass-strong: rgba(35, 38, 46, .82);
+  --glass-border: rgba(255, 255, 255, .09);
+  --glass-shadow: 0 12px 40px rgba(0, 0, 0, .5);
+  --glass-shadow-sm: 0 4px 16px rgba(0, 0, 0, .45);
+  --paper-shadow: 0 1px 2px rgba(0, 0, 0, .35), 0 8px 28px rgba(0, 0, 0, .3);
 }
 
 * { box-sizing: border-box; }
@@ -131,15 +151,22 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   border-radius: var(--radius);
   padding: 7px 16px;
   color: var(--text);
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background .15s, border-color .15s, color .15s, transform .12s var(--ease), box-shadow .15s;
 }
+.btn:active { transform: translateY(1px); }   /* 按下:沉一格,回弹交给缓动曲线 */
 .btn:hover { background: var(--hover); }
 .btn.primary {
   background: var(--accent);
   border-color: var(--accent);
   color: #fff;
+  box-shadow: 0 1px 2px rgba(47, 90, 146, .3), inset 0 1px 0 rgba(255, 255, 255, .15);
 }
-.btn.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+.btn.primary:hover {
+  background: var(--accent-hover); border-color: var(--accent-hover);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(47, 90, 146, .35), inset 0 1px 0 rgba(255, 255, 255, .15);
+}
+.btn.primary:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(47, 90, 146, .3); }
 .btn.primary:disabled { background: #9db4d0; border-color: #9db4d0; cursor: not-allowed; }
 :root[data-theme="dark"] .btn.primary:disabled { background: #3a4456; border-color: #3a4456; }
 .btn.ghost { border-color: transparent; background: transparent; }
@@ -165,8 +192,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   align-items: center;
   justify-content: center;
   font-size: 14px;
+  transition: background .15s, color .15s, transform .15s var(--ease);
 }
-.icon-btn:hover { background: var(--hover-weak); color: var(--text); }
+.icon-btn:hover { background: var(--hover-weak); color: var(--text); transform: scale(1.06); }
+.icon-btn:active { transform: scale(1); }
 .icon-btn.primary { color: var(--accent); }
 .icon-btn.danger:hover { color: var(--danger); background: var(--danger-weak); }
 
@@ -201,10 +230,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .lock-card {
   width: 380px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius); /* 纸张:小圆角,不像 App 卡片 */
-  box-shadow: var(--shadow-lg);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(24px) saturate(1.35);
+  -webkit-backdrop-filter: blur(24px) saturate(1.35);
   padding: 32px 28px 22px;
 }
 .lock-brand {
@@ -548,7 +579,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding: 7px 10px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background .12s;
+  transition: background .15s;
 }
 .cat-item:hover { background: var(--hover); }
 /* 选中态:暖纸签底 + 左侧 3px 黛蓝色条(用内阴影,零布局位移) */
@@ -589,7 +620,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding: 7px 8px 7px 10px;
   border-radius: var(--radius);
   cursor: pointer;
-  transition: background .12s;
+  transition: background .15s;
 }
 .note-item:hover { background: var(--hover); }
 .note-item.active {
@@ -612,10 +643,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   display: flex; gap: 2px;
   position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   padding: 1px 2px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
   border-radius: 999px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow-sm);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
   opacity: 0; transition: opacity .12s;
 }
 .cat-item:hover .cat-btns { opacity: 1; }
@@ -623,10 +656,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   display: flex; gap: 2px;
   position: absolute; right: 5px; top: 50%; transform: translateY(-50%);
   padding: 1px 2px;
-  background: var(--panel);
-  border: 1px solid var(--border);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
   border-radius: 999px;
-  box-shadow: var(--shadow);
+  box-shadow: var(--glass-shadow-sm);
+  backdrop-filter: blur(10px) saturate(1.3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.3);
   opacity: 0; transition: opacity .12s;
 }
 .note-item:hover .note-btns { opacity: 1; }
@@ -667,8 +702,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   overflow-y: auto;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: 0 1px 3px rgba(60, 50, 30, .06);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--paper-shadow);
 }
 /* 编辑视图内部纵向排布:标题/工具栏/附件/底栏各占一行,正文 textarea 吃掉剩余高度 */
 #editView { display: flex; flex-direction: column; }
@@ -768,8 +803,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .blk-copy {
   position: absolute;
   top: 4px; right: 4px;
-  border: 1px solid var(--border-strong);
-  background: var(--panel);
+  border: 1px solid var(--glass-border);
+  background: var(--glass-strong);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: var(--glass-shadow-sm);
   border-radius: 5px;
   width: 26px; height: 24px;
   font-size: 12px;
@@ -910,11 +948,19 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   width: min(640px, 92vw);
   max-height: 60vh;
   overflow-y: auto;
-  background: var(--panel);
-  border: 1px solid var(--border-strong);
+  background: var(--glass-strong);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(20px) saturate(1.4);
+  -webkit-backdrop-filter: blur(20px) saturate(1.4);
   z-index: 60;
+}
+/* 入场:轻度上滑淡入;centering transform 必须原样保留,否则飞出屏幕 */
+.search-panel:not([hidden]) { animation: panel-in .18s var(--ease); }
+@keyframes panel-in {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 1; transform: translateX(-50%) translateY(0); }
 }
 .search-head {
   padding: 10px 16px 6px;
@@ -956,16 +1002,28 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 /* ---------- 对话框 / 提示 ---------- */
 
 .modal {
-  border: 1px solid var(--border);
+  border: 1px solid var(--glass-border);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--glass-shadow);
   padding: 0;
   width: 400px;
   max-height: 84vh;   /* 内容多时(如最近删除一长串)不能撑出屏幕,否则底部按钮点不到 */
   overflow: hidden;
-  background: var(--panel);
+  background: var(--glass-strong);
+  backdrop-filter: blur(24px) saturate(1.35);
+  -webkit-backdrop-filter: blur(24px) saturate(1.35);
 }
-.modal::backdrop { background: rgba(38, 37, 31, .38); }
+/* 背板:压暗变轻(磨砂接手了分隔职责),不支持时只剩压暗,无碍 */
+.modal::backdrop {
+  background: rgba(38, 37, 31, .32);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.modal[open] { animation: modal-in .22s var(--ease); }
+@keyframes modal-in {
+  from { opacity: 0; transform: translateY(10px) scale(.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
 /* 滚动收在框内:max-height 与 .modal 同档,超出部分内部滚 */
 #modalBody { padding: 22px 22px 18px; max-height: 84vh; overflow-y: auto; }
 #modalBody h3 { margin: 0 0 12px; font-size: 16px; font-family: var(--serif); letter-spacing: .5px; }
@@ -996,26 +1054,32 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   align-items: center;
 }
 .toast {
-  background: var(--text);
-  color: var(--bg);
-  border-radius: var(--radius);
+  /* 玻璃 toast:半透磨砂,轻但不飘;两主题各自的底/字对比维持原有结论 */
+  background: rgba(38, 37, 31, .85);
+  color: #faf8f2;
+  border-radius: var(--radius-lg);
   padding: 9px 16px;
   font-size: 13px;
-  box-shadow: var(--shadow-lg);
+  box-shadow: var(--glass-shadow);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   animation: toast-in .18s ease-out;
   max-width: 80vw;
 }
+:root[data-theme="dark"] .toast { background: rgba(236, 233, 225, .9); color: #1e2128; }
 .toast-error { background: var(--danger); color: var(--toast-error-fg); }
 .toast-warn { background: var(--warn); color: var(--toast-warn-fg); }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
 
 /* 滚动条:与发丝线同族 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); background-clip: content-box; }
+::-webkit-scrollbar-track { background: transparent; }
 
 /* ---------- 窄屏(手机):双栏改抽屉 ---------- */
 @media (max-width: 760px) {
@@ -1031,15 +1095,21 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     z-index: 80;
     width: min(300px, 84vw); min-width: 0;
     transform: translateX(-104%);
-    transition: transform .22s ease;
-    box-shadow: var(--shadow-lg);
+    transition: transform .22s var(--ease);
+    background: var(--glass-strong);
+    backdrop-filter: blur(24px) saturate(1.35);
+    -webkit-backdrop-filter: blur(24px) saturate(1.35);
+    box-shadow: var(--glass-shadow);
     padding-top: env(safe-area-inset-top, 0px);
   }
   .sidebar.open { transform: translateX(0); }
   .side-backdrop {
     position: fixed; inset: 0;
-    background: rgba(38, 37, 31, .45);
+    background: rgba(38, 37, 31, .4);
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
     z-index: 70;
+    animation: fade-in .18s ease-out;
   }
 
   /* 卡片自带内边距,移动端不再给 .read-body 二次缩进 */
@@ -1056,6 +1126,8 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     opacity: 1;
     position: static; transform: none;
     background: none; border: none; box-shadow: none; padding: 0;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
   .blk-copy { opacity: .55; }
 }
@@ -1077,4 +1149,14 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   .spinner {
     animation: lock-spin .8s linear infinite !important;
   }
+}
+
+/* ---------- 无毛玻璃能力的浏览器:玻璃层回落近实色 ----------
+ * backdrop-filter 不生效时半透明底会直接叠在内容上,文字可读性受损。
+ * 老Firefox/关闭硬件加速时回落到近实色:效果没了,可用性不丢。 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .lock-card, .search-panel, .modal { background: var(--panel); }
+  .toast { background: rgba(38, 37, 31, .97); }
+  :root[data-theme="dark"] .toast { background: rgba(236, 233, 225, .97); }
+  .cat-btns, .note-btns, .blk-copy { background: var(--panel); }
 }
