@@ -153,6 +153,11 @@ test('splitSecretLine:赋值形态拆出前缀与敏感值,普通句子不命中
   assert.deepEqual(splitSecretLine('数据库密码：abc 123'), { prefix: '数据库密码：', secret: 'abc 123' });
   assert.deepEqual(splitSecretLine('API_KEY=sk-abcdef'), { prefix: 'API_KEY=', secret: 'sk-abcdef' });
   assert.deepEqual(splitSecretLine('GitHub token: ghp_123'), { prefix: 'GitHub token: ', secret: 'ghp_123' });
+  // 2026-09-27 用户要求:key / 密钥 也要遮(密钥原有,key 新增)
+  assert.deepEqual(splitSecretLine('key: sk-123'), { prefix: 'key: ', secret: 'sk-123' });
+  assert.deepEqual(splitSecretLine('encryption key： abcd'), { prefix: 'encryption key： ', secret: 'abcd' });
+  assert.deepEqual(splitSecretLine('密钥: xyz'), { prefix: '密钥: ', secret: 'xyz' });
+  assert.deepEqual(splitSecretLine('密钥：我的主密钥'), { prefix: '密钥：', secret: '我的主密钥' });
   assert.equal(splitSecretLine('今天天气不错'), null);
   assert.equal(splitSecretLine(null), null);
   // 复合词不误遮:关键字必须紧邻冒号,「密码学:」里的「密码」后面不是分隔符

@@ -1003,7 +1003,7 @@ var RDR_INLINE_RE = /(\\*\\*([^*\\n]+)\\*\\*)|(==([^=\\n]+)==)|(\`([^\`\\n]+)\`)
 // ★ flags 必须与主站 render.js:22 完全一致(含 m)。rdrInline 收到的是**整段**文本
 //   (rdrMd 把连续行以换行符合并后交进来),没有 m 时 ^...$ 只认第一行 ——
 //   段内第 2 行起的「密码: xxx」不会被遮罩,离线导出会泄漏主站明明遮住的密钥。
-var RDR_SECRET_RE = /^([^:：=\\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\\s*[:：=]\\s*)([^\\s].*)$/im;
+var RDR_SECRET_RE = /^([^:：=\\n]{0,48}?(?:密码|口令|私钥|密钥|秘钥|key|passwo?rds?|passwd|pwd|token|secret|api[_-]?key|access[_-]?key)\\s*[:：=]\\s*)([^\\s].*)$/im;
 
 function rdrInlineCore(text) {
   RDR_INLINE_RE.lastIndex = 0;
