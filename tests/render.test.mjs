@@ -10,6 +10,7 @@ class FakeNode {
     this.classes = new Set();
     this.dataset = {};
     this._text = null;
+    this.attrs = {};
   }
   appendChild(c) { this.children.push(c); return c; }
   set textContent(v) { this.children = []; this._text = String(v); }
@@ -24,7 +25,35 @@ class FakeNode {
     return {
       add: (...cs) => cs.forEach((c) => self.classes.add(c)),
       remove: (...cs) => cs.forEach((c) => self.classes.delete(c)),
+      toggle: (c, on) => { if (on === undefined) { self.classes.has(c) ? self.classes.delete(c) : self.classes.add(c); } else if (on) self.classes.add(c); else self.classes.delete(c); },
+      contains: (c) => self.classes.has(c),
     };
+  }
+  setAttribute(k, v) { this.attrs[k] = v; }
+  getAttribute(k) { return this.attrs[k] !== undefined ? this.attrs[k] : null; }
+  /** 子树内按 class 前缀匹配(测试桩够用:生产代码只查 .secret / .secret-stars) */
+  querySelectorAll(sel) {
+    const cls = sel.replace(/^\./, '');
+    const out = [];
+    const walk = (n) => {
+      for (const c of n.children || []) {
+        if (String(c.className).split(/\s+/).includes(cls)) out.push(c);
+        walk(c);
+      }
+    };
+    walk(this);
+    return out;
+  }
+  cloneNode() {
+    const c = new FakeNode(this.tag);
+    c.classes = new Set(this.classes);
+    c.dataset = { ...this.dataset };
+    c._text = this._text;
+    c.attrs = { ...this.attrs };
+    // children 是引用共享的 —— 但 cloneWithoutStars 只改克隆树上星号层的 textContent,
+    // 该 setter 会清 children 并设 _text,不会污染原树;其余节点只读
+    for (const ch of this.children) c.children.push(ch.cloneNode ? ch.cloneNode() : ch);
+    return c;
   }
 }
 
@@ -92,7 +121,13 @@ test('renderMarkdown:敏感行在多行段落的非首行也遮罩', () => withD
   };
   walk(md);
   assert.ok(masked, '多行段落中的敏感行必须被 .secret.masked 遮罩');
-  assert.equal(masked.textContent, 'MySecret123');
+  // 双图层结构:raw 层文本 = 真值,stars 层 = 星号;span 整体 textContent 是拼接
+  const raw = masked.children.find((c) => String(c.className).includes('secret-raw'));
+  const stars = masked.children.find((c) => String(c.className).includes('secret-stars'));
+  assert.ok(raw && stars, '必须有 raw + stars 两个图层');
+  assert.equal(raw.textContent, 'MySecret123', '真值在 raw 层');
+  assert.match(stars.textContent, /^[•]+$/, '星号层全是 •');
+  assert.equal(stars.textContent.length, 'MySecret123'.length, '星号数 = 真值字符数');
 }));
 
 test('renderMarkdown:零 innerHTML —— <script> 只能是文本', () => withDom(() => {
@@ -131,11 +166,75 @@ test('renderInline:敏感值进 .secret.masked,值完整留在 DOM(显形/复制
   renderInline(parent, 'root 密码:Jm8#vQ2x');
   const span = parent.children.find((c) => c.className === 'secret masked');
   assert.ok(span, '应有打码 span');
-  assert.equal(span.textContent, 'Jm8#vQ2x', '值必须原样在 DOM 里,视觉遮蔽由 CSS 负责');
+  const raw = span.children.find((c) => String(c.className).includes('secret-raw'));
+  assert.ok(raw, '真值层必须存在');
+  assert.equal(raw.textContent, 'Jm8#vQ2x', '值必须原样在 raw 层,显形/复制靠它');
   // 普通行完全不受影响
   const plain = new FakeNode('p');
   renderInline(plain, '**加粗**的普通段落');
   assert.equal(plain.children.find((c) => c.className === 'secret masked'), undefined);
+}));
+
+test('★ renderMarkdown:块复制 data-copy 不带星号(星号图层不污染复制)', () => withDom(() => {
+  // 双图层后 el.textContent 会把 raw+stars 拼起来 —— dataset.copy 必须剔除星号层,
+  // 否则用户点「复制本段」得到 '密码:xxx••••'(2026-09-27 星号化引入,反向探针钉住)
+  const md = renderMarkdown('root 密码:Jm8#vQ2x\n');
+  const p = md.children[0];
+  assert.equal(p.dataset.copy, 'root 密码:Jm8#vQ2x',
+    `data-copy 应为纯净原文,拿到的是 ${JSON.stringify(p.dataset.copy)}`);
+  // 列表里的敏感行同样受保护:data-copy 在 ul(blk)上,不在 li 上
+  const md2 = renderMarkdown('- token: abc123\n');
+  const ul = md2.children[0];
+  assert.equal(ul.dataset.copy, 'token: abc123');
+}));
+
+test('★ 敏感值星号数:超长截断到 24,空值至少 1 个', () => withDom(() => {
+  const long = 'a'.repeat(40);
+  const md = renderMarkdown(`密码: ${long}\n`);
+  const walk = (n) => {
+    for (const c of n.children) {
+      if (String(c.className).includes('secret-stars')) return c;
+      const r = walk(c);
+      if (r) return r;
+    }
+    return null;
+  };
+  const stars = walk(md);
+  assert.ok(stars, '应能找到星号层');
+  assert.equal(stars.textContent.length, 24, '超长值星号截断到 24');
+
+  const md2 = renderMarkdown('密码: \u00a0x\n'); // 空白值兜底
+  const st2 = walk(md2);
+  assert.ok(st2 && st2.textContent.length >= 1, '至少 1 个星号,不能空成不可点');
+}));
+
+test('★ 同段多处敏感行必须全部遮罩(此前只遮第一处,其余明文外露)', () => withDom(() => {
+  // 2026-09-27 真机探针实测:renderInline 命中第一处敏感行就 return,
+  // rest 不递归 → 第 2 处敏感值明文(裸 textNode)。按行循环处理后:
+  // 两处都必须包在 .secret.masked 里(裸明文 = textNode;raw 层真值是有意保留的,点击才显形)
+  const md = renderMarkdown('服务器密码: Jm8#vQ2x\n数据库 token: abc12345\n普通文字不被遮\n');
+  const p = md.children[0];
+  const maskedCount = p.querySelectorAll('.secret').length;
+  assert.equal(maskedCount, 2, `应遮住 2 处,实际 ${maskedCount}`);
+
+  // 「明文外露」的精确定义:敏感值出现在裸文本节点里,而不是藏在 raw 层
+  const walkTexts = (n) => {
+    const out = [];
+    for (const c of n.children || []) {
+      if (c.tag === undefined) out.push(String(c._text ?? c.textContent)); // 裸 textNode
+      else if (!String(c.className).includes('secret')) out.push(...walkTexts(c)); // 非 secret 元素内
+    }
+    return out;
+  };
+  const bareTexts = walkTexts(p).join('\n');
+  assert.ok(!bareTexts.includes('abc12345'), '第 2 处敏感值不得以裸文本形式外露');
+  assert.ok(bareTexts.includes('普通文字不被遮'), '普通行不受影响');
+
+  // 每个遮罩 span 都应有非空星号层(视觉遮蔽真实生效)
+  for (const s of p.querySelectorAll('.secret')) {
+    const stars = s.querySelectorAll('.secret-stars')[0];
+    assert.ok(stars && stars.textContent.length >= 1, '每处遮罩都要有星号层');
+  }
 }));
 
 test('renderMarkdown:斜体与删除线(单星/双波浪)', () => withDom(() => {

@@ -743,9 +743,14 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .read-body strong { font-weight: 650; }
 .read-empty { color: var(--muted); }
 
-/* 敏感行打码:值完整留在 DOM 里(块复制/显形靠它),视觉用模糊 + 底色遮蔽 */
-.secret { border-radius: 2px; cursor: pointer; }
-.secret.masked { background: var(--border-strong); filter: blur(6px); user-select: none; }
+/* 敏感行打码:星号图层盖住真值(比模糊滤镜干净,多处打码不满屏糊块);
+ * 真值完整留在 DOM(块复制/显形靠它),.masked 控制两图层显隐 */
+.secret { border-radius: 2px; cursor: pointer; position: relative; }
+.secret .secret-raw { display: inline; }
+.secret .secret-stars { display: none; color: var(--muted); letter-spacing: 1px; }
+.secret.masked { user-select: none; }
+.secret.masked .secret-raw { display: none; }
+.secret.masked .secret-stars { display: inline; }
 
 /* 随机密码生成器弹窗 */
 .gen-opts { display: flex; gap: 16px; align-items: center; margin-bottom: 10px; }

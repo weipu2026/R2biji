@@ -28,20 +28,42 @@ export function splitSecretLine(text) {
   return m ? { prefix: m[1], secret: m[2] } : null;
 }
 
-/** 行内标记:把一段文本按 **粗** / ==高亮== / `码` 切分并构建节点 */
+/** 行内标记:把一段文本按 **粗** / ==高亮== / `码` 切分并构建节点。
+ *  ⚠️ 敏感行按**行**逐条处理:此前命中第一处敏感行就整体 return,同段后续的
+ *  敏感行会明文外露(2026-09-27 真机探针实测:3 行 2 敏感只遮第 1 处)。
+ *  现在按行切分,每行独立判定,命中行打星号遮罩,其余行走普通行内标记。 */
 export function renderInline(parent, text) {
-  const sec = splitSecretLine(text);
-  if (sec) {
-    // 敏感值原样进 DOM(块复制、点击显形都靠它),视觉遮蔽交给 .masked 的 CSS
-    renderInlineCore(parent, sec.prefix);
-    const span = document.createElement('span');
-    span.className = 'secret masked';
-    span.textContent = sec.secret;
-    span.title = '点击显示 / 再点隐藏(30 秒无操作自动遮回)';
-    parent.appendChild(span);
-    return;
-  }
-  renderInlineCore(parent, text);
+  const lines = String(text).split('\n');
+  lines.forEach((line, idx) => {
+    if (idx > 0) parent.appendChild(document.createTextNode('\n'));
+    const sec = splitSecretLine(line);
+    if (sec) {
+      // 结构:span.secret.masked > (span.secret-raw 真值 + span.secret-stars 星号)
+      // · 真值必须完整留在 DOM(块复制 data-copy、点击显形、整篇导出都靠它);
+      //   但它从「唯一内容」降级为「两个图层之一」,显隐由 .masked 类控制。
+      // · 星号数量 = 真值字符数(≤24 截断):比模糊滤镜干净,多处打码不再是满屏糊块。
+      //   (2026-09-27 用户反馈:blur(6px) 多处命中时头晕难看,改经典星号)
+      renderInlineCore(parent, sec.prefix);
+      const span = document.createElement('span');
+      span.className = 'secret masked';
+      span.title = '点击显示 / 再点隐藏(30 秒无操作自动遮回)';
+
+      const raw = document.createElement('span');
+      raw.className = 'secret-raw';
+      raw.textContent = sec.secret;
+
+      const stars = document.createElement('span');
+      stars.className = 'secret-stars';
+      stars.setAttribute('aria-hidden', 'true');
+      stars.textContent = '•'.repeat(Math.min(sec.secret.replace(/\s+/g, '').length || 1, 24));
+
+      span.appendChild(raw);
+      span.appendChild(stars);
+      parent.appendChild(span);
+      return;
+    }
+    renderInlineCore(parent, line);
+  });
 }
 
 function renderInlineCore(parent, text) {
@@ -121,8 +143,19 @@ export function renderMarkdown(content) {
       renderInline(el, text);
     }
     el.classList.add('blk');
-    el.dataset.copy = el.textContent;
+    // 快照复制文本:跳过星号图层(.secret-stars),否则块复制会带上一串 •
+    // (textContent 不理会 CSS 显隐,两个图层都会被拼进来)
+    el.dataset.copy = [...el.querySelectorAll('.secret')].length
+      ? cloneWithoutStars(el).textContent
+      : el.textContent;
     root.appendChild(el);
+  }
+
+  /** 复制快照用的浅克隆:星号图层置空,真值图层保留 → textContent 即纯净原文 */
+  function cloneWithoutStars(el) {
+    const c = el.cloneNode(true);
+    for (const s of c.querySelectorAll('.secret-stars')) s.textContent = '';
+    return c;
   }
 
   let i = 0;

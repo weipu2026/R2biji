@@ -830,11 +830,14 @@ const READER_TEMPLATE = `<!DOCTYPE html>
   .md code { font-family: Consolas, Menlo, monospace; font-size: .92em; background: var(--accent-weak); border-radius: 4px; padding: 1px 5px; }
   .md pre code { background: transparent; padding: 0; }
   .md mark { background: var(--mark); color: inherit; padding: 0 2px; }
-  .secret { cursor: pointer; }
-  .secret.masked {
-    background: var(--mask); color: transparent; border-radius: 4px;
-    filter: blur(4px); user-select: none;
-  }
+  .secret { cursor: pointer; position: relative; }
+  /* 星号遮罩(2026-09-27):真值仍在 DOM(.secret-raw),视觉用星号图层替代模糊 ——
+     多处打码不再满屏糊块;点击显形/30 秒遮回交互不变 */
+  .secret .secret-raw { display: inline; }
+  .secret .secret-stars { display: none; color: var(--muted); letter-spacing: 1px; }
+  .secret.masked { user-select: none; }
+  .secret.masked .secret-raw { display: none; }
+  .secret.masked .secret-stars { display: inline; }
   .atts { margin-top: 26px; padding-top: 14px; border-top: 1px solid var(--hair); }
   .att-chip {
     display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--hair);
@@ -1022,8 +1025,15 @@ function rdrInline(text, allowSecret) {
   if (allowSecret) {
     var m = RDR_SECRET_RE.exec(text);
     if (m) {
+      // 双图层:真值(.secret-raw)+ 星号(.secret-stars),显隐由 .masked 控制。
+      // 星号数 = 去空白后的字符数(≤24 截断);比模糊滤镜干净,多处打码不满屏糊块。
+      var n = m[2].replace(/\s+/g, '').length || 1;
+      if (n > 24) n = 24;
       return rdrInlineCore(m[1])
-        + '<span class="secret masked" title="点击显示 / 再点隐藏">' + rdrEsc(m[2]) + '</span>';
+        + '<span class="secret masked" title="点击显示 / 再点隐藏">'
+        + '<span class="secret-raw">' + rdrEsc(m[2]) + '</span>'
+        + '<span class="secret-stars" aria-hidden="true">' + new Array(n + 1).join('\\u2022') + '</span>'
+        + '</span>';
     }
   }
   return rdrInlineCore(text);
