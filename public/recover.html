@@ -1025,13 +1025,14 @@ function rdrInline(text, allowSecret) {
   if (allowSecret) {
     var m = RDR_SECRET_RE.exec(text);
     if (m) {
-      // 双图层:真值(.secret-raw)+ 星号(.secret-stars),显隐由 .masked 控制。
-      // 星号数 = 去空白后的字符数(≤24 截断);比模糊滤镜干净,多处打码不满屏糊块。
+      // 双图层:前缀+真值(.secret-raw)+ 星号(.secret-stars),显隐由 .masked 控制。
+      // ★ 前缀(「密码:」)也收进 raw 层 —— 遮罩态整行只剩星号串,不再有突兀的
+      //   「密码:」字样;点击显形才连前缀一起出现(与主站 render.js 行为一致)。
+      // 星号数只按值的去空白字符数算(≤24 截断);前缀不参与。
       var n = m[2].replace(/\s+/g, '').length || 1;
       if (n > 24) n = 24;
-      return rdrInlineCore(m[1])
-        + '<span class="secret masked" title="点击显示 / 再点隐藏">'
-        + '<span class="secret-raw">' + rdrEsc(m[2]) + '</span>'
+      return '<span class="secret masked" title="点击显示 / 再点隐藏">'
+        + '<span class="secret-raw">' + rdrEsc(m[1] + m[2]) + '</span>'
         + '<span class="secret-stars" aria-hidden="true">' + new Array(n + 1).join('\\u2022') + '</span>'
         + '</span>';
     }

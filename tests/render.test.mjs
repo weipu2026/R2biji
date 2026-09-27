@@ -121,13 +121,13 @@ test('renderMarkdown:敏感行在多行段落的非首行也遮罩', () => withD
   };
   walk(md);
   assert.ok(masked, '多行段落中的敏感行必须被 .secret.masked 遮罩');
-  // 双图层结构:raw 层文本 = 真值,stars 层 = 星号;span 整体 textContent 是拼接
+  // 双图层结构:raw 层 = 前缀+真值(显形才可见),stars 层 = 星号
   const raw = masked.children.find((c) => String(c.className).includes('secret-raw'));
   const stars = masked.children.find((c) => String(c.className).includes('secret-stars'));
   assert.ok(raw && stars, '必须有 raw + stars 两个图层');
-  assert.equal(raw.textContent, 'MySecret123', '真值在 raw 层');
+  assert.equal(raw.textContent, '登录密码: MySecret123', 'raw 层 = 前缀+真值(显形时整体出现)');
   assert.match(stars.textContent, /^[•]+$/, '星号层全是 •');
-  assert.equal(stars.textContent.length, 'MySecret123'.length, '星号数 = 真值字符数');
+  assert.equal(stars.textContent.length, 'MySecret123'.length, '星号数只按值的字符数算(前缀不参与)');
 }));
 
 test('renderMarkdown:零 innerHTML —— <script> 只能是文本', () => withDom(() => {
@@ -161,14 +161,19 @@ test('splitSecretLine:赋值形态拆出前缀与敏感值,普通句子不命中
   assert.deepEqual(splitSecretLine('git 密码 : abc'), { prefix: 'git 密码 : ', secret: 'abc' });
 });
 
-test('renderInline:敏感值进 .secret.masked,值完整留在 DOM(显形/复制靠它)', () => withDom(() => {
+test('renderInline:敏感值进 .secret.masked,前缀+真值完整留在 raw 层(显形/复制靠它)', () => withDom(() => {
   const parent = new FakeNode('p');
   renderInline(parent, 'root 密码:Jm8#vQ2x');
   const span = parent.children.find((c) => c.className === 'secret masked');
   assert.ok(span, '应有打码 span');
   const raw = span.children.find((c) => String(c.className).includes('secret-raw'));
   assert.ok(raw, '真值层必须存在');
-  assert.equal(raw.textContent, 'Jm8#vQ2x', '值必须原样在 raw 层,显形/复制靠它');
+  assert.equal(raw.textContent, 'root 密码:Jm8#vQ2x', '前缀+值都进 raw 层(显形时整体出现)');
+  // 遮罩态下 span 之外不得再有裸的前缀文本(否则星号串前面挂着「密码:」很突兀)
+  const bareTexts = parent.children
+    .filter((c) => c.tag === undefined)
+    .map((c) => String(c._text ?? ''));
+  assert.ok(!bareTexts.some((t) => t.includes('密码')), '前缀必须收进 span,不留在 span 外');
   // 普通行完全不受影响
   const plain = new FakeNode('p');
   renderInline(plain, '**加粗**的普通段落');

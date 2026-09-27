@@ -38,19 +38,20 @@ export function renderInline(parent, text) {
     if (idx > 0) parent.appendChild(document.createTextNode('\n'));
     const sec = splitSecretLine(line);
     if (sec) {
-      // 结构:span.secret.masked > (span.secret-raw 真值 + span.secret-stars 星号)
-      // · 真值必须完整留在 DOM(块复制 data-copy、点击显形、整篇导出都靠它);
-      //   但它从「唯一内容」降级为「两个图层之一」,显隐由 .masked 类控制。
-      // · 星号数量 = 真值字符数(≤24 截断):比模糊滤镜干净,多处打码不再是满屏糊块。
-      //   (2026-09-27 用户反馈:blur(6px) 多处命中时头晕难看,改经典星号)
-      renderInlineCore(parent, sec.prefix);
+      // 结构:span.secret.masked > (span.secret-raw 前缀+真值 / span.secret-stars 星号)
+      // · **前缀(「密码:」等)也放进 raw 层**:遮罩态整行只剩一串星号,不再有
+      //   突兀的「密码:」字样;点击显形才连前缀一起出现。
+      //   (2026-09-27 用户反馈:多处打码时前面挂着一排「密码:」很突兀)
+      // · raw 层必须是 span 的完整内容 —— 块复制 data-copy(cloneWithoutStars)
+      //   依赖它拿回「前缀+真值」的原文。
+      // · 星号数量只按**值**的字符数算(≤24 截断):前缀不参与,否则星号串过长。
       const span = document.createElement('span');
       span.className = 'secret masked';
       span.title = '点击显示 / 再点隐藏(30 秒无操作自动遮回)';
 
       const raw = document.createElement('span');
       raw.className = 'secret-raw';
-      raw.textContent = sec.secret;
+      raw.textContent = sec.prefix + sec.secret;
 
       const stars = document.createElement('span');
       stars.className = 'secret-stars';
