@@ -48,6 +48,10 @@ class FakeNode {
   removeEventListener() {}
 }
 
+/* ★ 所有调用方一律 `await withDom(...)` —— **同步体也要 await**:
+ *   本函数在 finally 里 `delete global.document`,不 await 时这次清理会与下一个
+ *   用例的建桩在微任务队列里交错,「测试能不能过」就变成依赖调度顺序的侥幸。
+ *   (2026-09-28 复查:withDom 改成 async 后旧用例没跟着 await,当时靠队列顺序侥幸成立。) */
 async function withDom(fn) {
   const nodes = new Map();
   global.document = {
@@ -75,8 +79,8 @@ async function withDom(fn) {
   }
 }
 
-test('★ renderCategoryList:lib 为 null 时不抛错(锁屏竞态护栏)', () => {
-  withDom((ctx) => {
+test('★ renderCategoryList:lib 为 null 时不抛错(锁屏竞态护栏)', async () => {
+  await withDom((ctx) => {
     const st = new Store();               // lib 初值就是 null
     assert.equal(st.get('lib'), null, '前置:lib 确实是 null');
     assert.doesNotThrow(() => renderCategoryList(ctx(st)),
@@ -84,8 +88,8 @@ test('★ renderCategoryList:lib 为 null 时不抛错(锁屏竞态护栏)', () 
   });
 });
 
-test('★ renderNoteList:lib 为 null 时不抛错,且标题降级为「未选择分类」', () => {
-  withDom((ctx, byId) => {
+test('★ renderNoteList:lib 为 null 时不抛错,且标题降级为「未选择分类」', async () => {
+  await withDom((ctx, byId) => {
     const st = new Store();
     st.set('activeCat', '甲');            // 有选中分类,但 lib 仍为 null
     assert.doesNotThrow(() => renderNoteList(ctx(st)));
@@ -94,15 +98,15 @@ test('★ renderNoteList:lib 为 null 时不抛错,且标题降级为「未选�
   });
 });
 
-test('★ renderNoteList:无选中分类时不抛错', () => {
-  withDom((ctx) => {
+test('★ renderNoteList:无选中分类时不抛错', async () => {
+  await withDom((ctx) => {
     const st = new Store();               // activeCat 也是 null
     assert.doesNotThrow(() => renderNoteList(ctx(st)));
   });
 });
 
-test('★ activeNoteData:lib 为 null 时返回 null 而非抛错', () => {
-  withDom((ctx) => {
+test('★ activeNoteData:lib 为 null 时返回 null 而非抛错', async () => {
+  await withDom((ctx) => {
     const st = new Store();
     st.set('activeCat', '甲');            // 迫使走到 categoryInfo 那一行
     let r;
@@ -111,8 +115,8 @@ test('★ activeNoteData:lib 为 null 时返回 null 而非抛错', () => {
   });
 });
 
-test('lib 正常存在时,渲染照常产出分类项(护栏不能把功能挡掉)', () => {
-  withDom((ctx, byId) => {
+test('lib 正常存在时,渲染照常产出分类项(护栏不能把功能挡掉)', async () => {
+  await withDom((ctx, byId) => {
     const st = new Store();
     st.set('lib', {
       listCategories: () => ['甲', '乙'],

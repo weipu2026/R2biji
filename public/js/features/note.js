@@ -29,14 +29,29 @@ import * as F from '../format.js';
 
 /* ================= 阅读视图 ================= */
 
+/* 上一次渲染的是哪一篇 —— 只用来判断「该不该把阅读面滚回顶部」。
+ * 模块级持有:阅读面全场只有一块,状态天然全局。 */
+let lastReadNoteId = null;
+
 export function renderReadView(ctx) {
   const $ = (id) => ctx.dom.byId(id);
   const note = ctx.activeNoteData();
-  if (!note) { ctx.showEmpty('从左侧选择一条笔记'); return; }
+  if (!note) { ctx.showEmpty('从左侧选择一条笔记'); lastReadNoteId = null; return; }
   $('emptyState').hidden = true;
   $('editView').hidden = true;
   const view = $('readView');
   view.hidden = false;
+  /* 换笔记就把阅读面滚回顶部。滚动容器是 #readView(overflow-y:auto),而本函数
+   * 只重填 #readBody,容器自身的 scrollTop 会原样留着 → 从长文中段去点分类/点笔记,
+   * 会直接落在新笔记的中间(新文更短时还会被夹到底部)。
+   * ★ 同一篇的重绘**保持位置**:编辑完成、冲突取云端版、多标签页同步都属于这类,
+   *   那时用户正读着这一篇,拽回顶部才是打扰(与 sidebar.openCategory 的例外同源)。
+   * (2026-09-28:通栏阅读上线后暴露 —— 旧流程点分类必经 showEmpty,
+   *  那条路径会 hidden 掉 #readView、滚动盒重建而顺带归零。)*/
+  if (lastReadNoteId !== note.id) {
+    view.scrollTop = 0;
+    lastReadNoteId = note.id;
+  }
 
   $('readTitle').textContent = note.title || '无标题';
   $('readMeta').textContent = `更新于 ${ctx.fmtTime(note.updatedAt)}${note.attachments.length ? ` · ${note.attachments.length} 个附件` : ''}`;

@@ -269,6 +269,14 @@ const MUTANTS = [
     to: 'const openId = null; // MUTANT:退回旧行为,选分类不选笔记',
     expect: '点分类自动打开列表最顶端那篇',
   },
+  /* ---- 阅读视图契约(tests/note-view.test.mjs)---- */
+  {
+    label: '换笔记不归零阅读面(会停在上一篇的中段)',
+    file: 'public/js/features/note.js',
+    from: 'if (lastReadNoteId !== note.id) {',
+    to: 'if (false) { // MUTANT:从不归零,也不记录当前篇',
+    expect: '换笔记:阅读面滚回顶部',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
