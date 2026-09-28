@@ -107,3 +107,62 @@ test('toast 文字色走主题变量,暗色下不得硬编码 #fff', () => {
   assert.match(css, /--toast-error-fg:/, '必须定义 --toast-error-fg 变量');
   assert.match(css, /--toast-warn-fg:/, '必须定义 --toast-warn-fg 变量');
 });
+
+/* ---------- 2026-09-29 审计 P3:离线救灾与主题配色 ---------- */
+test('P3:ASSETS 必须含应急恢复页(离线救灾时最需要它)', () => {
+  assert.ok(ASSETS.includes('./recover.html'), 'recover.html 必须进清单,否则离线打开只会拿到主应用外壳');
+});
+
+test('P3:离线导航兜底必须按路径给页面(不能一律回主应用外壳)', () => {
+  /* ★ 行为断言,不是「文件里出现过某字符串」:把 navFallback 从 sw.js 里取出来**真的跑一遍**。
+   *   只查字符串的写法在 2026-09-29 的反向探针里被证明是假绿 —— 把函数体掏空、只留名字与
+   *   调用点,断言照样全绿。(同一条纪律:断言要落在「判定分支」上,不是落在文本上。) */
+  const src = /function navFallback\(url\)\s*\{[\s\S]*?\n\}/.exec(sw);
+  assert.ok(src, 'sw.js 里必须能取出 navFallback 的定义');
+  const navFallback = new Function(src[0] + '; return navFallback;')();
+  assert.equal(navFallback('https://x/recover.html'), './recover.html',
+    'recover.html 的离线导航必须回到恢复页本身');
+  assert.equal(navFallback('https://x/recover.html?k=1'), './recover.html', '带查询串也要认得出来');
+  assert.equal(navFallback('https://x/'), './index.html', '其它路径才回主应用外壳');
+  assert.equal(navFallback('https://x/a/b'), './index.html');
+  // URL 解析不了时也必须兜底,不能抛
+  assert.equal(navFallback('::::'), './index.html');
+  assert.match(sw, /caches\.match\(navFallback\(/, '导航兜底必须走 navFallback(不能被绕过)');
+});
+
+test('P3:暗色主题不得用裸 .toast 规则压死 error/warn 配色', () => {
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  // 裸写是 0,3,0,会恒定覆盖 0,1,0 的 .toast-error/.toast-warn ⇒ 失败提示与普通提示同貌,
+  // --toast-error-fg / --toast-warn-fg 变成永远用不上的死代码。
+  assert.doesNotMatch(css, /:root\[data-theme="dark"\]\s*\.toast\s*\{/,
+    '暗色通用 toast 规则必须排除 .toast-error / .toast-warn(裸写会压死它们)');
+  // 逐条检查:每条暗色 toast 规则都必须显式排除 error/warn
+  // (不能要求 `:not(.toast-warn)` 紧跟 .toast —— 实际写法是 `:not(.toast-error):not(.toast-warn)`)
+  const darkRules = [...css.matchAll(/:root\[data-theme="dark"\]\s*\.toast[^{]*\{/g)].map((m) => m[0]);
+  assert.ok(darkRules.length > 0, '应当存在暗色主题的 toast 规则');
+  for (const rule of darkRules) {
+    assert.match(rule, /:not\(\.toast-error\)/, `这条暗色 toast 规则没排除 .toast-error:${rule}`);
+    assert.match(rule, /:not\(\.toast-warn\)/, `这条暗色 toast 规则没排除 .toast-warn:${rule}`);
+  }
+  // 无毛玻璃回落里那条同特异性的 .toast 也必须排除(否则同样压死)
+  const fallback = /@supports not \(\(backdrop-filter[\s\S]*?\n\}/.exec(css);
+  assert.ok(fallback, '应当存在无毛玻璃能力的回落块');
+  assert.doesNotMatch(fallback[0], /^\s*\.toast\s*\{/m,
+    '回落块里的裸 .toast(0,1,0)与 .toast-error 同特异性 —— 写在后面会覆盖它');
+});
+
+test('P3:两列图钉必须落在同一条竖线上(外距要补偿 padding-right 的差)', () => {
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  const pick = (re, label) => {
+    const m = re.exec(css);
+    assert.ok(m, `解析不出 ${label}`);
+    return Number(m[1]);
+  };
+  // 图钉竖线位置 = 行的 padding-right + 槽位的 margin-right(槽位定宽 15px,图标靠左)
+  const catPad = pick(/\.cat-item\s*\{[^}]*padding:\s*7px\s+(\d+)px/, '分类行的 padding-right');
+  const notePad = pick(/\.note-item\s*\{[^}]*padding:\s*7px\s+(\d+)px\s+7px/, '笔记行的 padding-right');
+  const catSlot = pick(/\.cat-item\s*\.pin-slot\s*\{\s*margin-right:\s*(\d+)px/, '分类列 .pin-slot 的 margin-right');
+  const noteSlot = pick(/\.note-item\s*\.pin-slot\s*\{\s*margin-right:\s*(\d+)px/, '笔记列 .pin-slot 的 margin-right');
+  assert.equal(catPad + catSlot, notePad + noteSlot,
+    `两列的图钉竖线必须一致:分类 ${catPad}+${catSlot} vs 笔记 ${notePad}+${noteSlot}`);
+});

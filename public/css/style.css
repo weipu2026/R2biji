@@ -36,8 +36,6 @@
   --code-bg: #f4f1e9;
   --radius: 6px;
   --radius-lg: 12px;
-  --shadow: 0 1px 2px rgba(60, 50, 30, .05);
-  --shadow-lg: 0 10px 30px rgba(60, 50, 30, .10);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, "Courier New", monospace;
   --serif: Georgia, "Noto Serif SC", "Source Han Serif SC", "STZhongsong", SimSun, serif;
   /* 锁屏背景的两团淡晕(纸感暖色 wash,几乎不可见) */
@@ -45,11 +43,9 @@
   --grad2: #f5f1e8;
   /* 结构分界线:分栏的 1px 实线,比发丝线重半档 */
   --edge: #dcd6c8;
-  --edge-shadow: 2px 0 6px rgba(60, 50, 30, .04);
   /* 焦点圈(键盘可达性的可见承诺) */
   --ring: 0 0 0 3px rgba(47, 90, 146, .15);
-  /* 玻璃层(strong 给文字密集面,普通给装饰面):隔着一层磨砂能透出底色 */
-  --glass: rgba(255, 255, 255, .72);
+  /* 玻璃层:隔着一层磨砂能透出底色(--glass-strong 给文字密集面) */
   --glass-strong: rgba(255, 255, 255, .84);
   --glass-border: rgba(255, 255, 255, .65);
   /* 阴影分层:近处一道锐影定边界,远处一片软影定悬浮高度 */
@@ -97,12 +93,8 @@
   --grad1: #262a33;
   --grad2: #191c22;
   --edge: #2e333c;
-  --edge-shadow: 2px 0 6px rgba(0, 0, 0, .3);
-  --shadow: 0 1px 2px rgba(0, 0, 0, .4);
-  --shadow-lg: 0 10px 30px rgba(0, 0, 0, .5);
   --ring: 0 0 0 3px rgba(127, 167, 217, .2);
   /* 暗色玻璃:墨蓝纸隔着磨砂透出来,不是纯黑压顶;白描边只留一线 */
-  --glass: rgba(30, 33, 40, .66);
   --glass-strong: rgba(35, 38, 46, .82);
   --glass-border: rgba(255, 255, 255, .09);
   --glass-shadow: 0 12px 40px rgba(0, 0, 0, .5);
@@ -132,7 +124,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 :root[data-theme="dark"] ::selection { background: rgba(127, 167, 217, .30); }
 
 /* 数字一律等宽:字数、日期、计数对齐不跳动 */
-.tabnum, .read-meta, .save-status, .cat-count {
+.read-meta, .save-status, .cat-count {
   font-variant-numeric: tabular-nums;
 }
 
@@ -297,11 +289,6 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .pw-hint.fair { color: var(--warn); }
 .pw-hint.strong { color: var(--ok); }
 
-.lock-actions {
-  display: flex; gap: 10px; margin-top: 14px;
-}
-.lock-actions.hidden-both { display: none; }
-
 .lock-loading {
   display: flex; align-items: center; justify-content: center; gap: 10px;
   color: var(--muted); font-size: 13px; padding: 6px 0 2px;
@@ -386,8 +373,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* 分类列加了上移/下移后与笔记列同形:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框),
  * 槽位右外距同为 34px ⇒ 两列的图钉落在同一条竖线上(2026-09-28) */
 .cat-item .pin-slot { margin-right: 34px; }
-/* 笔记列:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框)→ 右外距 34px */
-.note-item .pin-slot { margin-right: 34px; }
+/* 笔记列:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框)→ 右外距 34px。
+ * ⚠️ 要 +2px 补偿:图钉的竖线由「槽位右外距 + 行的 padding-right」共同决定 ——
+ *   .cat-item  是 padding: 7px 10px → 10 + 34 = 44px
+ *   .note-item 是 padding: 7px 8px 7px 10px → 8 + 36 = 44px
+ *   两边都写 34px 时笔记列的图钉会偏右 2px,两列不在同一条竖线上(2026-09-29 审计 P3,
+ *   与上面「两列同形」的注释相反 —— 注释当时没算上 padding-right 的差)。 */
+.note-item .pin-slot { margin-right: 36px; }
 
 /* 主密码框的显示/隐藏切换:输长密码时能核对一眼 */
 .pw-wrap { position: relative; }
@@ -638,6 +630,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* 置顶标识:标题后的图钉 + 轻底色,与普通项一眼可分 */
 /* 置顶图钉由 JS 插入 .pin-mark(单色 SVG),不用 emoji:CSS content 无法跟随主题换色 */
 .cat-item.pinned:not(.active), .note-item.pinned:not(.active) { background: var(--accent-weak); }
+/* ★ 置顶行的悬停反馈要单独补(2026-09-29 审计 P3):上面那条是 0,3,0,把 0,2,0 的
+ * `:hover{background:var(--hover)}` 压住了 —— 非置顶行悬停会变色、置顶行纹丝不动,
+ * 看起来像「这一行点不动」。逐组合提到 0,5,0 补回来(与卡片置顶光环被 hover 覆盖同族)。 */
+.cat-item.pinned:not(.active):hover, .note-item.pinned:not(.active):hover { background: var(--hover); }
 /* 操作按钮改绝对定位浮层:原来按钮虽 hover 才显形,却始终占位,
  * 把标题挤到只剩一百多像素;浮层不占位,标题拿回全宽 */
 .cat-btns {
@@ -1068,7 +1064,11 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   animation: toast-in .18s ease-out;
   max-width: 80vw;
 }
-:root[data-theme="dark"] .toast { background: rgba(236, 233, 225, .9); color: #1e2128; }
+/* ★ 必须排除 .toast-error / .toast-warn(2026-09-29 审计 P3):本条是 0,3,0,
+ * 而 .toast-error / .toast-warn 只有 0,1,0 —— 不排除的话暗色主题下失败/警告提示
+ * 被恒定改写成「普通提示」的外观,与成功提示长得一模一样;--toast-error-fg /
+ * --toast-warn-fg 也就永远用不上(成了死代码,而它们是刻意为暗色算过对比度的)。 */
+:root[data-theme="dark"] .toast:not(.toast-error):not(.toast-warn) { background: rgba(236, 233, 225, .9); color: #1e2128; }
 .toast-error { background: var(--danger); color: var(--toast-error-fg); }
 .toast-warn { background: var(--warn); color: var(--toast-warn-fg); }
 @keyframes toast-in {
@@ -1097,14 +1097,19 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     z-index: 80;
     width: min(300px, 84vw); min-width: 0;
     transform: translateX(-104%);
-    transition: transform .22s var(--ease);
+    /* 关闭态必须真的「不可达」(2026-09-29 审计 P3):只靠 transform 移出屏幕,元素仍在
+     * Tab 序里 —— 键盘用户按 Tab 会把焦点送进看不见的抽屉,再按几下全在屏幕外打转
+     * (表现为「Tab 失灵 / 焦点不见了」)。visibility:hidden 同时解决可达性与渲染;
+     * 与 transform 一起过渡 ⇒ 展开时立即可见,收起时等动画走完再隐藏。 */
+    visibility: hidden;
+    transition: transform .22s var(--ease), visibility .22s var(--ease);
     background: var(--glass-strong);
     backdrop-filter: blur(24px) saturate(1.35);
     -webkit-backdrop-filter: blur(24px) saturate(1.35);
     box-shadow: var(--glass-shadow);
     padding-top: env(safe-area-inset-top, 0px);
   }
-  .sidebar.open { transform: translateX(0); }
+  .sidebar.open { transform: translateX(0); visibility: visible; }
   .side-backdrop {
     position: fixed; inset: 0;
     background: rgba(38, 37, 31, .4);
@@ -1161,7 +1166,7 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
  * 老Firefox/关闭硬件加速时回落到近实色:效果没了,可用性不丢。 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   .lock-card, .search-panel, .modal { background: var(--panel); }
-  .toast { background: rgba(38, 37, 31, .97); }
-  :root[data-theme="dark"] .toast { background: rgba(236, 233, 225, .97); }
+  .toast:not(.toast-error):not(.toast-warn) { background: rgba(38, 37, 31, .97); }
+  :root[data-theme="dark"] .toast:not(.toast-error):not(.toast-warn) { background: rgba(236, 233, 225, .97); }
   .cat-btns, .note-btns, .blk-copy { background: var(--panel); }
 }

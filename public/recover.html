@@ -202,11 +202,35 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0;
 }
 
-async function inflateRaw(bytes) {
+/** 单个条目解压后的上限。
+ *  ★ zip bomb 防护(2026-09-29 审计 P3):zip 头里的 csize 是攻击者可控的,**解压后**
+ *    的体积可以膨胀上千倍 —— 几十 KB 的输入能解出 GB 级内容。原实现直接
+ *    `new Response(stream).arrayBuffer()`,等拿到长度时内存早就爆了(整页卡死/被系统杀掉),
+ *    而这发生在「应急恢复」场景:用户正拿它从损坏的库里抢救数据。
+ *    正常笔记库单章最多几十 KB,64MB 余量足够宽松;超限即中止,该条目按「解压失败」跳过。 */
+const MAX_INFLATE_BYTES = 64 * 1024 * 1024;
+
+async function inflateRaw(bytes, limit = MAX_INFLATE_BYTES) {
   const ds = new DecompressionStream('deflate-raw');
   const stream = new Blob([bytes]).stream().pipeThrough(ds);
-  const buf = await new Response(stream).arrayBuffer();
-  return new Uint8Array(buf);
+  // 逐块累加并**边解边查**:一次性 arrayBuffer() 拿不到「提前停」的机会
+  const reader = stream.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > limit) {
+      try { await reader.cancel(); } catch { /* 取消失败无所谓,已经不再读了 */ }
+      throw new Error(`解压后超过 ${Math.round(limit / 1024 / 1024)}MB,已中止(疑似 zip bomb)`);
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.length; }
+  return out;
 }
 
 /**

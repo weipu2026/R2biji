@@ -333,3 +333,23 @@ test('catMovePatch:未排过序时置顶分区内部也能动(分区判定先于
   assert.deepEqual(sortCats(['z', 'y', 'a'], m), ['y', 'z', 'a'], '前置:视觉顺序');
   assert.deepEqual(catMovePatch(['z', 'y', 'a'], m, 'z', -1), { y: 2000, z: 1000, a: 3000 });
 });
+
+/* ---------- 2026-09-29 审计 P3:清洗集必须与服务端拒绝集对齐 ----------
+ * 服务端 validCatName 还会拒 HTML 元字符 < > " 单引号 反引号 &,而客户端以前少收了
+ * 单引号/反引号/& 三个 —— 「R&D」「O'Brien」能通过客户端校验,要跑一个来回才被 400 拒,
+ * 用户只看到一句服务器错误。这里直接断言「清洗结果里不得残留服务端会拒的形态」。 */
+test('P3:清洗后的分类名不得残留服务端会拒的字符(客户端该提前剔掉)', () => {
+  const SERVER_REJECT = /[<>"'`&]/;   // 与 worker.js validCatName 的 HTML 元字符集一致
+  for (const raw of ['R&D', "O'Brien", 'a`b', 'a<b>', 'a"b', 'a\\b', 'a/b', 'a\tb', ' 空格 ']) {
+    const out = sanitizeCategoryName(raw);
+    if (out === null) continue;   // 清洗后为空 = 合法结果(调用方会提示「名字不能为空」)
+    assert.doesNotMatch(out, SERVER_REJECT, `「${raw}」清洗后仍是服务端会 400 拒的形态:「${out}」`);
+    assert.equal(out, out.trim(), `「${raw}」清洗后不得有首尾空白(服务端会拒)`);
+    assert.doesNotMatch(out, /[\u0000-\u001f]/, `「${raw}」清洗后不得残留控制字符`);
+  }
+  // 正对照:正常名字必须原样保留(证明不是「把所有名字都清空」)
+  assert.equal(sanitizeCategoryName('R and D'), 'R and D');
+  assert.equal(sanitizeCategoryName('秘钥'), '秘钥');
+  // 边界:整串都是非法字符 → null(而不是空串,空串会静默建出一个无名分类)
+  assert.equal(sanitizeCategoryName('&&&'), null);
+});

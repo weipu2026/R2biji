@@ -60,10 +60,16 @@ async function req(path, { method = 'GET', body = null, headers = {} } = {}) {
     throw new ApiError(after > 0 ? `请求过于频繁,请 ${after} 秒后再试` : '请求过于频繁,请稍后再试', 429, 'rate-limited');
   }
   if (res.status === 401) {
-    // 读一次响应体区分「访问密钥缺失」与「解锁令牌失效」
-    let code = '';
-    try { code = (await res.json()).error || ''; } catch { /* 非 JSON */ }
-    if (code === 'access-key') throw new ApiError('需要访问密钥', 401, 'access-key');
+    /* ★ 必须在这里读完响应体并当场构造错误(2026-09-29 审计 P3):
+     *   旧写法只读了 .error 就 return res,调用方随后走 errFrom(res) → 第二次 res.json()
+     *   抛「Body is unusable」(响应体只能读一次)被 catch 吞掉 ⇒ 服务端那句可读的 message
+     *   永远取不到,用户只看到千篇一律的「服务器错误(401)」。
+     *   code 与 status 语义保持不变:调用方靠 code=access-key 触发重输密钥、
+     *   靠 status=401 判定「令牌失效 → 回锁屏」。 */
+    let code = ''; let message = '';
+    try { const j = await res.json(); code = j.error || ''; message = j.message || ''; } catch { /* 非 JSON */ }
+    if (code === 'access-key') throw new ApiError(message || '需要访问密钥', 401, 'access-key');
+    throw new ApiError(message || '鉴权失败(令牌缺失或不正确)', 401, code || 'bad-token');
   }
   if (res.status === 503) {
     // 服务端 fail closed(未配置/过弱的 ACCESS_KEY):把服务端那句可操作的

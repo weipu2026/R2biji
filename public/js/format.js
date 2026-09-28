@@ -10,8 +10,13 @@ export const BACKUP_DIR = 'backup';
 export const IGNORE_NAME = 'seafile-ignore.txt';
 export const KEEP_BACKUPS_PER_CATEGORY = 10;
 
-/** 非法文件名字符(Windows/macOS/Linux 取并集)与控制字符 */
-const ILLEGAL_CHARS = /[/\\:*?"<>|\u0000-\u001f]/g;
+/** 非法文件名字符(Windows/macOS/Linux 取并集)与控制字符。
+ * ★ 必须与服务端 validCatName 的拒绝集**对齐**(2026-09-29 审计 P3):服务端还会拒
+ *   HTML 元字符 < > " ' ` &,而这里以前少收了 ' ` & 三个 —— 于是「R&D」「O'Brien」
+ *   能通过客户端校验、要在服务端跑一个来回才被 400 拒掉,用户只看到一句服务器错误。
+ *   两侧口径:客户端**预先剔除**(与 / \ : 等既有处理同一条纪律),服务端保留拒绝
+ *   作为兜底(它还要面对非本客户端的请求)。 */
+const ILLEGAL_CHARS = /[/\\:*?"<>|'&`\u0000-\u001f]/g;
 
 /**
  * 清洗分类名:去掉非法字符、压平空白、限长 60。

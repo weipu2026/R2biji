@@ -17,6 +17,8 @@ const CACHE = 'jmbiji-v18';
 const ASSETS = [
   './',
   './index.html',
+  // 应急恢复页:离线救灾时最需要它 —— 以前不在清单里,离线打开会落到主应用外壳
+  './recover.html',
   './css/style.css',
   './js/crypto.js',
   './js/format.js',
@@ -55,6 +57,18 @@ self.addEventListener('activate', (e) => {
   );
 });
 
+/** 离线导航兜底该取哪个页面。
+ *  ★ 以前一律回 index.html:离线打开 /recover.html(应急恢复页)会拿到主应用外壳,
+ *    用户以为「应急页也坏了」—— 而那正是最需要它的时刻(2026-09-29 审计 P3)。
+ *    按请求路径给对应页面,认不出来才回主应用。 */
+function navFallback(url) {
+  try {
+    const p = new URL(url).pathname;
+    if (p.endsWith('/recover.html')) return './recover.html';
+  } catch { /* URL 解析失败:按主应用兜底 */ }
+  return './index.html';
+}
+
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
@@ -71,7 +85,7 @@ self.addEventListener('fetch', (e) => {
       .catch(() =>
         // 网络失败(离线):回退缓存;导航请求再兜一层 SPA 外壳
         caches.match(e.request, { ignoreSearch: true })
-          .then((hit) => hit || (e.request.mode === 'navigate' ? caches.match('./index.html') : undefined)),
+          .then((hit) => hit || (e.request.mode === 'navigate' ? caches.match(navFallback(e.request.url)) : undefined)),
       ),
   );
 });

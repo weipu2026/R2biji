@@ -43,12 +43,24 @@ function freshEnv() { env = { VAULT: new MemoryR2(), ALLOW_NO_ACCESS_KEY: '1' };
 function fakeRes(out) {
   const raw = out.body;
   const headers = new Map(Object.entries(out.headers || {}));
+  /* ★ 必须复刻真实 Response 的「响应体只能读一次」语义(2026-09-29):
+   *   真实 fetch 的 Response 第二次 json()/arrayBuffer() 会抛
+   *   `TypeError: Body is unusable`,而旧 mock 每次都能读 —— 于是
+   *   「req() 读一次判 access-key、errFrom(res) 又读一次」这条真缺陷
+   *   在离线测试里完全看不出来(2026-09-29 审计 P3 就是靠这条 mock 分叉漏掉的)。
+   *   mock 与真实服务的语义分叉是最危险的一类假绿:被测代码错、断言照样绿。 */
+  let used = false;
+  const once = () => {
+    if (used) throw new TypeError('Body is unusable: Body has already been read');
+    used = true;
+  };
   return {
     ok: out.status >= 200 && out.status < 300,
     status: out.status,
+    get bodyUsed() { return used; },
     headers: { get: (k) => headers.get(String(k).toLowerCase()) ?? null },
-    json: async () => JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw ?? new Uint8Array())),
-    arrayBuffer: async () => (raw instanceof Uint8Array ? raw.slice().buffer : te.encode(String(raw ?? '')).buffer),
+    json: async () => { once(); return JSON.parse(typeof raw === 'string' ? raw : new TextDecoder().decode(raw ?? new Uint8Array())); },
+    arrayBuffer: async () => { once(); return (raw instanceof Uint8Array ? raw.slice().buffer : te.encode(String(raw ?? '')).buffer); },
   };
 }
 
@@ -622,4 +634,78 @@ test('★ refreshVaultMeta:跨标签页必须看到别处的置顶与顺序', as
   assert.equal(await b.refreshVaultMeta(), true, 'refreshVaultMeta 成功');
   assert.equal(b.catPin('c'), true, '★ 刷新后必须看到 A 的置顶');
   assert.equal(b.sortedCategories()[0], 'c', '★ 视觉顺序也跟着变(置顶优先)');
+});
+/* ---------- 2026-09-29 审计 P2-7:错误要分「瞬时」与「永久」 ----------
+ * 旧实现把网络错误也写进 cat.error,而 loadAllCategories 只在 !cat.error 时重试 ⇒
+ * 一次网络抖动就把分类**永久**标成「无法解密」,网络恢复后永不重试,
+ * 孤儿图片清理也被长期锁死(那是全应用唯一不可恢复的删除,锁死 = 永远清不了)。
+ * 用「另一台设备上从未解密过的分类」制造 data=null 的冷启动态(第一版探针用本机
+ * 已解密的分类,loadCategory 命中缓存压根不发请求 → 假红)。 */
+test('P2-7:一次网络抖动不得把分类永久标成「无法解密」,恢复后必须能重试', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('测试密码abc', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await a.rescan();
+  await a.createCategory('甲');
+
+  // 设备 B:清单里有「甲」但从未解密过(data=null)—— 冷启动看到的样子
+  const b = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await b.rescan();
+  assert.equal(b.categoryInfo('甲').data, null, '前置:B 手上没有明文');
+
+  // ---- 断网:只让读分类的请求炸,其余照旧 ----
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    const u = String(typeof input === 'string' ? input : input.url);
+    if (u.includes('/api/cat?')) throw new TypeError('Failed to fetch');
+    return realFetch(input, init);
+  };
+  await assert.rejects(() => b.loadCategory('甲'), '断网时必须如实抛错,不能假装成功');
+  let info = b.categoryInfo('甲');
+  assert.equal(info.data, null);
+  assert.equal(info.error, null, '瞬时网络错误绝不能写成永久的「无法解密」(旧实现会,并因此永不重试)');
+  assert.ok(info.transient, '瞬时错误要记在 transient 上,供 UI 提示「上次读取失败」');
+
+  // ---- 网络恢复:loadAllCategories 必须真的重试 ----
+  globalThis.fetch = realFetch;
+  await b.loadAllCategories();
+  info = b.categoryInfo('甲');
+  assert.ok(info.data, '网络恢复后必须重新拉到数据(旧实现被 cat.error 永久挡住)');
+  assert.equal(info.transient, null, '成功后 transient 必须清掉');
+
+  // ---- 反面:真损坏(解不开)仍必须标永久错误 ----
+  // 否则「一律不写 error」也能让上面每条通过 —— 那是把功能整个关掉。
+  await env.VAULT.put('cats/坏.enc', new Uint8Array([1, 2, 3, 4, 5]));
+  await b.rescan();
+  await assert.rejects(() => b.loadCategory('坏'));
+  assert.ok(b.categoryInfo('坏').error, '密文损坏必须仍是永久错误 —— 侧栏要显示「无法解密」');
+  assert.equal(b.categoryInfo('坏').transient ?? null, null, '永久错误不该同时记 transient');
+});
+
+/* ---------- 2026-09-29 审计 P3:401 必须带上服务端给的可读消息 ----------
+ * 旧实现在 req() 里读了一次响应体来判 access-key,却不抛错 —— 调用方随后走
+ * errFrom(res) 再读一次,Response 只能读一次 ⇒ 抛「Body is unusable」被吞掉,
+ * 用户只看到千篇一律的「服务器错误(401)」。 */
+test('P3:401 必须带上服务端消息与 bad-token 码(响应体只读一次)', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json } = await V.createVault('测试密码abc', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken('0'.repeat(64));   // 结构合法但不匹配的令牌
+  let err = null;
+  try { await API.listCats(); } catch (e) { err = e; }
+  assert.ok(err, '错误令牌必须抛错');
+  assert.equal(err.status, 401);
+  assert.equal(err.code, 'bad-token', '码必须保留(调用方靠 status=401 判「令牌失效 → 回锁屏」)');
+  // ★ 必须校验服务端**原文**里的特征片段,不能只 match /鉴权失败/ ——
+  //   api.js 的兜底文案恰好也是「鉴权失败(…)」,于是把服务端消息整段丢掉也照样绿
+  //   (2026-09-29 反向探针实测:变异成 throw new ApiError('鉴权失败', …) 时该断言不红)。
+  assert.match(err.message, /鉴权失败/, '消息要可读');
+  assert.match(err.message, /令牌缺失或不正确/,
+    '必须原样带出服务端的可读消息:旧实现二次读体会让它退化成通用文案(「服务器错误(401)」)');
 });
