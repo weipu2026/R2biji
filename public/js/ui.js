@@ -65,6 +65,8 @@ const ICON = {
   upload: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></svg>',
   broom: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m7 21-4.3-4.3c-1-1-1-2.5 0-3.4l9.6-9.6c1-1 2.5-1 3.4 0l5.6 5.6c1 1 1 2.5 0 3.4L13 21"/><path d="M22 21H7"/><path d="m5 11 9 9"/></svg>',
   trash2: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>',
+  code: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>',
+  list: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 6h13"/><path d="M8 12h13"/><path d="M8 18h13"/><path d="M3 6h.01"/><path d="M3 12h.01"/><path d="M3 18h.01"/></svg>',
   sparkle: '<svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2 14.4 9.6 22 12l-7.6 2.4L12 22l-2.4-7.6L2 12l7.6-2.4Z"/></svg>',
   check: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>',
   eyeOff: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 3 18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.9 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2"/><path d="M6.2 6.2A17.6 17.6 0 0 0 2 12s3.5 7 10 7c1.2 0 2.3-.2 3.3-.6"/></svg>',
@@ -246,7 +248,12 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
 
     const h = document.createElement('h3');
     h.textContent = title;
+    /* 可访问名(2026-09-29 审计 P3):把 <dialog> 与标题关联 —— 读屏器打开弹窗时
+     * 先播报标题,而不是只报一句「对话框」。#modalTitle 是静态 id:全应用复用同一个
+     * <dialog>,所以每次都要重设一次(标题内容会变)。 */
+    h.setAttribute('id', 'modalTitle');
     body.appendChild(h);
+    dlg.setAttribute('aria-labelledby', 'modalTitle');
 
     let input = null; let input2 = null;
     if (type === 'prompt') {
@@ -256,6 +263,8 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
       input.value = value;
       if (password) input.type = 'password';
       if (label) input.placeholder = label;
+      // placeholder **不算**可访问名(读屏器不播报它)—— 必须显式给一个(2026-09-29 审计 P3)
+      input.setAttribute('aria-label', label || title || '输入');
       body.appendChild(input);
     } else if (type === 'confirm') {
       const p = document.createElement('p');
@@ -517,9 +526,21 @@ async function handleConflict(name) {
   const cat = S.lib.categoryInfo(name);
   if (choice === 'mine') {
     try {
-      await S.lib.saveCategory(name, { force: true });
-      S.tabs?.send({ type: 'cat-saved', name });
-      toast(`「${name}」已用本地版本覆盖(云端旧版已备份)`);
+      const r = await S.lib.saveCategory(name, { force: true });
+      /* ★ 必须看返回值(2026-09-29 审计 P2-9):saveCategory 在「没有内存数据」时返回
+       *   {skipped:true}、在「云端刚又被改/已被删」时返回 {conflict:true} —— 两种都**不抛错**。
+       *   旧写法丢弃返回值:覆盖其实没发生,却弹了绿字「已覆盖」;而 saveAll 早在弹窗前
+       *   就把它移出了待保存队列 ⇒ 改动**静默脱离保存流程**(违反 DESIGN「绝不静默覆盖」)。
+       *   失败一律放回待保存队列并如实报错,与 catch 分支同一条纪律。 */
+      if (r?.ok) {
+        S.tabs?.send({ type: 'cat-saved', name });
+        toast(`「${name}」已用本地版本覆盖(云端旧版已备份)`);
+      } else {
+        S.markDirty(name);
+        toast(r?.conflict
+          ? `「${name}」云端版本又变了,本次覆盖未生效;已放回待保存列表,请重试`
+          : `「${name}」没有可覆盖的本地数据;已放回待保存列表`, 'error');
+      }
     } catch (e) {
       // 覆盖失败必须把该分类放回待保存队列:saveAll 在弹冲突前已把它移出,
       // 这里若吞掉,改动会永久脱离保存队列、锁定/刷新后无提示丢失
@@ -528,7 +549,7 @@ async function handleConflict(name) {
     }
   } else if (choice === 'disk') {
     // 丢弃内存改动,重读云端
-    cat.data = null; cat.lastSeenEtag = null; cat.error = null;
+    cat.data = null; cat.lastSeenEtag = null; cat.error = null; cat.transient = null;
     S.clearDirty(name); // 本地已无未保存改动,别让「未保存」标记一直挂着
     if (S.activeCat === name) {
       await openCategory(ctx, name);
@@ -568,7 +589,7 @@ function onTabMessage(msg) {
     }
     void (async () => {
       const cat = S.lib.categoryInfo(msg.name);
-      cat.data = null; cat.lastSeenEtag = null; cat.error = null;
+      cat.data = null; cat.lastSeenEtag = null; cat.error = null; cat.transient = null;
       // ★ 必须 await 重载成功后再报喜,否则加载失败时用户会同时看到
       //   绿色「已载入最新版本」+ 红色「分类无法打开」两条矛盾 toast
       //   (2026-09-27 审计 P3-6;与 handleConflict 的 disk 分支同款时序)
@@ -616,6 +637,12 @@ async function enterApp() {
   $('searchBox').value = '';
   $('searchPanel').hidden = true;
   renderCategoryList(ctx);
+  /* ★ 进应用 = 锁屏态结束,必须显式复位 lockMode。
+   *   store.js 的契约写的是「进应用后为 null」,但此前**只有 showLock 会写这个字段,
+   *   没有任何地方清过它** —— 于是 2026-09-29 加的 P3 全局快捷键守卫
+   *   (lockMode 非空就整类 return)会让解锁一次之后 Ctrl+K / Ctrl+S / Ctrl+Enter /
+   *   J/K / Alt+↑↓ **全部永久失效**。真机 S0【14】的 Ctrl+K / Alt+↓ 正对照当场抓到。 */
+  S.lockMode = null;
   S.activeCat = null;
   S.activeNoteId = null;
   S.editing = false;
@@ -884,4 +911,7 @@ function closeDrawer() {
 /** 组装好的注入包:交给 features/shell.js 的 start() 用。
  *  ⚠️ 导出的是**原始 store**(在 ctx.store 上),不是本文件那个 Proxy S ——
  *     外部(含所有 feature)一律用 ctx.store.get('x') 读,属性赋值写。 */
-export { ctx };
+/* 导出 handleConflict 仅为了可测:它「按 saveCategory 返回值分流」的判定写错了
+ * 也不会有任何报错,只会静默失效(2026-09-29 审计 P2-9:覆盖失败仍弹绿字、
+ * 改动静默脱离保存队列)。tests/dialog.test.mjs 钉住这条分流。 */
+export { ctx, handleConflict };

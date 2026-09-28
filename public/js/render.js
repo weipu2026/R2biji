@@ -48,6 +48,14 @@ export function renderInline(parent, text) {
       const span = document.createElement('span');
       span.className = 'secret masked';
       span.title = '点击显示 / 再点隐藏(30 秒无操作自动遮回)';
+      /* 键盘可达(2026-09-29 审计 P3):这个可点区域以前只认鼠标 —— 键盘用户既看不见
+       * 值、也拿不到自己的密码,而 title 还写着「点击显示」。进 Tab 序 + 按钮语义,
+       * Enter/空格 的处理器在 shell.js(与鼠标点击共用同一条切换逻辑)。
+       * ⚠️ aria-label 用中性文案:可访问名里绝不能带上真值本身。 */
+      span.setAttribute('tabindex', '0');
+      span.setAttribute('role', 'button');
+      span.setAttribute('aria-expanded', 'false');
+      span.setAttribute('aria-label', '敏感内容,按回车显示或隐藏');
 
       const raw = document.createElement('span');
       raw.className = 'secret-raw';

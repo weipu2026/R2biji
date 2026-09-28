@@ -270,3 +270,19 @@ test('highlightInto:大小写不敏感、多命中、拼接无损', () => withDo
   assert.equal(marks[1]._text, 'abc');
   assert.equal(parent.textContent, 'AbC abc XYZ');
 }));
+
+/* 2026-09-29 审计 P3:敏感行此前只有 click 一条路,键盘用户既看不到值、也拿不到自己的密码。
+ * 这里把「可聚焦 + 能向读屏器表达状态」钉成渲染契约 —— 删掉任一属性即翻红。
+ * ⚠️ 可访问名绝不能带上真值本身(读屏器会把密码念出来)。 */
+test('P3:敏感行必须可聚焦并能向读屏器表达状态(tabindex/role/aria-expanded/aria-label)', () => withDom(() => {
+  const parent = new FakeNode('p');
+  renderInline(parent, 'root 密码:Jm8#vQ2x');
+  const span = parent.children.find((c) => c.className === 'secret masked');
+  assert.ok(span, '前置:敏感行确实被包成 .secret.masked');
+  assert.equal(span.getAttribute('tabindex'), '0', '不在 Tab 序里 → 键盘用户永远够不到它');
+  assert.equal(span.getAttribute('role'), 'button', '要能被当按钮激活');
+  assert.equal(span.getAttribute('aria-expanded'), 'false', '初始必须是「已遮罩」');
+  const label = span.getAttribute('aria-label');
+  assert.ok(label && label.length > 0, '必须有无障碍名(svg/title 都不算)');
+  assert.ok(!label.includes('Jm8#vQ2x'), '可访问名里绝不能带上真值本身');
+}));

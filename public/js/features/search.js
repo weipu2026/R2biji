@@ -41,6 +41,10 @@ export async function runSearch(ctx) {
   panel.appendChild(head);
   const ul = document.createElement('ul');
   ul.className = 'search-list';
+  /* role=option 的条目必须有 listbox 父级才成立(2026-09-29 审计 P3):以前 ul 没有角色,
+   * 读屏器拿到一串「选项」却不知道它们属于哪个列表、也不知道共几条。 */
+  ul.setAttribute('role', 'listbox');
+  ul.setAttribute('aria-label', '搜索结果');
   for (const r of results.slice(0, 50)) {
     const li = renderSearchResult(r, q);
     ctx.clickable(li, () => {

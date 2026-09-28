@@ -46,10 +46,33 @@ export function clickable(el, fn) {
   });
 }
 
+/**
+ * 整表重建后把键盘焦点还回去(2026-09-29 审计 P3)。
+ *
+ * 上移 / 下移 / 置顶 / 切笔记都会**整表重建**列表 —— 不还焦点的话,键盘用户按一次回车,
+ * 焦点就掉回 body,想连按两次「下移」得重新 Tab 一路找回来(视觉上像「按钮只灵一次」)。
+ *
+ * 键存的是**语义标识**(cat-up:名字 / note:noteId),不是行号 —— 移动后行号变了、标识不变。
+ * ⚠️ 两个函数都按「DOM 替身 / 老浏览器可能缺方法」写:缺方法就静默不动,
+ *    绝不能让一个无障碍增强把渲染链打断(离线替身 FakeNode 就没有 contains)。
+ */
+function captureFocusKey(ul) {
+  const a = document.activeElement;
+  if (!a || typeof ul.contains !== 'function' || !ul.contains(a)) return null;
+  return a.dataset?.focusKey || null;
+}
+function restoreFocusKey(ul, key) {
+  if (!key) return;
+  const el = typeof ul.querySelector === 'function' ? ul.querySelector(`[data-focus-key="${key}"]`) : null;
+  if (el && typeof el.focus === 'function') el.focus();
+}
+
 export function renderCategoryList(ctx) {
   const S = ctx.store;
   const $ = (id) => ctx.dom.byId(id);
   const ul = $('catList');
+  // 必须在清空**之前**取:清空那一刻焦点就掉回 body 了
+  const keepFocus = captureFocusKey(ul);
   ul.textContent = '';
   ul.setAttribute('role', 'listbox');
   ul.setAttribute('aria-label', '分类列表');
@@ -67,6 +90,7 @@ export function renderCategoryList(ctx) {
     const li = document.createElement('li');
     li.className = 'cat-item' + (name === activeCat ? ' active' : '');
     li.classList.toggle('pinned', pinned);
+    li.dataset.focusKey = `cat:${name}`;
     if (info?.conflict) li.classList.add('warn');
     if (info?.error) li.classList.add('broken');
     // 选中态同步到可访问名:读屏器由此知道「当前打开的是哪个分类」
@@ -76,7 +100,9 @@ export function renderCategoryList(ctx) {
     label.className = 'cat-name';
     label.textContent = name;
     label.title = info?.conflict ? '疑似同步冲突副本,请核对内容后处理'
-      : info?.error ? `无法解密:${info.error}` : name;
+      : info?.error ? `无法解密:${info.error}`
+        // 瞬时失败(网络/5xx)只作提示,不标 broken —— 它下次会自己重试好(2026-09-29 P2-7)
+        : info?.transient ? `上次读取失败:${info.transient}(点开可重试)` : name;
     li.appendChild(label);
 
     /* 笔记篇数徽章:规模一眼可见,不用逐个点开数。
@@ -138,12 +164,14 @@ export function renderCategoryList(ctx) {
     upBtn.title = '上移';
     upBtn.setAttribute('aria-label', '上移'); // svg 带 aria-hidden,title 不作可访问名
     upBtn.innerHTML = ctx.icons.up;
+    upBtn.dataset.focusKey = `cat-up:${name}`;
     upBtn.addEventListener('click', (e) => { e.stopPropagation(); move(-1); });
     const downBtn = document.createElement('button');
     downBtn.className = 'icon-btn';
     downBtn.title = '下移';
     downBtn.setAttribute('aria-label', '下移');
     downBtn.innerHTML = ctx.icons.down;
+    downBtn.dataset.focusKey = `cat-down:${name}`;
     downBtn.addEventListener('click', (e) => { e.stopPropagation(); move(1); });
     const pinBtn = document.createElement('button');
     pinBtn.className = 'icon-btn';
@@ -151,6 +179,7 @@ export function renderCategoryList(ctx) {
     // svg 图标带 aria-hidden="true",title 又不算可访问名 → 必须显式给 aria-label,
     // 否则读屏器只播报「按钮」(2026-09-27 审计 P3-4)
     pinBtn.setAttribute('aria-label', pinBtn.title);
+    pinBtn.dataset.focusKey = `cat-pin:${name}`;
     pinBtn.innerHTML = ctx.icons.pin;
     pinBtn.addEventListener('click', async (e) => {
       e.stopPropagation();
@@ -175,6 +204,7 @@ export function renderCategoryList(ctx) {
     li.textContent = '暂无分类,点上方 + 新建';
     ul.appendChild(li);
   }
+  restoreFocusKey(ul, keepFocus);
 }
 
 /** 打开分类的序号守卫:慢请求后到不得覆盖用户后选的分类。
@@ -292,6 +322,7 @@ export function renderNoteList(ctx) {
   const S = ctx.store;
   const $ = (id) => ctx.dom.byId(id);
   const ul = $('noteList');
+  const keepFocus = captureFocusKey(ul);
   ul.textContent = '';
   ul.setAttribute('role', 'listbox');
   ul.setAttribute('aria-label', '笔记列表');
@@ -318,6 +349,7 @@ export function renderNoteList(ctx) {
     li.className = 'note-item' + (note.id === activeNoteId ? ' active' : '');
     li.classList.toggle('pinned', note.pin === true);
     li.setAttribute('aria-selected', note.id === activeNoteId ? 'true' : 'false');
+    li.dataset.focusKey = `note:${note.id}`;
 
     const main = document.createElement('div');
     main.className = 'note-main';
@@ -349,17 +381,20 @@ export function renderNoteList(ctx) {
     upBtn.title = '上移';
     upBtn.setAttribute('aria-label', '上移'); // svg 带 aria-hidden,title 不作可访问名
     upBtn.innerHTML = ctx.icons.up;
+    upBtn.dataset.focusKey = `note-up:${note.id}`;
     upBtn.addEventListener('click', (e) => { e.stopPropagation(); ctx.moveNote(note.id, -1); });
     const downBtn = document.createElement('button');
     downBtn.className = 'icon-btn';
     downBtn.title = '下移';
     downBtn.setAttribute('aria-label', '下移');
     downBtn.innerHTML = ctx.icons.down;
+    downBtn.dataset.focusKey = `note-down:${note.id}`;
     downBtn.addEventListener('click', (e) => { e.stopPropagation(); ctx.moveNote(note.id, 1); });
     const pinBtn = document.createElement('button');
     pinBtn.className = 'icon-btn';
     pinBtn.title = note.pin ? '取消置顶' : '置顶';
     pinBtn.setAttribute('aria-label', pinBtn.title);
+    pinBtn.dataset.focusKey = `note-pin:${note.id}`;
     pinBtn.innerHTML = ctx.icons.pin;
     pinBtn.addEventListener('click', (e) => { e.stopPropagation(); ctx.toggleNotePin(note.id); });
     btns.append(upBtn, downBtn, pinBtn);
@@ -374,6 +409,7 @@ export function renderNoteList(ctx) {
     li.textContent = '暂无笔记';
     ul.appendChild(li);
   }
+  restoreFocusKey(ul, keepFocus);
 }
 
 export function openNote(ctx, noteId) {

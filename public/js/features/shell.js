@@ -114,6 +114,13 @@ function bindEvents(ctx) {
   $('btnImport').innerHTML = ICON.upload;
   $('btnCleanBlobs').innerHTML = ICON.broom;
   $('btnDelCat').innerHTML = ICON.trash2;
+  /* 编辑器工具条的「行内代码 / 列表行」:以前是 ‹› 与 ≡ 两个 Unicode 字形 ——
+   * 字形随系统字体变、与描边图标体系不是一套质感,且违反「符号只走 SVG」的既定口径。
+   * 这两个按钮在 HTML 里没有 id,用 data 属性定位(与事件委托同一套选择器)。 */
+  const edCodeBtn = document.querySelector('#edTools [data-wrap="`"]');
+  if (edCodeBtn) edCodeBtn.innerHTML = ICON.code;
+  const edListBtn = document.querySelector('#edTools [data-prefix="- "]');
+  if (edListBtn) edListBtn.innerHTML = ICON.list;
   $('pwToggle').addEventListener('click', () => {
     const inp = $('pwInput');
     const show = inp.type === 'password';   // 当前是遮挡态 → 本次要显形
@@ -243,12 +250,28 @@ function bindEvents(ctx) {
   // 随机密码生成器(ed-tools 里的 pw 按钮,不走 wrap/prefix 委托)
   document.querySelector('#edTools [data-genpw]')?.addEventListener('click', () => ctx.openPwGenerator());
   // 敏感行:点击显形 / 遮回;显形 30 秒后自动遮回
-  $('readBody').addEventListener('click', (e) => {
-    const t = e.target.closest('.secret');
-    if (!t) return;
+  /* 敏感行:点击显形 / 遮回;显形 30 秒后自动遮回。
+   * ★ 切换逻辑抽出来供鼠标与键盘共用(2026-09-29 审计 P3:此前只有 click,
+   *   键盘用户既看不到值、也拿不到自己的密码,而 title 还写着「点击显示」)。
+   *   同步 aria-expanded,读屏器才能播报「已展开/已收起」。 */
+  const toggleSecret = (t) => {
     const masked = t.classList.toggle('masked');
     clearTimeout(t._remask);
     if (!masked) t._remask = setTimeout(() => t.classList.add('masked'), 30000);
+    if (typeof t.setAttribute === 'function') t.setAttribute('aria-expanded', String(!masked));
+  };
+  $('readBody').addEventListener('click', (e) => {
+    const t = e.target instanceof Element ? e.target.closest('.secret') : null;
+    if (!t) return;
+    toggleSecret(t);
+  });
+  $('readBody').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const t = e.target instanceof Element ? e.target.closest('.secret') : null;
+    // 只认「事件源就是敏感行本身」:行内将来若有别的可聚焦元素,别抢它的键
+    if (!t || e.target !== t) return;
+    e.preventDefault();
+    toggleSecret(t);
   });
 
   $('editTitle').addEventListener('input', () => ctx.collectEditChanges());
@@ -266,6 +289,14 @@ function bindEvents(ctx) {
   });
 
   document.addEventListener('keydown', (e) => {
+    /* ★ 全局快捷键只在「已进入应用、且没有遮挡」时接管(2026-09-29 审计 P3):
+     *   · 锁屏 / 建库 / 加载态(lockMode 非空,见 store.js):库还没解锁,
+     *     任何快捷键都不该有反应 —— 以前锁屏按 Ctrl+K 会点亮搜索框、J/K 还会切笔记;
+     *   · 模态框打开:弹窗正等用户选择,此时切笔记 / 存盘只会把上下文带跑
+     *     (模态框自己的 Enter/Esc 走 dialog 的原生行为,不受这里影响)。
+     *   放在最前面整类放行,而不是逐个分支各自判 —— 后面新增快捷键不会再漏。 */
+    if (ctx.store.get('lockMode')) return;
+    if (document.querySelector('dialog[open]')) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
       ctx.saveAll();
@@ -288,7 +319,9 @@ function bindEvents(ctx) {
       ctx.exitEditMode();
     }
     // J / K(或 Alt+↓ / Alt+↑)= 读态切换下一条 / 上一条
-    const altDown = e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp');
+    // ★ 必须放行带 ctrl/meta 的组合(2026-09-29 审计 P3):Alt+Ctrl+↓、⌘+Alt+↑ 这类
+    //   是系统/浏览器级组合键,以前只要 altKey 为真就接管,等于从它们手里抢按键
+    const altDown = e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp');
     const jk = !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey && (e.key === 'j' || e.key === 'K' || e.key === 'k' || e.key === 'J');
     if (jk || altDown) {
       const down = altDown ? e.key === 'ArrowDown' : (e.key === 'j' || e.key === 'J');

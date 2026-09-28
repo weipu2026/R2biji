@@ -70,7 +70,9 @@
       <div class="search-wrap">
         <input id="searchBox" type="search" placeholder="搜索标题与正文…(Ctrl+K)" aria-label="搜索标题与正文" autocomplete="off">
       </div>
-      <span id="saveStatus" class="save-status" data-kind="ok">–</span>
+      <!-- 初始为空:以前这里放一个 en dash 字形做占位,与「图标/符号只走 SVG」的口径冲突。
+         状态栏本身是定宽 96px,空着也不会让右侧按钮跳动。 -->
+      <span id="saveStatus" class="save-status" data-kind="ok"></span>
       <button id="btnTheme" class="top-theme" title="切换为深色" aria-label="切换为深色"></button>
       <button id="btnLock" class="btn small" title="锁定并清除本机密钥" aria-label="锁定">锁定</button>
     </header>
@@ -148,8 +150,9 @@
             <button type="button" class="ed-btn" data-prefix="### " title="三级标题(小字)" aria-label="三级标题">H3</button>
             <span class="ed-sep" aria-hidden="true"></span>
             <button type="button" class="ed-btn" data-wrap="==" title="高亮" aria-label="高亮">H</button>
-            <button type="button" class="ed-btn" data-wrap="`" title="行内代码" aria-label="行内代码">‹›</button>
-            <button type="button" class="ed-btn" data-prefix="- " title="列表行" aria-label="列表行">≡</button>
+            <!-- 图标由 shell.js 用 ICON.code / ICON.list 注入(HTML 里零 <svg>、零 Unicode 装饰符) -->
+            <button type="button" class="ed-btn" data-wrap="`" title="行内代码" aria-label="行内代码"></button>
+            <button type="button" class="ed-btn" data-prefix="- " title="列表行" aria-label="列表行"></button>
             <span class="ed-sep" aria-hidden="true"></span>
             <button type="button" class="ed-btn" data-genpw title="随机密码生成器" aria-label="随机密码生成器">pw</button>
           </div>
@@ -171,7 +174,9 @@
   </div>
 
   <dialog id="modal" class="modal"><div id="modalBody"></div></dialog>
-  <div id="toasts"></div>
+  <!-- toast 是异步状态提示(保存失败 / 清理中止 / 覆盖未生效):不给 aria-live 的话
+       读屏用户完全听不到任何反馈(2026-09-29 审计 P3) -->
+  <div id="toasts" aria-live="polite" aria-atomic="false"></div>
 
   <script type="module" src="js/main.js"></script>
 </body>

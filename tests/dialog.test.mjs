@@ -11,7 +11,8 @@
  * ============================================================ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modal } from '../public/js/ui.js';
+import { modal, handleConflict } from '../public/js/ui.js';
+import { store } from '../public/js/store.js';
 
 function installDom() {
   const byId = new Map();
@@ -25,6 +26,8 @@ function installDom() {
       value: '',
       type: '',
       placeholder: '',
+      hidden: false,
+      dataset: {},
       shown: false,
       closed: false,
       open: false,
@@ -38,7 +41,12 @@ function installDom() {
       },
       click() { for (const fn of [...(e.handlers.click || [])]) fn({}); },
       keydown(key) { for (const fn of [...(e.handlers.keydown || [])]) fn({ key }); },
-      focus() {}, select() {},
+      focus() {}, select() {}, remove() {},
+      // 真实 DOM 都有这两个 —— 无障碍属性(dialog aria-labelledby / input aria-label)
+      // 只在 setAttribute 上生效,替身缺了会把「属性没设」掩盖成「测试崩了」
+      attrs: {},
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      getAttribute(k) { return this.attrs[k] ?? null; },
       showModal() { e.shown = true; e.open = true; },
       // ★ close() 派发 close 事件,而且**异步**(排队到下个 task)——与真浏览器一致:
       //   按钮路径先 settle,close 晚到被 settled 挡住;同步派发会破坏这个顺序
@@ -60,8 +68,14 @@ function installDom() {
   const body = make('div');
   byId.set('modal', dlg);
   byId.set('modalBody', body);
+  // handleConflict 会真的 toast + 刷状态栏:这两个容器必须存在,否则 TypeError 会把
+  // 「分流写错」掩盖成「测试自己崩了」
+  const toasts = make('div');
+  const saveStatus = make('span');
+  byId.set('toasts', toasts);
+  byId.set('saveStatus', saveStatus);
   globalThis.document = { createElement: make, getElementById: (id) => byId.get(id) || null };
-  return { dlg, body };
+  return { dlg, body, toasts, saveStatus };
 }
 
 /** 深度收集后代元素 */
@@ -205,4 +219,70 @@ test('★ 连续两次 modal:第二个弹窗不得被第一个排队的 close �
 
   btn(body, '确定').click();
   assert.equal(await p2, 'first-strong-password', '用户在第二问点确定 → 必须返回输入值');
+});
+/* ---------------- 2026-09-29 审计 P2-9:覆盖失败绝不能弹绿字 ----------------
+ * saveCategory({force:true}) 在「没有内存数据」时返回 {skipped:true}、在「云端刚又被改」
+ * 时返回 {conflict:true} —— 两种都**不抛错**。旧实现丢弃返回值:覆盖没发生却弹绿字,
+ * 而 saveAll 早在弹窗前就把它移出待保存队列 ⇒ 改动静默脱离保存流程。
+ * 正反对照:失败必须红字 + 重新入队;成功才是绿字 + 不入队(否则「一律报错」也能通过)。 */
+test('P2-9:覆盖未生效({conflict:true})→ 必须报错并放回待保存队列', async () => {
+  const dom = installDom();
+  store.clearDirty('甲');
+  const catStub = { data: { notes: [] }, lastSeenEtag: 'e1' };
+  const saved = [];
+  store.set('lib', {
+    categoryInfo: () => catStub,
+    saveCategory: async (name, opt) => { saved.push({ name, opt }); return { conflict: true }; },
+  });
+  const p = handleConflict('甲');
+  const b = btn(dom.body, '用我的版本覆盖');
+  assert.ok(b, '冲突弹窗必须有「用我的版本覆盖」按钮');
+  b.click();
+  await p;
+  assert.equal(saved.length, 1, '必须真的尝试覆盖一次');
+  assert.equal(saved[0].opt?.force, true, '覆盖必须走 force(以云端当前版本为基线)');
+  const last = dom.toasts.children[dom.toasts.children.length - 1];
+  assert.ok(last, '必须给用户提示');
+  assert.ok(String(last.className).includes('toast-error'), '覆盖没生效必须报错,不能弹绿字「已覆盖」');
+  assert.equal(store.get('dirty').has('甲'), true, '覆盖失败必须重新入队,否则改动静默脱离保存流程');
+});
+
+test('P2-9 正对照:覆盖成功({ok:true})→ 绿字且不入队', async () => {
+  const dom = installDom();
+  store.clearDirty('乙');
+  store.set('lib', {
+    categoryInfo: () => ({ data: { notes: [] }, lastSeenEtag: 'e1' }),
+    saveCategory: async () => ({ ok: true }),
+  });
+  const p = handleConflict('乙');
+  btn(dom.body, '用我的版本覆盖').click();
+  await p;
+  const last = dom.toasts.children[dom.toasts.children.length - 1];
+  assert.ok(String(last.className).includes('toast-error') === false, '成功时不该报错');
+  assert.equal(store.get('dirty').has('乙'), false, '成功时不该入队');
+});
+
+
+/* ---------------- 2026-09-29 审计 P3:弹窗必须有无障碍名 ----------------
+ * placeholder 不算可访问名(读屏器不播报它),<dialog> 不关联标题时只报「对话框」——
+ * 键盘/读屏用户既不知道这是哪个弹窗,也不知道输入框要填什么。 */
+test('P3:弹窗必须把标题关联为可访问名,输入框也要有 aria-label', async () => {
+  const dom = installDom();
+  const p = modal({ type: 'prompt', title: '修改主密码', label: '新主密码', password: true });
+  assert.equal(dom.dlg.getAttribute('aria-labelledby'), 'modalTitle', '<dialog> 必须指向标题');
+  const h = descendants(dom.body).find((e) => e.tagName === 'H3');
+  assert.equal(h.getAttribute('id'), 'modalTitle', '标题必须带上被引用的 id');
+  assert.equal(h.textContent, '修改主密码');
+  const input = inputOf(dom.body);
+  assert.equal(input.getAttribute('aria-label'), '新主密码', '输入框必须有可访问名(placeholder 不算)');
+  btn(dom.body, '取消').click();
+  await p;
+});
+
+test('P3 正对照:没给 label 时输入框退回用标题当可访问名(不能为空)', async () => {
+  const dom = installDom();
+  const p = modal({ type: 'prompt', title: '新建分类' });
+  assert.equal(inputOf(dom.body).getAttribute('aria-label'), '新建分类');
+  btn(dom.body, '取消').click();
+  await p;
 });

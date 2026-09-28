@@ -26,7 +26,7 @@ class FakeNode {
     this.attrs = {};
     this.handlers = {};      // 记录监听器,便于用例直接触发按钮行为(不模拟真实事件冒泡)
   }
-  appendChild(c) { this.children.push(c); return c; }
+  appendChild(c) { c._parent = this; this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(c); }
   set textContent(v) { this.children = []; this._text = String(v); }
   get textContent() {
@@ -47,6 +47,24 @@ class FakeNode {
   setAttribute(k, v) { this.attrs[k] = v; }
   addEventListener(ev, fn) { (this.handlers[ev] ||= []).push(fn); }
   removeEventListener() {}
+
+  /* ---- 以下三个供「整表重建后的焦点还原」用例(2026-09-29 审计 P3) ---- */
+  contains(n) { let p = n; while (p) { if (p === this) return true; p = p._parent; } return false; }
+  /** 只支持 [data-focus-key="…"] —— 生产代码只用这一种选择器 */
+  querySelector(sel) {
+    const m = /^\[data-focus-key="(.*)"\]$/.exec(sel);
+    if (!m) return null;
+    let found = null;
+    const walk = (n) => {
+      for (const c of n.children || []) {
+        if (!found && c.dataset && c.dataset.focusKey === m[1]) found = c;
+        if (!found) walk(c);
+      }
+    };
+    walk(this);
+    return found;
+  }
+  focus() { if (global.document) global.document.activeElement = this; }
 }
 
 /* ★ 所有调用方一律 `await withDom(...)` —— **同步体也要 await**:
@@ -58,6 +76,7 @@ async function withDom(fn) {
   global.document = {
     createElement: (tag) => new FakeNode(tag),
     createTextNode: (t) => { const n = new FakeNode(undefined); n._text = t; return n; },
+    activeElement: null,          // focus() 会写它;captureFocusKey 读它
   };
   // byId 返回稳定的节点:同一 id 反复取到同一个,便于断言
   const byId = (id) => {
@@ -328,5 +347,56 @@ test('★ 置顶成功必须广播 cats-changed(别的标签页的置顶视图�
     await pinBtn.handlers.click[0]({ stopPropagation() {} });
     assert.deepEqual(sent, [{ type: 'cats-changed' }],
       '★ 置顶后必须广播 —— 旧实现只重绘本地,别的标签页置顶视图不动');
+  });
+});
+
+/* ---- 整表重建后的焦点还原(2026-09-29 审计 P3)----
+ * 上移/下移/置顶/切笔记都会**整表重建**列表。不把焦点还回去,键盘用户按一次回车焦点就掉回
+ * body,想连按两次「下移」得重新 Tab 一路找回来(视觉上像「按钮只灵一次」)。
+ * ★ 断言落在**节点身份**上:只比 dataset.focusKey 的话,被摘掉的**旧节点**还带着同一个键,
+ *   把 restoreFocusKey 整段删掉照样绿 —— 那是假绿(设计时就特意规避)。 */
+test('★ renderNoteList:整表重建后焦点必须回到同一个 focusKey 的**新节点**', async () => {
+  await withDom((ctx, byId) => {
+    const notes = [mkNote('b', 500), mkNote('a', 1000)];
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('lib', {
+      listCategories: () => ['甲'], sortedCategories: () => ['甲'],
+      catPin: () => false, catCount: () => 2,
+      categoryInfo: () => ({ data: { notes } }),
+    });
+    const c = { ...ctx(st), fmtTime: () => '' };   // renderNoteList 要给 li.title 取时间
+    renderNoteList(c);
+    const ul = byId('noteList');
+    const up = ul.querySelector('[data-focus-key="note-up:b"]');
+    assert.ok(up, '前置:笔记「上移」按钮带着语义 focusKey');
+    up.focus();
+    assert.equal(global.document.activeElement, up, '前置:焦点确实在按钮上');
+    renderNoteList(c);                            // 真实场景由上移/置顶触发
+    const now = global.document.activeElement;
+    assert.notEqual(now, up, '前置:重建后旧节点已被替换(否则本条断言没有判别力)');
+    assert.equal(now, ul.querySelector('[data-focus-key="note-up:b"]'),
+      '★ 焦点必须落在新节点上 —— 删掉 restoreFocusKey 会掉回旧节点/body');
+  });
+});
+
+test('★ renderCategoryList:整表重建后焦点也必须还回原按钮(不能只修笔记列)', async () => {
+  await withDom((ctx, byId) => {
+    const st = new Store();
+    st.set('lib', {
+      listCategories: () => ['甲'], sortedCategories: () => ['甲'],
+      catPin: () => false, catCount: () => null,
+      categoryInfo: () => ({ data: { notes: [] } }),
+    });
+    renderCategoryList(ctx(st));
+    const ul = byId('catList');
+    const pin = ul.querySelector('[data-focus-key="cat-pin:甲"]');
+    assert.ok(pin, '前置:分类「置顶」按钮带着语义 focusKey');
+    pin.focus();
+    renderCategoryList(ctx(st));
+    const now = global.document.activeElement;
+    assert.notEqual(now, pin, '前置:重建后旧节点已被替换');
+    assert.equal(now, ul.querySelector('[data-focus-key="cat-pin:甲"]'),
+      '★ 焦点必须落在新节点上(分类列同理)');
   });
 });
