@@ -32,7 +32,9 @@ export class Library {
     this.vaultJson = vaultJson;
     this.dek = dekBytes;
     this.vaultEtag = vaultEtag;
-    /** name → { data|null, lastSeenEtag|null, size, conflict, error|null } */
+    /** name → { data|null, lastSeenEtag|null, size, conflict, error|null, transient|null }
+     *  error     = **永久**错误(密文损坏 / 服务器上已不存在):侧栏标「无法解密」,不再反复重试
+     *  transient = **瞬时**错误(网络不通 / 5xx / 超时):下次照常重试,只用于提示(2026-09-29 P2-7) */
     this.categories = new Map();
   }
 
@@ -49,6 +51,8 @@ export class Library {
         size,
         conflict: false,
         error: prev ? prev.error : null,
+        // 瞬时失败跨 rescan 保留:它决定「还要不要重试」,不该因为刷新清单而丢掉
+        transient: prev ? prev.transient : null,
       });
     }
     this.categories = next;
@@ -226,9 +230,22 @@ export class Library {
       cat.data = await V.decryptCategory(this.keys.contentKey, got.bytes);
       cat.lastSeenEtag = got.etag;
       cat.error = null;
+      cat.transient = null;
     } catch (e) {
-      if (e instanceof C.FormatError || e instanceof C.CryptoError) cat.error = e.message;
-      else if (!(e instanceof LibraryError)) cat.error = `读取失败:${e.message}`;
+      /* ★ 错误分两类(2026-09-29 审计 P2-7):
+       *   永久 —— 密文损坏 / 解不开(FormatError / CryptoError)、服务器上已不存在(LibraryError):
+       *     写 cat.error。侧栏据此标「无法解密 ⛔」,loadAllCategories 也不再反复重试。
+       *   瞬时 —— 网络不通 / 5xx / 超时(ApiError):**只写 cat.transient,绝不写 cat.error**。
+       *     旧实现一视同仁,于是一次网络抖动就把分类永久标成「无法解密」;而
+       *     loadAllCategories 只在 !cat.error 时才重试 ⇒ 网络恢复后永不重试,
+       *     孤儿图片清理被长期锁死(那是全应用唯一不可恢复的删除,锁死 = 永远清不了)。
+       *   ⚠️ cleanupOrphanBlobs 的「读不到就一张不删」判据是 !cat.data,与 cat.error 无关,
+       *     所以瞬时失败照旧进 unreadable —— 「保守不删」这条安全性不受本次改动影响。 */
+      if (e instanceof C.FormatError || e instanceof C.CryptoError || e instanceof LibraryError) {
+        cat.error = e.message;
+      } else {
+        cat.transient = e.message;
+      }
       throw e;
     }
     return cat.data;

@@ -452,15 +452,23 @@ export async function handleApi(method, url, headers, body, env) {
         // 真正的不存在/被改由 R2 的条件写兜底(返回 null → 412)。
         const ifMatch = normEtag(headers['if-match']);
         if (!ifMatch) return fail(428, 'need-if-match', '缺少 If-Match');
-        // 不用 R2 onlyIf.etagMatches:etag 一旦经 CF 边缘(压缩 JSON 被改成弱验证器
-        // W/"...")往返,客户端带回来的值永远对不上对象真实 etag,表现为「恒 412、
-        // 重新解锁也没用」。改为 head 取当前 etag 自己比 —— 比较语义在本地与生产完全
-        // 一致;head→put 之间极小窗口由单用户场景兜住,真冲突仍以 412 拒绝。
+        // ⚠️ 不能用**客户端带回来的** etag 做 onlyIf:它经 CF 边缘往返时,压缩后的
+        //    JSON 会被改写成弱验证器(W/"..."),与对象真实 etag 永远对不上 ——
+        //    表现为「恒 412、重新解锁也没用」。所以先 head 取服务端此刻的真实 etag:
+        //    既做业务层比对(你的认知是否还是当前版本 → 可给出可读的 412 文案),
+        //    又把它当作下面原子条件写的基线。
         const cur = await env.VAULT.head(VAULT_KEY);
         if (!cur || normEtag(cur.etag) !== ifMatch) {
           return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
         }
-        const res = await env.VAULT.put(VAULT_KEY, raw);
+        // ★ head 与 put 之间还有一次网络往返,窗口天然存在 —— 所以 put 必须带条件。
+        //   此前这里是**无条件 put**:两个会话各自读到同一个 etag 后交错写会双双 200,
+        //   catMeta(置顶/顺序/篇数)与刚改的新主密码被静默覆盖。
+        //   (2026-09-29 审计 P2-8:离线给 put 注入延迟即复现 200/200。)
+        //   分类路径自始就是原子的(见上方 putCategory 的 onlyIf.etagMatches),
+        //   本次把 vault 路径补成同一语义 —— 两条路径不再一个有条件、一个没有。
+        const res = await env.VAULT.put(VAULT_KEY, raw, { onlyIf: { etagMatches: normEtag(cur.etag) } });
+        if (!res) return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
         return json({ ok: true, etag: res.etag });
       }
       // 建库:只允许创建一次

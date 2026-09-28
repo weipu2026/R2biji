@@ -612,3 +612,44 @@ test('备份写失败不连累主保存:主数据 200、后续 CAS 正常(不再
   });
   assert.equal(res2.status, 200);
 });
+
+/* ---------- 2026-09-29 审计 P2-8:vault 写必须是原子的 ----------
+ * 旧实现是 head → 比对 → **无条件 put**,两个会话各自读到同一 etag 后交错写会
+ * 双双 200(离线注入 put 延迟实测),catMeta / 新主密码被静默覆盖。
+ * 这里不靠真并发,而是精确制造那个窗口:在 put 真正落盘**之前**把盘面换成
+ * 「另一个会话刚写成功」。旧实现照样 200(覆盖别人),新实现必须 412。
+ * 同时给正对照:盘面没被动过时必须 200 —— 否则「一律 412」也能让上面那条通过。 */
+test('vault 写:head→put 之间被插空必须 412,绝不覆盖别人的写(P2-8)', async () => {
+  const { env, token, json } = await setup();
+  const first = await call(env, 'GET', '/api/vault');
+  const etag1 = first.headers.get('etag');
+
+  // ① 正对照:无并发 → 必须写成功(证明条件写得对,不是「一律 412」)
+  const ok = await call(env, 'PUT', '/api/vault', {
+    body: JSON.stringify({ ...json, touch: 1 }), headers: { ...auth(token), 'if-match': etag1 },
+  });
+  assert.equal(ok.status, 200, '正对照:没有并发时 vault 必须能写');
+
+  // ② 制造交错:head 拿到 etag2 之后、put 落盘之前,盘面被另一个会话写掉
+  const second = await call(env, 'GET', '/api/vault');
+  const etag2 = second.headers.get('etag');
+  const real = env.VAULT;
+  let bumped = false;
+  env.VAULT = {
+    head: real.head.bind(real), get: real.get.bind(real),
+    list: real.list.bind(real), delete: real.delete.bind(real),
+    put: async (k, b, o) => {
+      if (k === 'vault.json' && !bumped) {
+        bumped = true;
+        const e = real.map.get(k);
+        real.map.set(k, { ...e, etag: 'etag-other-session' });
+      }
+      return real.put(k, b, o);
+    },
+  };
+  const res = await call(env, 'PUT', '/api/vault', {
+    body: JSON.stringify({ ...json, touch: 2 }), headers: { ...auth(token), 'if-match': etag2 },
+  });
+  assert.equal(res.status, 412, 'head 之后盘面变了:条件写必须失败(旧实现是无条件 put → 200 覆盖别人的写)');
+  assert.equal(real.map.get('vault.json').etag, 'etag-other-session', '别人的写入绝不能被覆盖');
+});
