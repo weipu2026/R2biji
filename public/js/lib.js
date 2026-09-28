@@ -63,6 +63,15 @@ export class Library {
     return this.categories.get(name) || null;
   }
 
+  /**
+   * 分类的视觉顺序:置顶优先 → 手动 order → 名称兜底。
+   * ★ 列表渲染与「上移/下移」都必须走它 —— 各写一份排序规则,迟早漂移成
+   *   「看到的顺序」与「移动时的顺序」不一致,那种 bug 靠肉眼永远查不出来。
+   */
+  sortedCategories() {
+    return F.sortCats([...this.categories.keys()], (n) => this.catMetaOf(n));
+  }
+
   /* ============ 分类元信息(置顶等;存 vault.json.catMeta,跨设备同步) ============ */
 
   catPin(name) {
@@ -153,6 +162,34 @@ export class Library {
    */
   async setCatCount(name, n) {
     return this.setCatMeta(name, { count: n });
+  }
+
+  /**
+   * 分类上移/下移(顺序存 vault.json 的 catMeta.order,跨设备同步)。
+   *
+   * ⚠️ 与笔记的 moveNote 有一处本质差别:笔记的 order 在分类文件内部,
+   *    改动搭下一次保存的车;分类的 order 只能进 vault.json ——
+   *    每次点击都是一次独立的条件写(CAS + 412 重放),有网络往返。
+   * 412 重放时 mutate 会被调用第二次,所以 changed 必须在**每次进入时**清零:
+   * 否则「第一次算出要动、重放后判定不动」会把没写成的操作报成成功。
+   * @param {string} name
+   * @param {number} dir -1 上移 / +1 下移
+   * @returns {Promise<boolean>} 是否真的写了一次云端(端点/跨置顶分区 → false)
+   */
+  async moveCat(name, dir) {
+    let changed = false;
+    await this.updateVaultMeta((json) => {
+      changed = false;                       // 重放时重新判定,不吃上一轮的结果
+      const meta = { ...(json.catMeta || {}) };
+      const patch = F.catMovePatch([...this.categories.keys()], (n) => meta[n] || {}, name, dir);
+      if (!patch) return;                    // 不动:内容不变 → updateVaultMeta 直接返回 false
+      for (const [n, order] of Object.entries(patch)) {
+        meta[n] = { ...(meta[n] || {}), order };
+      }
+      json.catMeta = meta;
+      changed = true;
+    });
+    return changed;
   }
 
   /* ============ 分类:读 ============ */

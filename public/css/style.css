@@ -363,8 +363,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
  * ⚠️ 槽位必须躲在悬停浮层按钮的左边 —— 否则悬停时按钮压在图钉上,
  *    点「置顶」命中的是被盖住的图钉,会静默变成「取消置顶」(实测踩过:两列都被压住)。
  *    每行给槽位预留的净空写死在下面两条规则里(实测值):
- *      分类列 1 个按钮 → 槽位右外边距 8px
- *      笔记列 3 个按钮 → 槽位右外边距 34px
+ *      分类列 3 个按钮(上移/下移/置顶)→ 槽位右外边距 34px
+ *      笔记列 3 个按钮(上移/下移/置顶)→ 槽位右外边距 34px
  *    按钮宽度/尺寸若调整,这两个数要跟着改(真机脚本 pin-tail-verify.mjs 的 ⑧ 会翻红提醒)。 */
 .pin-slot {
   flex: 0 0 auto;
@@ -383,8 +383,9 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .warn-slot svg { display: block; }
 /* 分类行:warn-slot 紧贴名字右侧(4px),两侧的槽位一起退到悬停浮层左边 */
 .cat-item .warn-slot { margin-left: 4px; margin-right: 8px; }
-/* 分类列:浮层宽 ≈34px(28 按钮 + 4 内边距 + 2 边框),槽位再退 8px 呼吸 → 右外距 8px */
-.cat-item .pin-slot { margin-right: 8px; }
+/* 分类列加了上移/下移后与笔记列同形:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框),
+ * 槽位右外距同为 34px ⇒ 两列的图钉落在同一条竖线上(2026-09-28) */
+.cat-item .pin-slot { margin-right: 34px; }
 /* 笔记列:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框)→ 右外距 34px */
 .note-item .pin-slot { margin-right: 34px; }
 
@@ -610,8 +611,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   letter-spacing: 0;
 }
 .cat-item.active .cat-count { color: var(--accent); }
-/* 分类/笔记两列的浮层按钮宽度差别很大(分类 1 个 ≈34px、笔记 3 个 ≈94px),
- * 每列槽位预留的净空定义在 .pin-slot 那条规则附近(见文件上方),此处不再重复 */
+/* 两列的浮层按钮数相同(都是 3 个 ≈94px),槽位预留的净空定义在
+ * .pin-slot 那条规则附近(见文件上方),此处不再重复 */
 
 .note-list { flex: 1; }
 .note-item {
@@ -1131,6 +1132,9 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     -webkit-backdrop-filter: none;
   }
   .blk-copy { opacity: .55; }
+  /* 触屏:按钮常显,没有浮层要躲 → 槽位的 34px 净空失去意义,收回 8px,
+   * 把宽度还给分类名/笔记标题(窄屏上这 26px 很值) */
+  .cat-item .pin-slot, .note-item .pin-slot { margin-right: 8px; }
 }
 
 /* 尊重系统减动效偏好 */

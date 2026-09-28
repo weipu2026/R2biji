@@ -156,6 +156,64 @@ export function orderBetween(prev, next) {
   return (prev + next) / 2;
 }
 
+/* ---------- 分类排序与手动调序(2026-09-28) ---------- */
+
+/** 分类手动顺序的步长:首次「铺开」时按视觉序号 × 这个步长,给后续插空留余地 */
+export const CAT_ORDER_STEP = 1000;
+
+/**
+ * 分类排序:置顶优先 → 手动 order 升序 → 名称兜底。
+ *
+ * 分类的 order 存在 vault.json 的 catMeta[name].order(跨设备同步)。
+ * 从未排过序的分类没有 order,一律视为末尾(新建分类自然落在同分组末尾);
+ * 两个 Infinity 相减得 NaN 会让右侧的 localeCompare 接手,顺序依然确定、不抖动。
+ * @param {string[]} names
+ * @param {(name:string)=>({pin?:boolean, order?:number})} metaOf
+ * @returns {string[]} 新数组(不改入参)
+ */
+export function sortCats(names, metaOf) {
+  const pinOf = (n) => (metaOf(n)?.pin === true ? 1 : 0);
+  const ordOf = (n) => { const o = metaOf(n)?.order; return Number.isFinite(o) ? o : Infinity; };
+  return [...names].sort((a, b) =>
+    (pinOf(b) - pinOf(a)) || (ordOf(a) - ordOf(b)) || a.localeCompare(b));
+}
+
+/**
+ * 计算「上移/下移」后的 catMeta.order 补丁(纯函数,便于单测)。
+ *
+ * 规则(与笔记的 moveNote 对齐):
+ *   · 端点不动、**不跨置顶分区**(跨分区交换没有视觉反馈,只会让人以为点了没反应)
+ *   · 顺序「干净」(每个分类都有有限且**严格递增**的 order)→ 只交换相邻两项的值
+ *     ⇒ 所见即所得,order 永不漂移(与笔记交换 order 值同思路)
+ *   · 顺序不干净(首次使用 / 新建分类缺 order / 有重复值)→ 按**当前视觉顺序**
+ *     给全部分类铺一遍 order 再交换 ⇒ 一次写把顺序固化,且铺出的值就是视觉序号,
+ *     用户看不到任何跳动。重复值必须走这条路:交换两个相等的值 = 点了没反应。
+ * @param {string[]} names 全部分类名
+ * @param {(name:string)=>({pin?:boolean, order?:number})} metaOf
+ * @param {string} name 要移动的分类
+ * @param {number} dir -1 上移 / +1 下移
+ * @returns {Record<string, number>|null} 全量 order 补丁;null = 不该动(不存在/端点/跨分区)
+ */
+export function catMovePatch(names, metaOf, name, dir) {
+  const ordered = sortCats(names, metaOf);
+  const idx = ordered.indexOf(name);
+  if (idx < 0) return null;
+  const j = dir < 0 ? idx - 1 : idx + 1;
+  if (j < 0 || j >= ordered.length) return null;
+  if ((metaOf(ordered[j])?.pin === true) !== (metaOf(name)?.pin === true)) return null;
+  /* 先断言项数 > 1,再谈「每一项都干净」—— 空集也满足 every,那会喂出假绿
+   * (与 format.test / pin-tail-verify 里同一条纪律) */
+  const clean = ordered.length > 1 && ordered.every((n, i) =>
+    Number.isFinite(metaOf(n)?.order) && (i === 0 || metaOf(ordered[i - 1]).order < metaOf(n).order));
+  const values = clean
+    ? ordered.map((n) => metaOf(n).order)
+    : ordered.map((_, i) => (i + 1) * CAT_ORDER_STEP);
+  const tmp = values[idx]; values[idx] = values[j]; values[j] = tmp;
+  const patch = {};
+  ordered.forEach((n, i) => { patch[n] = values[i]; });
+  return patch;
+}
+
 /* ---------- 相对时间 ---------- */
 
 /**

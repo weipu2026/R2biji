@@ -104,6 +104,7 @@ function mkCtx(cats) {
   store.set('lib', {
     loadCategory: async () => {},
     listCategories: () => Object.keys(cats),
+    sortedCategories: () => Object.keys(cats),   // 渲染走它(moveCat 与列表同源)
     catCount: (n) => (cats[n] ? cats[n].length : null),
     catPin: () => false,
     categoryInfo: (n) => (cats[n] ? { data: { notes: cats[n] } } : null),

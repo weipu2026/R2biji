@@ -5,6 +5,7 @@ import {
   sanitizeCategoryName, findCaseCollision,
   looksLikeConflictCopy, backupFileName, parseBackupFileName,
   planBackupRotation, sortNotes, orderBetween,
+  sortCats, catMovePatch, CAT_ORDER_STEP,
   stripEnc, isEncryptedName, SEAFILE_IGNORE_CONTENT,
   assessPassword, PASSWORD_MIN_LEN, relTime, genPassword,
   statusAllowsOverride, STATUS_RANK,
@@ -251,4 +252,84 @@ test('statusAllowsOverride:权威终态可收尾过渡态,但永远盖不动 err
   // 非权威来源在 busy 前依然要按优先级守规矩(防止中途被静默降级)
   assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'ok', false), false);
   assert.equal(statusAllowsOverride(STATUS_RANK.busy, 'dirty', false), false);
+});
+
+/* ---------- 分类排序与手动调序(2026-09-28) ---------- */
+
+/** 把 { 名: meta } 包成 sortCats / catMovePatch 要的 metaOf 取值器 */
+const metaOf = (obj) => (n) => obj[n] || {};
+
+test('sortCats:置顶优先 → 手动 order 升序 → 名称兜底', () => {
+  const meta = { a: { order: 2000 }, b: { order: 1000 }, c: { pin: true, order: 9000 }, d: { pin: true, order: 8000 } };
+  assert.deepEqual(sortCats(['a', 'b', 'c', 'd'], metaOf(meta)), ['d', 'c', 'b', 'a']);
+});
+
+test('sortCats:从未排过序的分类(无 order)落在末尾,组内按名称兜底', () => {
+  const meta = { a: { order: 1000 } };
+  assert.deepEqual(sortCats(['c', 'a', 'b'], metaOf(meta)), ['a', 'b', 'c']);
+});
+
+test('sortCats:不改入参(返回新数组)', () => {
+  const names = ['b', 'a'];
+  const out = sortCats(names, metaOf({}));
+  assert.notEqual(out, names, '必须返回新数组');
+  assert.deepEqual(names, ['b', 'a'], '入参顺序不得被就地改写');
+});
+
+test('catMovePatch:顺序干净时只交换相邻两项的值(order 不漂移)', () => {
+  const meta = { a: { order: 1000 }, b: { order: 2000 }, c: { order: 3000 } };
+  assert.deepEqual(catMovePatch(['a', 'b', 'c'], metaOf(meta), 'b', -1), { a: 2000, b: 1000, c: 3000 });
+});
+
+test('catMovePatch:★上移一次后视觉顺序确实前移一位(不是「点了没反应」)', () => {
+  const meta = { a: { order: 1000 }, b: { order: 2000 }, c: { order: 3000 } };
+  const m = metaOf(meta);
+  assert.deepEqual(sortCats(['a', 'b', 'c'], m), ['a', 'b', 'c'], '前置:初始顺序');
+  const patch = catMovePatch(['a', 'b', 'c'], m, 'c', -1);
+  const after = metaOf(Object.fromEntries(
+    Object.entries(patch).map(([k, v]) => [k, { ...(meta[k] || {}), order: v }])));
+  assert.deepEqual(sortCats(['a', 'b', 'c'], after), ['a', 'c', 'b'],
+    '★ 补丁应用回 meta 后,该分类必须真的前进一位');
+});
+
+test('catMovePatch:首次使用(全无 order)按当前视觉顺序铺一遍再交换', () => {
+  // 视觉顺序 = 名称序 a,b,c → 铺开 a=1000 b=2000 c=3000,再把 b 与 a 交换
+  assert.deepEqual(catMovePatch(['c', 'a', 'b'], metaOf({}), 'b', -1), { a: 2000, b: 1000, c: 3000 });
+});
+
+test('catMovePatch:补丁覆盖全部分类(materialize 只写两个会漏掉其余)', () => {
+  const patch = catMovePatch(['a', 'b', 'c'], metaOf({}), 'c', -1);
+  assert.equal(Object.keys(patch).length, 3);
+  assert.equal(CAT_ORDER_STEP, 1000, '步长是外部依赖的值,改了要一起改文档');
+});
+
+test('catMovePatch:order 有重复值时重新铺开(交换两个相等的值 = 点了没反应)', () => {
+  const meta = { a: { order: 1000 }, b: { order: 1000 } };
+  const patch = catMovePatch(['a', 'b'], metaOf(meta), 'b', -1);
+  assert.deepEqual(patch, { a: 2000, b: 1000 });
+  assert.equal(new Set(Object.values(patch)).size, 2, '重铺后两个值必须互不相同');
+});
+
+test('catMovePatch:端点 / 不存在的分类一律返回 null', () => {
+  const meta = { a: { order: 1000 }, b: { order: 2000 } };
+  assert.equal(catMovePatch(['a', 'b'], metaOf(meta), 'a', -1), null, '首项上移');
+  assert.equal(catMovePatch(['a', 'b'], metaOf(meta), 'b', 1), null, '末项下移');
+  assert.equal(catMovePatch(['a', 'b'], metaOf(meta), '不存在', 1), null);
+  assert.equal(catMovePatch([], metaOf(meta), 'a', 1), null, '空列表');
+});
+
+test('catMovePatch:★不跨置顶分区', () => {
+  const meta = { a: { pin: true, order: 1000 }, b: { pin: true, order: 2000 }, c: { order: 3000 } };
+  const m = metaOf(meta);
+  assert.equal(catMovePatch(['a', 'b', 'c'], m, 'b', 1), null, '★ 置顶组末项不得下移进未置顶组');
+  assert.equal(catMovePatch(['a', 'b', 'c'], m, 'c', -1), null, '★ 未置顶组首项不得上移进置顶组');
+  assert.deepEqual(catMovePatch(['a', 'b', 'c'], m, 'b', -1), { a: 2000, b: 1000, c: 3000 },
+    '分组内部照常可动');
+});
+
+test('catMovePatch:未排过序时置顶分区内部也能动(分区判定先于顺序铺开)', () => {
+  const meta = { z: { pin: true }, y: { pin: true }, a: {} };
+  const m = metaOf(meta);
+  assert.deepEqual(sortCats(['z', 'y', 'a'], m), ['y', 'z', 'a'], '前置:视觉顺序');
+  assert.deepEqual(catMovePatch(['z', 'y', 'a'], m, 'z', -1), { y: 2000, z: 1000, a: 3000 });
 });

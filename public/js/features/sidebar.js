@@ -54,10 +54,9 @@ export function renderCategoryList(ctx) {
   // 此前直接 lib.listCategories() 会抛 TypeError 打断整条渲染链
   // (2026-09-27 审计 P2)。空手画个空列表即可,下一拍 boot 会重画。
   if (!lib) return;
-  const names = lib.listCategories();
+  // 视觉顺序单一来源:置顶优先 → 手动 order → 名称兜底(与「上移/下移」同源)
+  const names = lib.sortedCategories();
   const activeCat = S.get('activeCat');
-  // 置顶优先,组内按名称排序(与云端清单字典序一致,顺序可预期)
-  names.sort((a, b) => ((lib.catPin(b) === true) - (lib.catPin(a) === true)) || a.localeCompare(b));
   for (const name of names) {
     const info = lib.categoryInfo(name);
     const pinned = lib.catPin(name);
@@ -116,6 +115,27 @@ export function renderCategoryList(ctx) {
 
     const btns = document.createElement('div');
     btns.className = 'cat-btns';
+    /* 上移/下移:顺序写 vault.json(catMeta.order),因此每次点击都有网络往返。
+     * 写完再重绘(不做乐观 UI)—— 端点与跨置顶分区时静默,与笔记的 moveNote 同规矩。 */
+    const move = async (dir) => {
+      try {
+        if (await lib.moveCat(name, dir)) renderCategoryList(ctx);
+      } catch (err) {
+        ctx.toast(`移动分类失败:${err.message}`, 'error');
+      }
+    };
+    const upBtn = document.createElement('button');
+    upBtn.className = 'icon-btn';
+    upBtn.title = '上移';
+    upBtn.setAttribute('aria-label', '上移'); // svg 带 aria-hidden,title 不作可访问名
+    upBtn.innerHTML = ctx.icons.up;
+    upBtn.addEventListener('click', (e) => { e.stopPropagation(); move(-1); });
+    const downBtn = document.createElement('button');
+    downBtn.className = 'icon-btn';
+    downBtn.title = '下移';
+    downBtn.setAttribute('aria-label', '下移');
+    downBtn.innerHTML = ctx.icons.down;
+    downBtn.addEventListener('click', (e) => { e.stopPropagation(); move(1); });
     const pinBtn = document.createElement('button');
     pinBtn.className = 'icon-btn';
     pinBtn.title = pinned ? '取消置顶' : '置顶';
@@ -133,7 +153,7 @@ export function renderCategoryList(ctx) {
       }
       renderCategoryList(ctx);
     });
-    btns.appendChild(pinBtn);
+    btns.append(upBtn, downBtn, pinBtn);   // 顺序与笔记列一致
     li.appendChild(btns);
 
     clickable(li, () => openCategory(ctx, name));

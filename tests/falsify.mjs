@@ -277,6 +277,28 @@ const MUTANTS = [
     to: 'if (false) { // MUTANT:从不归零,也不记录当前篇',
     expect: '换笔记:阅读面滚回顶部',
   },
+  /* ---- 分类手动调序(format.js 纯函数 + sidebar 三按钮)---- */
+  {
+    label: '分类上移/下移不再拦住「跨置顶分区」(点了像没反应)',
+    file: 'public/js/format.js',
+    from: "  if ((metaOf(ordered[j])?.pin === true) !== (metaOf(name)?.pin === true)) return null;",
+    to: '  // MUTANT:去掉「不跨置顶分区」判断',
+    expect: '不跨置顶分区',
+  },
+  {
+    label: '分类排序丢掉「置顶优先」(置顶项会掉回名称序)',
+    file: 'public/js/format.js',
+    from: '    (pinOf(b) - pinOf(a)) || (ordOf(a) - ordOf(b)) || a.localeCompare(b));',
+    to: '    (ordOf(a) - ordOf(b)) || a.localeCompare(b)); // MUTANT:丢掉置顶主键',
+    expect: '置顶优先',
+  },
+  {
+    label: '分类行的上移/下移按钮被摘掉(只剩置顶)',
+    file: 'public/js/features/sidebar.js',
+    from: '    btns.append(upBtn, downBtn, pinBtn);   // 顺序与笔记列一致',
+    to: '    btns.append(pinBtn); // MUTANT:只剩置顶',
+    expect: '分类行有 上移/下移/置顶 三个按钮',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

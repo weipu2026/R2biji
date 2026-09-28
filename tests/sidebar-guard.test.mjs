@@ -120,6 +120,7 @@ test('lib 正常存在时,渲染照常产出分类项(护栏不能把功能挡�
     const st = new Store();
     st.set('lib', {
       listCategories: () => ['甲', '乙'],
+      sortedCategories: () => ['甲', '乙'],
       catPin: () => false,
       catCount: () => null,
       categoryInfo: () => ({ data: { notes: [] } }),
@@ -151,6 +152,7 @@ test('★ openCategory:点分类自动打开列表最顶端那篇(置顶优先,�
     st.set('lib', {
       loadCategory: async () => {},
       listCategories: () => ['甲'],
+      sortedCategories: () => ['甲'],
       catPin: () => false,
       catCount: () => 2,
       categoryInfo: () => ({ data: { notes } }),
@@ -174,6 +176,7 @@ test('★ openCategory:重载当前分类时,原选中的笔记还在就保持�
     st.set('lib', {
       loadCategory: async () => {},
       listCategories: () => ['甲'],
+      sortedCategories: () => ['甲'],
       catPin: () => false,
       catCount: () => 2,
       categoryInfo: () => ({ data: { notes } }),
@@ -195,6 +198,7 @@ test('★ openCategory:真正空分类才落空状态,并给「新建笔记」�
     st.set('lib', {
       loadCategory: async () => {},
       listCategories: () => ['甲'],
+      sortedCategories: () => ['甲'],
       catPin: () => false,
       catCount: () => 0,
       categoryInfo: () => ({ data: { notes: [] } }),
@@ -209,5 +213,34 @@ test('★ openCategory:真正空分类才落空状态,并给「新建笔记」�
     assert.match(rec.emptyText, /暂无笔记/);
     assert.equal(rec.emptyOpts?.label, '新建笔记', '空分类保留「新建笔记」引导');
     assert.equal(rec.read, 0, '没有笔记就不该进阅读视图');
+  });
+});
+
+/* ---- 分类行「上移/下移/置顶」三按钮(2026-09-28 用户要求)----
+ * 分类此前只有置顶一个按钮,顺序被名称字典序钉死。加了手动调序后分类行与笔记行同形
+ * (3 个按钮),于是 .cat-item .pin-slot 的净空也必须与笔记列一致(34px,见 style.css)。
+ * 这里钉两件事:①三个按钮都在、顺序与笔记列一致;②每个都有可访问名 ——
+ * 图标 svg 带 aria-hidden,title 不算可访问名,漏了 aria-label 读屏器只会播报「按钮」
+ * (2026-09-27 审计 P3-4 的同一类问题)。 */
+test('★ renderCategoryList:分类行有 上移/下移/置顶 三个按钮且都有可访问名', async () => {
+  await withDom((ctx, byId) => {
+    const st = new Store();
+    st.set('lib', {
+      sortedCategories: () => ['甲'],
+      catPin: () => false,
+      catCount: () => null,
+      categoryInfo: () => ({ data: { notes: [] } }),
+      moveCat: async () => true,
+    });
+    renderCategoryList(ctx(st));
+    const li = byId('catList').children[0];
+    const btns = li.children.find((c) => c.className === 'cat-btns');
+    assert.ok(btns, '分类行必须有 .cat-btns 浮层');
+    assert.deepEqual(btns.children.map((b) => b.title), ['上移', '下移', '置顶'],
+      '★ 按钮顺序必须与笔记列一致(上移/下移/置顶)');
+    for (const b of btns.children) {
+      assert.equal(b.attrs['aria-label'], b.title,
+        `「${b.title}」按钮缺 aria-label(读屏器只会播报「按钮」)`);
+    }
   });
 });
