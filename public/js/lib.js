@@ -94,6 +94,20 @@ export class Library {
   }
 
   /**
+   * 重新拉取 vault.json(置顶/篇数/手动顺序都在里面)。
+   * ★ 跨标签页同步必须调它:rescan() 只重建**分类清单**、不碰 vaultJson ——
+   *   只 rescan 会让本标签页继续用陈旧的 catMeta 渲染顺序与置顶(2026-09-28 审计 P2)。
+   * @returns {Promise<boolean>} 是否成功刷新
+   */
+  async refreshVaultMeta() {
+    const fresh = await API.fetchVault();
+    if (fresh.status !== 200) return false;
+    this.vaultJson = fresh.json;
+    this.vaultEtag = fresh.etag;
+    return true;
+  }
+
+  /**
    * 对 vault.json 做一次元信息变更并落盘(CAS)。
    * 412 = 别的会话刚写过 → 重拉最新 vault、在新内容上重放同一变更(按名字写,幂等)再试一次;
    * 变更前后内容一致则不写云端(如清理不存在的元信息)。
@@ -170,26 +184,33 @@ export class Library {
    * ⚠️ 与笔记的 moveNote 有一处本质差别:笔记的 order 在分类文件内部,
    *    改动搭下一次保存的车;分类的 order 只能进 vault.json ——
    *    每次点击都是一次独立的条件写(CAS + 412 重放),有网络往返。
-   * 412 重放时 mutate 会被调用第二次,所以 changed 必须在**每次进入时**清零:
-   * 否则「第一次算出要动、重放后判定不动」会把没写成的操作报成成功。
+   * ★ 冲突(412)时**不做重放**:catMovePatch 算的是相对位移(交换当前相邻两项),
+   *   在新基线上重放等于「再移一格」,与一次点击的语义不符(2026-09-28 审计 P2,已实证)。
+   *   改为刷新本地 vault 视图 + 返回 false(本次未移动),用户看到最新顺序后可再点。
    * @param {string} name
    * @param {number} dir -1 上移 / +1 下移
-   * @returns {Promise<boolean>} 是否真的写了一次云端(端点/跨置顶分区 → false)
+   * @returns {Promise<boolean>} 是否真的写了一次云端(端点/跨置顶分区/冲突 → false)
    */
   async moveCat(name, dir) {
-    let changed = false;
-    await this.updateVaultMeta((json) => {
-      changed = false;                       // 重放时重新判定,不吃上一轮的结果
-      const meta = { ...(json.catMeta || {}) };
-      const patch = F.catMovePatch([...this.categories.keys()], (n) => meta[n] || {}, name, dir);
-      if (!patch) return;                    // 不动:内容不变 → updateVaultMeta 直接返回 false
-      for (const [n, order] of Object.entries(patch)) {
-        meta[n] = { ...(meta[n] || {}), order };
+    const patch = F.catMovePatch([...this.categories.keys()], (n) => this.catMetaOf(n), name, dir);
+    if (!patch) return false;                // 端点 / 跨置顶分区 → 不动(与笔记 moveNote 同规矩)
+    const json = JSON.parse(JSON.stringify(this.vaultJson));
+    const meta = { ...(json.catMeta || {}) };
+    for (const [n, order] of Object.entries(patch)) meta[n] = { ...(meta[n] || {}), order };
+    json.catMeta = meta;
+    try {
+      const etag = await API.putVaultJson(JSON.stringify(json), this.vaultEtag);
+      this.vaultJson = json;
+      this.vaultEtag = etag;
+      return true;
+    } catch (e) {
+      if (e?.status === 412) {
+        const fresh = await API.fetchVault();
+        if (fresh.status === 200) { this.vaultJson = fresh.json; this.vaultEtag = fresh.etag; }
+        return false;
       }
-      json.catMeta = meta;
-      changed = true;
-    });
-    return changed;
+      throw e;
+    }
   }
 
   /* ============ 分类:读 ============ */
@@ -342,7 +363,7 @@ export class Library {
     // 残留的分类元信息(置顶 / 篇数)顺手清掉;失败无害(名字已不在清单里,永不显示)
     // —— 必须整条删、不能只清 pin:否则篇数会跟着同名分类「复活」
     if (this.vaultJson?.catMeta?.[name]) {
-      try { await this.setCatMeta(name, { pin: null, count: null }); } catch { /* 忽略 */ }
+      try { await this.setCatMeta(name, { pin: null, count: null, order: null }); } catch { /* 忽略 */ }
     }
   }
 

@@ -211,3 +211,53 @@ test('敏感行遮罩:多行段落的非首行也必须遮(与主站 render.js �
   // 行为相同 —— 这里把契约钉住,防止将来单方面「修」成两边不一致。
   assert.ok(html.includes('密码: '), '命中行的前缀保留(遮罩 span 跟着它)');
 });
+
+test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据,不是 e.target)', async () => {
+  // 背景(2026-09-28 审计 P1,星号双图层引入的回归):遮罩态可见的是 .secret-stars
+  // 这个**子 span**,点击事件源的类名是 secret-stars → 直接判 e.target 会永远 return,
+  // 值再也点不出来(title 却还写着「点击显示」)。主站 shell.js 用的是同款 closest 判据。
+  const readerCode = extractBetween(
+    mod.READER_TEMPLATE, '/*READER-SCRIPT-START*/', '/*READER-SCRIPT-END*/', 'READER-SCRIPT',
+  );
+  const fStart = readerCode.indexOf('function rdrToggleSecret');
+  const fEnd = readerCode.indexOf("$('view').addEventListener");
+  assert.ok(fStart > 0 && fEnd > fStart, '阅读站点击处理器必须具名(rdrToggleSecret)且有绑定处');
+  const toggleSrc = readerCode.slice(fStart, fEnd);
+  const rd = await import("data:text/javascript," + encodeURIComponent(
+    'const st = { maskTimers: [] };\n' + toggleSrc + '\nexport { rdrToggleSecret, st };',
+  ));
+  const mk = (cls) => {
+    const el = { parent: null, _cls: new Set(cls.split(' ')) };
+    el.classList = {
+      contains: (c) => el._cls.has(c),
+      add: (c) => el._cls.add(c),
+      remove: (c) => el._cls.delete(c),
+    };
+    el.closest = (sel) => {
+      const want = sel.replace(".", "");
+      let n = el;
+      while (n) { if (n._cls && n._cls.has(want)) return n; n = n.parent; }
+      return null;
+    };
+    return el;
+  };
+  const secret = mk('secret masked');
+  const stars = mk('secret-stars'); stars.parent = secret;
+  const raw = mk('secret-raw'); raw.parent = secret;
+  try {
+    // 遮罩态:用户点得到的就是星号层
+    rd.rdrToggleSecret({ target: stars });
+    assert.equal(secret.classList.contains('masked'), false,
+      '★ 点星号必须显形(旧实现直接判 e.target 类名 → 永远不动,值点不出来)');
+    // 显形态:点真值层 → 遮回
+    rd.rdrToggleSecret({ target: raw });
+    assert.equal(secret.classList.contains('masked'), true, '显形态点真值层 → 必须遮回');
+    // 不在 .secret 里的点击必须被忽略(不能误伤别的元素)
+    const other = mk('something-else');
+    rd.rdrToggleSecret({ target: other });
+    assert.equal(other._cls.has('masked'), false, '★ 非敏感元素不得被加上 masked');
+  } finally {
+    // 显形会挂一个 30s 的「自动遮回」定时器 —— 不清掉会让 node --test 白等半分钟
+    for (const t of rd.st.maskTimers) clearTimeout(t);
+  }
+});

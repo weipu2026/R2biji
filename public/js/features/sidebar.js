@@ -38,6 +38,10 @@ export function clickable(el, fn) {
   el.setAttribute('role', 'option');
   el.addEventListener('click', fn);
   el.addEventListener('keydown', (e) => {
+    // ★ 只认「事件源就是本行」的按键:行内的按钮(上移/下移/置顶)有自己的 click,
+    //   若在这里无条件 fn(),键盘用户按 Enter 会既按不动按钮、又把分类/笔记切走
+    //   (2026-09-28 审计 P1:真机实测当前打开分类被改)。按钮的激活交给浏览器默认行为。
+    if (e.target !== el) return;
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fn(e); }
   });
 }
@@ -119,7 +123,12 @@ export function renderCategoryList(ctx) {
      * 写完再重绘(不做乐观 UI)—— 端点与跨置顶分区时静默,与笔记的 moveNote 同规矩。 */
     const move = async (dir) => {
       try {
-        if (await lib.moveCat(name, dir)) renderCategoryList(ctx);
+        const moved = await lib.moveCat(name, dir);
+        // 无条件重绘:冲突(412)时 lib 已把 vault 视图刷成最新,这一次重绘就能把
+        // 真实顺序画出来(而不是停在一个已经过期的界面上)
+        renderCategoryList(ctx);
+        // 成功了才广播:别的标签页的顺序/置顶视图跟着失效(2026-09-28 审计 P2)
+        if (moved) ctx.store.get('tabs')?.send({ type: 'cats-changed' });
       } catch (err) {
         ctx.toast(`移动分类失败:${err.message}`, 'error');
       }
@@ -147,6 +156,7 @@ export function renderCategoryList(ctx) {
       e.stopPropagation();
       try {
         await lib.setCatPin(name, !pinned);
+        ctx.store.get('tabs')?.send({ type: 'cats-changed' }); // 别的标签页的置顶视图跟着失效
         ctx.toast(pinned ? `已取消置顶「${name}」` : `已置顶「${name}」`);
       } catch (err) {
         ctx.toast(`置顶失败:${err.message}`, 'error');

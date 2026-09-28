@@ -81,6 +81,16 @@ export function showLock(ctx, mode) {
  */
 export function releaseSession(store, { api, session }) {
   const lib = store.get('lib');
+  // ★ 释放 Library 之前,把它手里**最新**的那份 vault.json(和 etag)交还给会话态。
+  //   store.vaultJson 只在 boot 时拉过一次;而改主密码(换 KDF 盐与 wrap)、
+  //   调序/置顶(只改 catMeta)都只更新 Library 自己那份副本 —— 不交还的话,
+  //   「锁定 → **原地**解锁(不刷新页面)」会拿旧 wrap 去解新密码(报「主密码错误」,
+  //   再用旧密码试则是 401),或拿旧 catMeta 渲染出过期的顺序/置顶。
+  //   (2026-09-28 真机探针实测;同源的另一半在 ui.js 的 rescanFromTabs。)
+  if (lib) {
+    if (lib.vaultJson) store.set('vaultJson', lib.vaultJson);
+    if (lib.vaultEtag) store.set('vaultEtag', lib.vaultEtag);
+  }
   if (lib) { lib.destroy(); store.set('lib', null); }
   api.clearToken();
   // 锁定 = 忘掉本机记住的会话(真正的「退出登录」)。不清的话「锁定」形同虚设:

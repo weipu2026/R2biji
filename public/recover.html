@@ -1303,16 +1303,22 @@ if (typeof document !== 'undefined') {
   $('lpwd').addEventListener('keydown', function (e) { if (e.key === 'Enter') unlock(); });
   $('q').addEventListener('input', function () { if (st.unlocked) buildNav($('q').value.trim()); });
   $('btnLockTop').addEventListener('click', lock);
-  $('view').addEventListener('click', function (e) {
-    var el = e.target;
-    if (!el.classList || !el.classList.contains('secret')) return;
-    if (el.classList.contains('masked')) {
-      el.classList.remove('masked');
-      st.maskTimers.push(setTimeout(function () { el.classList.add('masked'); }, 30000));
+  /* 点击显形 / 遮回。
+   * ★ 判据必须用 closest,不能直接判 e.target 的类名:遮罩态点击落在 .secret-stars
+   *   这个**子 span** 上,直接判 e.target 会永远 return —— 值再也点不出来
+   *   (2026-09-28 审计 P1,星号双图层引入的回归;主站 shell.js 用的是同款 closest 判据)。
+   *   抽成具名函数是为了让 tests/reader.test.mjs 能直接喂双层结构做行为断言。 */
+  function rdrToggleSecret(e) {
+    var el = e.target && e.target.closest ? e.target.closest(".secret") : null;
+    if (!el) return;
+    if (el.classList.contains("masked")) {
+      el.classList.remove("masked");
+      st.maskTimers.push(setTimeout(function () { el.classList.add("masked"); }, 30000));
     } else {
-      el.classList.add('masked');
+      el.classList.add("masked");
     }
-  });
+  }
+  $('view').addEventListener('click', rdrToggleSecret);
 }
 /*READER-SCRIPT-END*/
 <\/script>

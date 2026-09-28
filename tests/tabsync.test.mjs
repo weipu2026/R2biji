@@ -7,6 +7,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { TabSync, parseTabMessage, planSavedCategoryAction } from '../public/js/tabsync.js';
+import { store } from '../public/js/store.js';
+import { ctx } from '../public/js/ui.js';
 
 /** 假的 BroadcastChannel:按名字登记,postMessage 投给**同名的其他**实例
  *  (复刻真语义:不投给发送者自己),并按结构化克隆的方式传值。 */
@@ -148,4 +150,53 @@ test('close() 之后不再收发', () => {
   assert.equal(a.send({ type: 'locked' }), false);
   b.send({ type: 'locked' });
   assert.deepEqual(got, [], '关掉之后不该再收到');
+});
+
+/* ---------------- 收到 cats-changed 之后:光重扫分类清单是不够的 ----------------
+ * 分类**清单**来自 /api/cats,而**顺序/置顶**在 vault.json 的 catMeta 里 ——
+ * rescan() 只重建清单、不碰 vaultJson。因此若只 rescan,本标签页会继续按陈旧
+ * catMeta 渲染:别的标签页刚改的顺序/置顶永远不生效,而「新分类出现了」那类断言
+ * 照样绿(清单长度确实变了)—— 这正是必须单独钉住的盲区。 */
+
+/** 极简 document:renderCategoryList 只需要 createElement + 一个稳定的 #catList */
+function mkDoc() {
+  const node = () => ({
+    children: [], _t: null,
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    setAttribute() {},
+    appendChild(c) { this.children.push(c); return c; },
+    addEventListener() {},
+    set innerHTML(v) {}, get innerHTML() { return ''; },
+    set textContent(v) { this._t = v; this.children = []; },
+    get textContent() { return this._t; },
+  });
+  const list = node();
+  return { createElement: node, getElementById: (id) => (id === 'catList' ? list : node()) };
+}
+
+test('★ 收到 cats-changed:除了重扫分类清单,还必须重拉 vault 元信息(顺序/置顶)', async () => {
+  const calls = [];
+  let release; const refreshed = new Promise((r) => { release = r; });
+  const prevLib = store.get('lib');
+  const prevCat = store.get('activeCat');
+  store.set('lib', {
+    rescan: async () => { calls.push('rescan'); },
+    refreshVaultMeta: async () => { calls.push('refreshVaultMeta'); release(); },
+    sortedCategories: () => [],
+    categoryInfo: () => null,
+    catPin: () => false,
+    catCount: () => null,
+  });
+  store.set('activeCat', null);
+  global.document = mkDoc();          // renderCategoryList 要能画出一个空列表
+  try {
+    ctx.onTabMessage({ type: 'cats-changed' });   // 入口内部是 fire-and-forget,不能直接 await
+    await Promise.race([refreshed, new Promise((r) => setTimeout(r, 500))]);
+  } finally {
+    delete global.document;
+    store.set('lib', prevLib);
+    store.set('activeCat', prevCat);
+  }
+  assert.deepEqual(calls, ['rescan', 'refreshVaultMeta'],
+    '★ 修回「只 rescan()」会在这里红 —— 别的标签页改过的顺序/置顶将永远不生效');
 });

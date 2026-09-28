@@ -9,7 +9,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { renderCategoryList, renderNoteList, activeNoteData, openCategory } from '../public/js/features/sidebar.js';
+import { renderCategoryList, renderNoteList, activeNoteData, openCategory, clickable } from '../public/js/features/sidebar.js';
 import { Store } from '../public/js/store.js';
 
 /* ---- 最小 DOM 桩:只需 createElement + classList + textContent + appendChild ---- */
@@ -24,6 +24,7 @@ class FakeNode {
     this.innerHTML = '';
     this.tabIndex = 0;
     this.attrs = {};
+    this.handlers = {};      // 记录监听器,便于用例直接触发按钮行为(不模拟真实事件冒泡)
   }
   appendChild(c) { this.children.push(c); return c; }
   append(...cs) { for (const c of cs) this.appendChild(c); }
@@ -44,7 +45,7 @@ class FakeNode {
     };
   }
   setAttribute(k, v) { this.attrs[k] = v; }
-  addEventListener() {}
+  addEventListener(ev, fn) { (this.handlers[ev] ||= []).push(fn); }
   removeEventListener() {}
 }
 
@@ -242,5 +243,90 @@ test('★ renderCategoryList:分类行有 上移/下移/置顶 三个按钮且�
       assert.equal(b.attrs['aria-label'], b.title,
         `「${b.title}」按钮缺 aria-label(读屏器只会播报「按钮」)`);
     }
+  });
+});
+
+test('★ clickable:行内按钮上的 Enter/空格不得触发整行动作(否则键盘按不动按钮还切走分类)', () => {
+  // 背景(2026-09-28 审计 P1):keydown 挂在行(li)上,键盘用户 Tab 到行内的
+  // 「上移/下移/置顶」按钮后按 Enter —— 事件从按钮冒泡到行,旧写法不看 e.target,
+  // 于是既 preventDefault 掉按钮自己的激活(按不动)、又执行 openCategory(切走分类)。
+  const li = { tabIndex: 0, setAttribute() {}, handlers: {}, addEventListener(ev, fn) { li.handlers[ev] = fn; } };
+  let rowAction = 0;
+  clickable(li, () => { rowAction += 1; });
+  const innerBtn = { tagName: 'BUTTON' };   // 行内的上移/下移/置顶按钮
+  let prevented = false;
+  li.handlers.keydown({ target: innerBtn, key: 'Enter', preventDefault() { prevented = true; } });
+  assert.equal(rowAction, 0, '★ 事件源是行内按钮 → 整行动作不得触发');
+  assert.equal(prevented, false, '★ 也不得 preventDefault(否则按钮自己就按不动了)');
+  li.handlers.keydown({ target: innerBtn, key: ' ', preventDefault() { prevented = true; } });
+  assert.equal(rowAction, 0, '★ 空格同理');
+  assert.equal(prevented, false, '★ 空格也不得被吞');
+  // 对照:事件源就是本行时,键盘必须照常可用(不能把功能整个挡掉)
+  li.handlers.keydown({ target: li, key: 'Enter', preventDefault() { prevented = true; } });
+  assert.equal(rowAction, 1, '对照:事件源是本行 → 正常触发');
+  assert.equal(prevented, true, '对照:本行按键照旧 preventDefault');
+  let spacePrevented = false;
+  li.handlers.keydown({ target: li, key: ' ', preventDefault() { spacePrevented = true; } });
+  assert.equal(rowAction, 2, '对照:空格也能用');
+  assert.equal(spacePrevented, true, '对照:空格照旧 preventDefault');
+});
+
+test('★ 分类上移/下移:成功后必须广播 cats-changed;冲突(false)也必须重绘', async () => {
+  // 背景(2026-09-28 审计 P2):① 移动成功若不广播,别的标签页的顺序视图永远不动
+  // (本地重绘了,别的页面不知道);② 冲突(412,返回 false)时 lib 已把 vault 视图刷成
+  // 最新 —— 仍必须重绘,否则界面停在一个已经过期的顺序上(旧实现写在 if (moved) 里)。
+  await withDom(async (ctx, byId) => {
+    const sent = [];
+    let sortedCalls = 0;
+    let moveResult = true;
+    const st = new Store();
+    st.set('tabs', { send: (m) => sent.push(m) });
+    st.set('lib', {
+      sortedCategories: () => { sortedCalls += 1; return ['甲', '乙']; },
+      catPin: () => false,
+      catCount: () => null,
+      categoryInfo: () => ({ data: { notes: [] } }),
+      moveCat: async () => moveResult,
+    });
+    renderCategoryList(ctx(st));
+    const li = byId('catList').children[0];
+    const btns = li.children.find((c) => c.className === 'cat-btns');
+    const up = btns.children[0];                       // 「上移」
+    const before = sortedCalls;                        // 初次渲染那一次
+    await up.handlers.click[0]({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));        // 让 move() 内部的 await 续行走完
+    assert.deepEqual(sent, [{ type: 'cats-changed' }],
+      '★ 移动成功必须广播 —— 旧实现不广播,别的标签页顺序视图永远不动');
+    assert.equal(sortedCalls, before + 1, '成功后要重绘(把新顺序画出来)');
+
+    // 冲突(false):不广播,但**仍然重绘**
+    sent.length = 0; moveResult = false;
+    await up.handlers.click[0]({ stopPropagation() {} });
+    await new Promise((r) => setTimeout(r, 0));
+    assert.deepEqual(sent, [], '冲突时不该广播(没有真的改动)');
+    assert.equal(sortedCalls, before + 2,
+      '★ 冲突(412)也必须重绘 —— 旧实现写在 if (moved) 里,界面会停在过期顺序上');
+  });
+});
+
+test('★ 置顶成功必须广播 cats-changed(别的标签页的置顶视图跟着失效)', async () => {
+  await withDom(async (ctx, byId) => {
+    const sent = [];
+    const st = new Store();
+    st.set('tabs', { send: (m) => sent.push(m) });
+    st.set('lib', {
+      sortedCategories: () => ['甲'],
+      catPin: () => false,
+      catCount: () => null,
+      categoryInfo: () => ({ data: { notes: [] } }),
+      setCatPin: async () => {},
+    });
+    renderCategoryList(ctx(st));
+    const li = byId('catList').children[0];
+    const btns = li.children.find((c) => c.className === 'cat-btns');
+    const pinBtn = btns.children[2];                   // 「置顶」
+    await pinBtn.handlers.click[0]({ stopPropagation() {} });
+    assert.deepEqual(sent, [{ type: 'cats-changed' }],
+      '★ 置顶后必须广播 —— 旧实现只重绘本地,别的标签页置顶视图不动');
   });
 });

@@ -222,9 +222,27 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
     //   cancel = 原生 dialog 的 Esc 关闭(先于 close 触发);close = 兜底其余关闭路径。
     //   按钮路径先落定值,close 事件晚到时 settled 保证不会改写返回值。
     let settled = false;
-    const settle = (v) => { if (!settled) { settled = true; resolve(v); } };
-    dlg.addEventListener('cancel', () => settle(null));
-    dlg.addEventListener('close', () => settle(null));
+    // ★ close 事件是**异步(task)派发**的,而 dlg 是全应用共用的同一个 <dialog>:
+    //   连续两次 modal(「修改主密码」的两问)时,第二个弹窗会在第一个弹窗排队的
+    //   close 事件派发**之前**就注册好监听 —— 「确定」按钮是同步 settle,紧接着的
+    //   `await` 续行是微任务,先于那个 task 跑 → 于是新弹窗收到的是**别人**那次的
+    //   close、被 settle(null) 提前落定,整条流程静默失效(2026-09-28 审计 P1,真机复现)。
+    //   两道防线:
+    //     ① settle 时摘掉监听,不留悬挂监听;
+    //     ② close 只在「弹窗真的已经关掉」时才落定 —— 排队中的旧 close 到达时,新弹窗
+    //        还开着(open === true),必须忽略。⚠️ 只做①是不够的:被派发到的是新弹窗
+    //        自己刚注册的监听,①摘不掉它(2026-09-28 补护栏时被这条用例抓出来)。
+    const onCancel = () => settle(null);
+    const onClose = () => { if (dlg.open) return; settle(null); };
+    const settle = (v) => {
+      if (settled) return;
+      settled = true;
+      dlg.removeEventListener('cancel', onCancel);
+      dlg.removeEventListener('close', onClose);
+      resolve(v);
+    };
+    dlg.addEventListener('cancel', onCancel);
+    dlg.addEventListener('close', onClose);
 
     const h = document.createElement('h3');
     h.textContent = title;
@@ -564,6 +582,10 @@ function onTabMessage(msg) {
 async function rescanFromTabs() {
   try {
     await S.lib.rescan();
+    // ★ 分类清单改了,vault.json 的元信息(置顶/篇数/手动顺序)也必须重拉 ——
+    //   rescan() 只重建分类清单、不碰 vaultJson,只 rescan 会让本标签页继续按陈旧的
+    //   catMeta 渲染顺序与置顶(2026-09-28 审计 P2)。
+    await S.lib.refreshVaultMeta();
   } catch {
     return; // 网络问题:不打扰用户,下次操作自然会重试
   }

@@ -10,6 +10,7 @@ import { MemoryR2 } from '../worker/memory-r2.mjs';
 import * as API from '../public/js/api.js';
 import { Library } from '../public/js/lib.js';
 import * as V from '../public/js/vaultlib.js';
+import * as F from '../public/js/format.js';
 import { hexToBytes, sha256Hex } from '../public/js/crypto.js';
 import { saveSession, loadSession } from '../public/js/session.js';
 
@@ -553,4 +554,72 @@ test('vault CAS 对弱验证器形态的 etag 免疫(CF 边缘把压缩 JSON 的
   await API.putVaultJson(JSON.stringify(again), fresh.etag);
   const final = await API.fetchVault();
   assert.equal(final.json.catMeta['测试二']?.pin, true);
+});
+
+/* ============================================================
+ * 2026-09-28 审计修复的三条数据层回归(分类调序那一批)
+ * ============================================================ */
+
+test('★ 分类调序冲突:412 时不得重放相对位移(否则一次点击变成移两格)', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('调序冲突密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, (await API.fetchVault()).etag);
+  await a.rescan();
+  for (const n of ['a', 'b', 'c', 'd']) await a.createCategory(n);
+  await a.rescan();
+  // 同一时刻的另一台设备(B 与 A 持有同一个 vault 版本)
+  const b = await unlockAs('调序冲突密码abc');
+  await b.rescan();
+
+  assert.equal(await b.moveCat('c', -1), true, 'B 先移动成功');
+  // A 手里的 etag 已旧 → 412。旧实现会「在新基线上再移一格」,本用例必须翻红。
+  assert.equal(await a.moveCat('c', -1), false, '★ 冲突时必须如实返回 false,不得重放');
+  const fresh = await API.fetchVault();
+  const order = F.sortCats([...a.categories.keys()], (n) => (fresh.json.catMeta || {})[n] || {}).join(',');
+  assert.equal(order, 'a,c,b,d', '★ 服务端只能「移了一格」(旧实现会得到 c,a,b,d)');
+  assert.equal(a.catMetaOf('c').order, fresh.json.catMeta.c.order, 'A 的本地视图已刷新成最新');
+});
+
+test('★ 删分类必须连 order 一起清(否则同名重建会继承旧位置)', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('删分类密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, (await API.fetchVault()).etag);
+  await a.rescan();
+  for (const n of ['a', 'b', 'c']) await a.createCategory(n);
+  await a.rescan();
+  await a.moveCat('b', -1);   // 顺序一旦动过,所有分类都会被写进 catMeta.order
+  await a.deleteCategory('b');
+  assert.equal(a.catMetaOf('b').order, undefined, '★ 本地 catMeta 不得留 order 残渣');
+  const fresh = await API.fetchVault();
+  assert.equal(fresh.json.catMeta?.['b'], undefined, '★ 服务端也不得留');
+  await a.createCategory('b');
+  await a.rescan();
+  const order = F.sortCats([...a.categories.keys()], (n) => a.catMetaOf(n)).join(',');
+  assert.equal(order, 'a,c,b', '★ 同名重建按名称兜底落末尾(旧实现会继承旧 order 插回原位)');
+});
+
+test('★ refreshVaultMeta:跨标签页必须看到别处的置顶与顺序', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('跨标签页密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, (await API.fetchVault()).etag);
+  await a.rescan();
+  for (const n of ['a', 'b', 'c']) await a.createCategory(n);
+  await a.rescan();
+  const b = await unlockAs('跨标签页密码abc');
+  await b.rescan();
+
+  await a.setCatPin('c', true);
+  assert.equal(b.catPin('c'), false, '刷新前必然陈旧(证明这条断言有判别力)');
+  assert.equal(await b.refreshVaultMeta(), true, 'refreshVaultMeta 成功');
+  assert.equal(b.catPin('c'), true, '★ 刷新后必须看到 A 的置顶');
+  assert.equal(b.sortedCategories()[0], 'c', '★ 视觉顺序也跟着变(置顶优先)');
 });

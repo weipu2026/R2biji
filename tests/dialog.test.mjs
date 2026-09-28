@@ -21,25 +21,39 @@ function installDom() {
       children: [],
       handlers: {},
       className: '',
-      textContent: '',
+      _text: null,
       value: '',
       type: '',
       placeholder: '',
       shown: false,
       closed: false,
+      open: false,
       appendChild(c) { e.children.push(c); return c; },
       addEventListener(ev, fn) { (e.handlers[ev] ||= []).push(fn); },
-      click() { for (const fn of e.handlers.click || []) fn({}); },
-      keydown(key) { for (const fn of e.handlers.keydown || []) fn({ key }); },
+      removeEventListener(ev, fn) {
+        const list = e.handlers[ev];
+        if (!list) return;
+        const i = list.indexOf(fn);
+        if (i >= 0) list.splice(i, 1);
+      },
+      click() { for (const fn of [...(e.handlers.click || [])]) fn({}); },
+      keydown(key) { for (const fn of [...(e.handlers.keydown || [])]) fn({ key }); },
       focus() {}, select() {},
-      showModal() { e.shown = true; },
-      close() { e.closed = true; },
-      // 真实 dialog 按 Esc 会先触发 cancel 事件再关闭;mock 里手动触发以模拟。
-      // ⚠️ close() 刻意**不**派发 close 事件:真浏览器的 close 事件是异步派发的,
-      //    按钮路径先落定值、close 晚到被 settled 挡住;若 mock 同步派发会把
-      //    这个顺序破坏掉,所有按钮用例都会变成返回 null。
-      cancel() { e.closed = true; for (const fn of e.handlers.cancel || []) fn({}); },
+      showModal() { e.shown = true; e.open = true; },
+      // ★ close() 派发 close 事件,而且**异步**(排队到下个 task)——与真浏览器一致:
+      //   按钮路径先 settle,close 晚到被 settled 挡住;同步派发会破坏这个顺序
+      //   (所有按钮用例都会返回 null)。异步派发还让「连续两次 modal 时第二个弹窗
+      //   被第一个排队的 close 落定」可复现 —— 那正是 2026-09-28 审计 P1 的护栏。
+      close() { e.closed = true; e.open = false; setTimeout(() => { for (const fn of [...(e.handlers.close || [])]) fn({}); }, 0); },
+      // 真实 dialog 按 Esc:先派发 cancel(此时还开着),没被阻止才关闭并(异步)派发 close。
+      cancel() { for (const fn of [...(e.handlers.cancel || [])]) fn({}); e.closed = true; e.open = false; },
     };
+    // body.textContent = '' 必须真的清空子节点 —— 第二次弹窗复用同一个 #modalBody,
+    // 不清空的话 btn()/inputOf() 会命中上一次残留的按钮/输入框,断言假绿。
+    Object.defineProperty(e, 'textContent', {
+      get() { return e._text === null ? '' : e._text; },
+      set(v) { e._text = String(v); e.children = []; },
+    });
     return e;
   };
   const dlg = make('dialog');
@@ -168,4 +182,27 @@ test('按 Esc(cancel 事件)必须把 Promise 落定为 null,且关掉弹窗', a
   inputOf(dom2.body).value = '不该被采用';
   dom2.dlg.cancel();
   assert.equal(await withTimeout(p2), null);
+});
+
+test('★ 连续两次 modal:第二个弹窗不得被第一个排队的 close 事件落定(修改主密码契约)', async () => {
+  // 背景(2026-09-28 审计 P1):dlg 是全应用共用的同一个 <dialog>;changePassword 在
+  // 第一问 resolve 后**同一微任务内**发起第二问。而第一个弹窗 dlg.close() 排队的 close
+  // 事件是异步(task)派发的 → 第二个弹窗刚注册的监听会收到它、被 settle(null) 提前落定,
+  // 于是 if (pw2 == null) return 静默返回 —— 用户以为改了密码,其实没改。
+  const { body } = installDom();          // 只建一次 DOM:模拟全应用共用的那一个 dialog
+  const p1 = modal({ type: 'prompt', title: '修改主密码', label: '新密码', password: true });
+  inputOf(body).value = 'first-strong-password';
+  btn(body, '确定').click();
+  assert.equal(await p1, 'first-strong-password', '第一问正常返回');
+
+  // changePassword 的真实形状:紧接着发起第二问
+  const p2 = modal({ type: 'prompt', title: '再输一遍新密码', password: true });
+  inputOf(body).value = 'first-strong-password';
+  // 让第一个弹窗排队的 close 事件先派发 —— 旧实现正是在这里把 p2 落定成 null
+  let early = 'pending';
+  await Promise.race([p2.then((v) => { early = v; }), new Promise((r) => setTimeout(r, 20))]);
+  assert.equal(early, 'pending', '★ 第二个弹窗在用户操作前不得被落定(旧实现会得到 null)');
+
+  btn(body, '确定').click();
+  assert.equal(await p2, 'first-strong-password', '用户在第二问点确定 → 必须返回输入值');
 });

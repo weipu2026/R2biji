@@ -89,3 +89,38 @@ test('没有活动会话时 releaseSession 也不报错,并如实报告 false', 
   assert.equal(had, false, '没有 lib 时应报告 false(而不是假装销毁过)');
   assert.equal(deps.calls.clearSession, 1, '即使没有 lib,令牌与会话仍必须清干净');
 });
+
+test('★ releaseSession:必须把 Library 手里最新的 vault.json 交还给会话态', () => {
+  // 背景(2026-09-28 真机探针):store.vaultJson 只在 boot 时拉过一次;而
+  // 改主密码(换 KDF 盐与 wrap)、调序/置顶(只改 catMeta)都只更新 Library 自己那份副本。
+  // 不交还的话「改完主密码 → 锁定 → **原地**解锁(不刷新页面)」会拿旧 wrap 去解新密码
+  // (报「主密码错误」),再用旧密码试则是 401 —— 用户被锁在门外,只能刷新页面。
+  const store = new Store();
+  const stale = { kdf: { salt: 'OLD' } };
+  const fresh = { kdf: { salt: 'NEW' }, catMeta: { 甲: { pin: true } } };
+  store.set('vaultJson', stale);
+  store.set('vaultEtag', 'etag1');
+  store.set('lib', { vaultJson: fresh, vaultEtag: 'etag2', destroy() {} });
+
+  releaseSession(store, fakeDeps());
+
+  assert.equal(store.get('vaultJson'), fresh,
+    '★ 必须交还 Library 那份(不交还 → 改密码后原地解锁会报「主密码错误」)');
+  assert.equal(store.get('vaultEtag'), 'etag2', 'etag 必须跟着走(CAS 才用得上最新值)');
+});
+
+test('releaseSession:lib 缺失或它没有 vaultJson 时,不得把会话态覆盖成 undefined', () => {
+  const store = new Store();
+  store.set('vaultJson', { keep: true });
+  store.set('vaultEtag', 'etag-keep');
+  releaseSession(store, fakeDeps());                 // lib 为 null
+  assert.deepEqual(store.get('vaultJson'), { keep: true }, '没有 lib 时不得动会话态');
+  assert.equal(store.get('vaultEtag'), 'etag-keep');
+
+  const store2 = new Store();
+  store2.set('vaultJson', { keep: 2 });
+  store2.set('lib', fakeLibrary());                  // 替身没有 vaultJson/vaultEtag
+  releaseSession(store2, fakeDeps());
+  assert.deepEqual(store2.get('vaultJson'), { keep: 2 },
+    'lib 没有 vaultJson 时也不得覆盖成 undefined');
+});
