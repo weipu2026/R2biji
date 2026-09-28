@@ -163,15 +163,25 @@ export async function openCategory(ctx, name) {
     return;
   }
   if (seq !== catOpenSeq) return; // 慢的分类请求后到:放弃,别覆盖用户新选的分类
-  S.patch({ activeCat: name, activeNoteId: null, editing: false });
+  /* 点分类默认读列表最顶端那篇(2026-09-28 用户要求:省掉「再点一次笔记」这步)。
+   * 顺序必须用 F.sortNotes —— 与侧栏渲染同源,视觉第一行就是第一篇。
+   * 例外:重载**当前**分类(冲突回云端 / 多标签页同步)时,原选中的笔记还在
+   * 就保持不动 —— 那两种场景用户正读着它,拽到顶端等于把人踢走。 */
+  const catInfo = S.get('lib').categoryInfo(name);
+  const notes = catInfo?.data ? F.sortNotes(catInfo.data.notes) : [];
+  const prevId = S.get('activeNoteId');
+  const openId = notes.some((n) => n.id === prevId) ? prevId : (notes[0]?.id ?? null);
+  S.patch({ activeCat: name, activeNoteId: openId, editing: false });
   ctx.dom.byId('activeCatName').textContent = name;
   renderCategoryList(ctx);
   renderNoteList(ctx);
   ctx.closeDrawer(); // 移动端:选完分类收起抽屉,把屏幕还给内容
-  /* 分类里有笔记时不能说「暂无笔记」——那只是还没选中某一篇;选完分类不等于选完笔记 */
-  const noteCount = S.get('lib').categoryInfo(name)?.data?.notes?.length || 0;
-  ctx.showEmpty(noteCount ? '从左侧选择一条笔记' : `「${name}」暂无笔记`,
-    noteCount ? null : { label: '新建笔记', fn: () => ctx.addNote() });
+  if (openId) {
+    ctx.renderReadView();
+  } else {
+    /* 真正空分类才落空状态,并顺手给「新建笔记」引导 */
+    ctx.showEmpty(`「${name}」暂无笔记`, { label: '新建笔记', fn: () => ctx.addNote() });
+  }
 }
 
 export async function addCategory(ctx) {

@@ -25,6 +25,27 @@ const PUBLIC = join(ROOT, 'public');
 
 /* ---------- 从 recover.html 抠出内联脚本并加载为模块 ---------- */
 
+/* ★ 先替换 globalThis.Response,再加载内联脚本(与 e2e.test.mjs 伪造 Response 同款纪律):
+ * recover.html 的 inflateRaw 用浏览器惯用的 `new Response(stream).arrayBuffer()` 消费流,
+ * 在浏览器里这是兼容性最广的正确写法,**不改**;但在受限环境(沙箱 RLIMIT_AS / 小内存 CI)
+ * 的 Node 里,构造 undici 的 Response 会懒加载 llhttp WASM,必然
+ * `WebAssembly.instantiate(): Out of memory` —— 且以 unhandledRejection 逃出 try/catch
+ * 直接打死进程。下面的替身用 Web 流异步迭代逐块收集,忠实等价,让本套件在任何环境确定性地绿。
+ * (recover.html 是应急兜底页,测试必须永远可信,不能容忍环境性假红。) */
+class StreamResponseStub {
+  constructor(stream) { this._stream = stream; }
+  async arrayBuffer() {
+    const chunks = [];
+    for await (const chunk of this._stream) chunks.push(chunk); // Web 流在 Node ≥16.5 可异步迭代
+    const total = chunks.reduce((n, c) => n + c.byteLength, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const c of chunks) { out.set(new Uint8Array(c.buffer, c.byteOffset, c.byteLength), off); off += c.byteLength; }
+    return out.buffer;
+  }
+}
+globalThis.Response = StreamResponseStub;
+
 const html = readFileSync(join(PUBLIC, 'recover.html'), 'utf8');
 const scriptMatch = /\/\*RECOVER-SCRIPT-START\*\/([\s\S]*?)\/\*RECOVER-SCRIPT-END\*\//.exec(html);
 assert.ok(scriptMatch, 'recover.html 里必须有 RECOVER-SCRIPT-START/END 标记(测试靠它抽脚本)');

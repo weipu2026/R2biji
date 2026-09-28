@@ -261,6 +261,14 @@ const MUTANTS = [
     to: "| tr -d ' ')",
     expect: '赋值管道必须有兜底',
   },
+  /* ---- 侧栏交互契约(tests/sidebar-guard.test.mjs)---- */
+  {
+    label: '点分类不再自动打开顶端笔记(退回「再点一次才能读」)',
+    file: 'public/js/features/sidebar.js',
+    from: 'const openId = notes.some((n) => n.id === prevId) ? prevId : (notes[0]?.id ?? null);',
+    to: 'const openId = null; // MUTANT:退回旧行为,选分类不选笔记',
+    expect: '点分类自动打开列表最顶端那篇',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
@@ -277,8 +285,13 @@ const NODE = process.execPath;
 function runTests() {
   let out = '';
   let failed = [];
+  // TEST_CONCURRENCY:资源受限环境(小内存 CI/沙箱)可调低并发,
+  // 避免测试进程并行时把内存挤爆 —— 那会产生与代码无关的假失败,污染判红
+  const args = ['--test', ...TEST_FILES];
+  const cc = Number(process.env.TEST_CONCURRENCY || '');
+  if (Number.isFinite(cc) && cc > 0) args.splice(1, 0, `--test-concurrency=${cc}`);
   try {
-    out = execFileSync(NODE, ['--test', ...TEST_FILES], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    out = execFileSync(NODE, args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   } catch (e) {
     out = `${e.stdout || ''}${e.stderr || ''}`;
   }

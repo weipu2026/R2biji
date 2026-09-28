@@ -732,8 +732,9 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 /* ---------- Markdown 渲染 ---------- */
 
-/* 阅读行宽上限:长文不糊满宽屏,阅读视线有明确回行点 */
-.read-body .md, .read-body > * { max-width: 76ch; }
+/* 阅读正文通栏:不限行宽,宽屏整行读到底(2026-09-28 用户要求;
+ * 原 76ch 上限的「回行点」反而让宽屏只读半边,已移除) */
+.read-body .md, .read-body > * { max-width: none; }
 .read-body .md { line-height: 1.85; }
 .read-body h1, .read-body h2, .read-body h3 {
   margin: 22px 0 10px;
