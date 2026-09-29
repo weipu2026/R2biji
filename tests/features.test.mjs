@@ -34,7 +34,7 @@ const CTX_KEYS = ['dom', 'icons', 'toast', 'modal', 'store', 'markDirty', 'copyT
   'showLock', 'lockNow', 'doUnlock', 'doCreateLibrary', 'resumeSession',
   'addCategory', 'renameCategory', 'deleteCategory', 'openCategory',
   'enterEditMode', 'exitEditMode', 'collectEditChanges', 'addAttachments',
-  'copyWholeNote', 'deleteNote', 'moveNoteSelection',
+  'copyWholeNote', 'deleteNote', 'moveNoteSelection', 'bindReadSwipe',
   'runSearch', 'closeSearch', 'toggleTheme', 'initTheme', 'openTrash', 'openPwGenerator', 'exportNoteMd'];
 
 function featureFiles() {

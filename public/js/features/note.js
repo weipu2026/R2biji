@@ -33,6 +33,71 @@ import * as F from '../format.js';
  * 模块级持有:阅读面全场只有一块,状态天然全局。 */
 let lastReadNoteId = null;
 
+/* ================= 触屏上下滑动翻篇 ================= */
+
+/** 触发翻篇的最小纵向位移(px)。太小会把手指抖动当成翻篇。 */
+export const SWIPE_MIN_PX = 56;
+
+/**
+ * 把一次滑动手势翻译成「翻到哪一篇」——纯函数,便于确定性单测。
+ * @param {{dx:number, dy:number, atTop:boolean, atBottom:boolean}} g
+ *        dx/dy = 手指位移(手指向上为负);atTop/atBottom = **手势开始时**阅读面是否已贴边。
+ * @returns {number} 0 = 不翻篇;1 = 下一篇;-1 = 上一篇
+ *
+ * 三条刻意的取舍:
+ *   · 只认「**手势开始时**就已经贴边」的回弹式滑动。中段起手向上划只是正常阅读滚动,
+ *     抢过来翻篇会让长笔记读不下去 —— 手机阅读器通行做法是「划到底、再划一下才翻页」。
+ *     用起始态而非结束态:滚动带惯性,结束时 scrollTop 还在变化,判定会飘。
+ *   · 纵向位移必须大于横向 —— 手机上斜着划很常见,不能把普通滚动/选中误判成翻篇。
+ *   · 内容短到不需要滚动时 atTop 与 atBottom 同时为真 → 两个方向都能翻篇,
+ *     这正是「短笔记靠滑动切换」的预期行为。
+ */
+export function readSwipeIntent({ dx, dy, atTop, atBottom }) {
+  if (Math.abs(dy) < SWIPE_MIN_PX) return 0;
+  if (Math.abs(dx) > Math.abs(dy)) return 0;
+  if (dy < 0) return atBottom ? 1 : 0;   // 上划(手指向上):已到底 → 下一篇
+  return atTop ? -1 : 0;                 // 下划(手指向下):已到顶 → 上一篇
+}
+
+/**
+ * 在阅读面绑定触屏上下滑动翻篇。**启动时调一次**即可 ——
+ * 它跟着 DOM 节点活,不跟渲染走(每次 renderReadView 都绑会叠加监听,
+ * 一次滑动翻好几篇)。
+ * @param {object} ctx
+ */
+export function bindReadSwipe(ctx) {
+  const view = ctx.dom.byId('readView');
+  if (!view || typeof view.addEventListener !== 'function') return;
+  /** 手势起点 + **起点时刻**的贴边状态;null = 当前没有进行中的手势。 */
+  let start = null;
+  const edges = () => {
+    const max = view.scrollHeight - view.clientHeight;
+    // 内容短到滚不动时 max ≈ 0:此时两端同时成立,两个方向都能翻篇
+    return { atTop: view.scrollTop <= 0, atBottom: max <= 1 || view.scrollTop >= max - 1 };
+  };
+  view.addEventListener('touchstart', (e) => {
+    start = null;
+    // 多指(捏合缩放)不接管;编辑态兜底(readView 那时本就隐藏)
+    if (e.touches.length !== 1 || ctx.store.get('editing')) return;
+    const t = e.touches[0];
+    start = { x: t.clientX, y: t.clientY, ...edges() };
+  }, { passive: true });
+  view.addEventListener('touchend', (e) => {
+    if (!start) return;
+    const from = start;
+    start = null;
+    const t = e.changedTouches && e.changedTouches[0];
+    if (!t) return;
+    const delta = readSwipeIntent({
+      dx: t.clientX - from.x, dy: t.clientY - from.y, atTop: from.atTop, atBottom: from.atBottom,
+    });
+    // 越界(已是本分类第一/最后一篇)静默 —— 与 J/K 的既有取舍同源,连续划不会弹一串提示
+    if (delta) ctx.moveNoteSelection(delta);
+  }, { passive: true });
+  // 系统手势/来电打断时作废这次手势,避免把半截位移当成翻篇
+  view.addEventListener('touchcancel', () => { start = null; }, { passive: true });
+}
+
 export function renderReadView(ctx) {
   const $ = (id) => ctx.dom.byId(id);
   const note = ctx.activeNoteData();

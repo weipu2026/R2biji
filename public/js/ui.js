@@ -28,7 +28,7 @@ import {
 } from './features/sidebar.js';
 import {
   renderReadView, copyWholeNote, enterEditMode, collectEditChanges, exitEditMode,
-  addAttachments, addNote, deleteNote, toggleNotePin, moveNote,
+  addAttachments, addNote, deleteNote, toggleNotePin, moveNote, bindReadSwipe,
 } from './features/note.js';
 // shell 只导出 boot 给本文件用(「从备份恢复」后要重跑启动流程);
 // 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
@@ -175,6 +175,8 @@ const ctx = {
   copyWholeNote: () => copyWholeNote(ctx),
   deleteNote: () => deleteNote(ctx),
   moveNoteSelection: (d) => moveNoteSelection(ctx, d),
+  // 触屏滑动翻篇的监听在启动时绑一次(shell.js 的 bindEvents 调),不是事件回调
+  bindReadSwipe: () => bindReadSwipe(ctx),
   runSearch: () => runSearch(ctx),
   closeSearch: () => closeSearch(ctx),
   toggleTheme: () => toggleTheme(ctx),

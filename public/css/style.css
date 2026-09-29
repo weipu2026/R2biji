@@ -706,16 +706,28 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 #editView { display: flex; flex-direction: column; }
 #editView > * { flex-shrink: 0; }
 
+/* 阅读标题区:宽屏「标题 + 操作」同一行;横向放不下时标题整行换下去。
+ * ★ 2026-09-29 手机端实测:标题被压成「一字一行的竖列」。根因是三条叠在一起:
+ *   ① .read-actions 是 flex-shrink:0(4 个按钮一个都不压缩,约占 250~260px);
+ *   ② #readTitle 可收缩,而原本的 word-break:break-all 让**每个字符都是换行点**
+ *      → flex 的自动最小尺寸(min-content)塌成「一个汉字宽」,而不是「一个词宽」;
+ *   ③ 360px 手机上可用宽度 = 360 - 20(卡片外边距) - 32(卡片内边距) ≈ 308px,
+ *      扣掉操作区只剩约 30px —— 正好一个汉字。
+ * 修法:允许换行 + 给标题一个宽度下限(宁可整行换下去也不逐字断行)+ 断行改用
+ * overflow-wrap:anywhere(只在整词/整条 URL 放不下时才断,不在词内部随意断)。 */
 .read-head {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 16px;
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; flex-wrap: wrap;
 }
 #readTitle {
   margin: 0;
+  flex: 1 1 auto;
+  min-width: min(100%, 11em); /* 宽度下限:约 11 个汉字,低于此值宁可整行换行 */
   font-family: var(--serif);
   font-size: 26px;
   font-weight: 500;
   line-height: 1.35;
-  word-break: break-all;
+  overflow-wrap: anywhere;    /* 禁用 break-all:它会制造「逐字一行」的断点 */
   letter-spacing: .5px;
 }
 .read-actions { display: flex; gap: 6px; flex-shrink: 0; }
@@ -1121,6 +1133,12 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 
   /* 卡片自带内边距,移动端不再给 .read-body 二次缩进 */
   #readView, #editView { margin: 10px 10px 14px; padding: 18px 16px 20px; }
+  /* 手机端阅读标题:标题与操作区分两行(标题拿满宽度,按钮换到下面一行)。
+   * 这是「标题被压成一字一行」的根本解 —— 靠宽度下限只能让它整行绕下去,
+   * 纵向堆叠则直接给它整行宽度;顺带把 4 个按钮从挤成一排变成可换行排布。 */
+  .read-head { flex-direction: column; align-items: stretch; gap: 10px; }
+  #readTitle { font-size: 22px; }
+  .read-actions { flex-wrap: wrap; }
   .edit-body { min-height: 220px; }
   .lock-card { margin: 16px; padding: 22px 18px; }
   .toast { left: 12px; right: 12px; transform: none; }

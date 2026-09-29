@@ -153,6 +153,11 @@ function bindEvents(ctx) {
     if (sel && !sel.isCollapsed && String(sel).trim()) return;
     ctx.enterEditMode();
   });
+  /* 手机端:阅读面「划到边界再划一下」翻到上/下一篇。
+   * 手机上没有侧栏可点(分类与笔记列表都收在抽屉里),翻篇全靠反复开抽屉太别扭;
+   * 手势判定在 note.js(纯函数 + 触屏监听),这里只负责绑一次。
+   * 只在贴边时接管 —— 中段上划仍是正常阅读滚动。 */
+  ctx.bindReadSwipe();
   $('btnDone').addEventListener('click', () => ctx.exitEditMode());
   // 显式保存:先把输入框里的内容收进内存态,再走与 Ctrl+S 同一条上传流水线
   $('btnSaveNow').addEventListener('click', () => {

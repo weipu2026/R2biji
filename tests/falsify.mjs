@@ -470,6 +470,71 @@ const MUTANTS = [
     to: "  if (!names.length) {\n    const li = document.createElement('li');\n    li.className = 'cat-item none';\n    li.textContent = '暂无分类,点上方 + 新建';\n    ul.appendChild(li);\n  }\n  // MUTANT:不还焦点",
     expect: 'renderCategoryList:整表重建后焦点也必须还回原按钮',
   },
+
+  /* ---------- 手机端阅读:标题竖排 + 上下滑动翻篇(2026-09-29 真机反馈) ---------- */
+  {
+    label: '阅读标题丢回 word-break:break-all(每个字符都成换行点 → 一字一行)',
+    file: 'public/css/style.css',
+    from: '  overflow-wrap: anywhere;    /* 禁用 break-all:它会制造「逐字一行」的断点 */',
+    to: '  word-break: break-all; /* MUTANT */',
+    expect: '禁用 word-break:break-all',
+  },
+  {
+    label: '阅读标题去掉宽度下限(flex 自动最小尺寸对中文只剩一个汉字宽)',
+    file: 'public/css/style.css',
+    from: '  min-width: min(100%, 11em); /* 宽度下限:约 11 个汉字,低于此值宁可整行换行 */\n',
+    to: '  /* MUTANT:去掉宽度下限 */\n',
+    expect: '必须有宽度下限',
+  },
+  {
+    label: '阅读标题区不再允许换行(标题被挤在操作按钮旁边)',
+    file: 'public/css/style.css',
+    from: '  gap: 16px; flex-wrap: wrap;',
+    to: '  gap: 16px;',
+    expect: '必须允许整行换下去',
+  },
+  {
+    label: '窄屏不再纵向堆叠标题与操作区(只靠宽度下限硬撑)',
+    file: 'public/css/style.css',
+    from: '  .read-head { flex-direction: column; align-items: stretch; gap: 10px; }',
+    to: '  /* MUTANT:窄屏不堆叠 */',
+    expect: '手机端阅读标题纵向堆叠',
+  },
+  {
+    label: '滑动翻篇不看边界(中段上划也被当成翻篇,长笔记读不下去)',
+    file: 'public/js/features/note.js',
+    from: '  if (dy < 0) return atBottom ? 1 : 0;   // 上划(手指向上):已到底 → 下一篇\n  return atTop ? -1 : 0;                 // 下划(手指向下):已到顶 → 上一篇',
+    to: '  if (dy < 0) return 1; // MUTANT:不看边界\n  return atTop ? -1 : 0;',
+    expect: '中段起手的上划只是正常阅读滚动',
+  },
+  {
+    label: '滑动翻篇方向反转(上划去了上一篇)',
+    file: 'public/js/features/note.js',
+    from: '  if (dy < 0) return atBottom ? 1 : 0;   // 上划(手指向上):已到底 → 下一篇',
+    to: '  if (dy < 0) return atBottom ? -1 : 0; // MUTANT:方向反转',
+    expect: '方向不得反',
+  },
+  {
+    label: '滑动翻篇不判纵横比(斜着划也被当成翻篇)',
+    file: 'public/js/features/note.js',
+    from: '  if (Math.abs(dx) > Math.abs(dy)) return 0;',
+    to: '  if (false) return 0; // MUTANT:不判纵横比',
+    expect: '横向位移更大时不算',
+  },
+  {
+    label: '滑动翻篇不绑 touchcancel(被打断的手势仍会翻篇)',
+    file: 'public/js/features/note.js',
+    from: "  view.addEventListener('touchcancel', () => { start = null; }, { passive: true });",
+    to: '  // MUTANT:不绑 touchcancel',
+    expect: 'touchcancel 之后这次手势作废',
+  },
+  {
+    label: '滑动判定算出来了却不真翻篇(接线断了)',
+    file: 'public/js/features/note.js',
+    from: '    if (delta) ctx.moveNoteSelection(delta);',
+    to: '    // MUTANT:不翻篇',
+    expect: '接线:底部上划 → 翻下一篇',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
