@@ -707,12 +707,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 #editView > * { flex-shrink: 0; }
 
 /* 阅读标题区:宽屏「标题 + 操作」同一行;横向放不下时标题整行换下去。
- * ★ 2026-09-29 手机端实测:标题被压成「一字一行的竖列」。根因是三条叠在一起:
- *   ① .read-actions 是 flex-shrink:0(4 个按钮一个都不压缩,约占 250~260px);
+ * ★ 2026-09-29 手机端真机反馈「标题变成一字一行的竖列」。根因是三条叠在一起:
+ *   ① .read-actions 是 flex-shrink:0(4 个按钮一个都不压缩;按 .btn.small 的
+ *      padding 5px/12px 与 13px 字号**估算**合计约 250~260px —— 未做真机测量);
  *   ② #readTitle 可收缩,而原本的 word-break:break-all 让**每个字符都是换行点**
  *      → flex 的自动最小尺寸(min-content)塌成「一个汉字宽」,而不是「一个词宽」;
  *   ③ 360px 手机上可用宽度 = 360 - 20(卡片外边距) - 32(卡片内边距) ≈ 308px,
- *      扣掉操作区只剩约 30px —— 正好一个汉字。
+ *      扣掉操作区只剩约 30px —— 正好一个汉字(由①的估算推出的量级,非实测)。
  * 修法:允许换行 + 给标题一个宽度下限(宁可整行换下去也不逐字断行)+ 断行改用
  * overflow-wrap:anywhere(只在整词/整条 URL 放不下时才断,不在词内部随意断)。 */
 .read-head {
