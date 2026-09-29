@@ -16,8 +16,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { withDom, withLocalStorage } from './dom-stub.mjs';
 import { Store } from '../public/js/store.js';
-import { renameCategory, renameCategoryByName, renderCategoryList, renderNoteList } from '../public/js/features/sidebar.js';
-import { moveNoteToCategory, pickCategoryForNote, deleteNote } from '../public/js/features/note.js';
+import { renameCategory, renameCategoryByName, renderCategoryList, renderNoteList, openNote, openCategory, deleteCategory } from '../public/js/features/sidebar.js';
+import { moveNoteToCategory, pickCategoryForNote, deleteNote, collectEditChanges } from '../public/js/features/note.js';
 
 /** 把一个 Store + 一堆「被调过就记下来」的桩拼成 ctx。
  *  dom 必须由调用方(通常是 withDom 的 byId)注入 —— 见文件头那条说明。 */
@@ -30,6 +30,7 @@ function recorder(st, extra = {}) {
     markDirty: (n) => rec.dirty.push(n),
     renderNoteList: () => {},
     renderCategoryList: () => {},
+    renderReadView: () => {},
     showEmpty: (t) => rec.empties.push(t),
     fmtTime: () => '刚刚',
     closeDrawer: () => {},
@@ -63,6 +64,7 @@ function libStub({ jia, yi = [], appendResult = { ok: true }, withYi = true } = 
   const lib = {
     categoryInfo: (n) => state[n] || null,
     sortedCategories: () => Object.keys(state),
+    catPin: () => false,
     catCount: (n) => (state[n]?.data ? state[n].data.notes.length : null),
     loadCategory: async (n) => { calls.load.push(n); return state[n]?.data; },
     appendNoteToCategory: async (n, note) => {
@@ -402,4 +404,118 @@ test('★ .cat-pick 必须有纵向间距规则(没有时弹层按钮零间距�
   const rule = /\.cat-pick\s*\{[^}]*\}/.exec(css);
   assert.ok(rule, '.cat-pick 规则必须存在');
   assert.match(rule[0], /gap:\s*\d+px/, '★ 必须声明 gap(按钮间距)');
+});
+
+/* ============ 切换/删除时的编辑框收集(2026-09-29 下午二轮复审) ============ */
+/* 结论先行:shell 的 input 接线做到了「逐键收集」,正常打字时内存永远是最新的,
+ * 所以「编辑中切笔记/切分类」**不丢字** —— 此前「只在收尾时提交」的前提是错的。
+ * 但该不变量此前依赖别处的接线细节,这里补结构护栏:切换前再收一道,与移动/
+ * 删除前收集同一不变量「离开编辑态,字必须已进内存」。 */
+
+test('★ openNote:编辑中逐键收集已同步,切换不丢字(真实 collect + 真实 input 接线)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib, state } = libStub({
+      jia: [
+        { id: 'k1', title: '旧标题', content: '旧内容', attachments: [] },
+        { id: 'k2', title: '第二篇', content: '', attachments: [] },
+      ],
+    });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('dirty', new Set());
+    st.set('lib', lib);
+    const { ctx } = recorder(st, {
+      dom: { byId },
+      activeNoteData: () => state.甲.data.notes.find((n) => n.id === st.get('activeNoteId')),
+      collectEditChanges: () => collectEditChanges(ctx),   // 真实实现(shell 同款接法)
+      markDirty: (n) => st.get('dirty').add(n),            // 真实语义:记进 store 的脏集合
+    });
+    // 复刻 shell.js 的逐键收集接线:input 事件 → collectEditChanges
+    byId('editTitle').addEventListener('input', () => ctx.collectEditChanges());
+    byId('editBody').addEventListener('input', () => ctx.collectEditChanges());
+
+    // 模拟用户打字:改值 + input 事件(与真机一致的事件序)
+    byId('editTitle').value = '打字中的新标题';
+    byId('editBody').value = '打字中的新内容';
+    byId('editTitle').fire('input');
+    byId('editBody').fire('input');
+
+    openNote(ctx, 'k2');   // 编辑中直接点另一篇笔记
+
+    assert.equal(state.甲.data.notes[0].title, '打字中的新标题', '★ 打过的字必须已在内存(逐键收集)');
+    assert.equal(state.甲.data.notes[0].content, '打字中的新内容');
+    assert.ok(st.get('dirty').has('甲'), '收集要置脏,4 秒兜底保存才接得住');
+    assert.equal(st.get('activeNoteId'), 'k2', '正常切换到目标笔记');
+    assert.equal(st.get('editing'), false, '切换即离开编辑态');
+  });
+});
+
+test('★ openNote:切换前必须把编辑框收进内存(结构护栏 —— 不依赖逐键收集接线)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib, state } = libStub({
+      jia: [
+        { id: 'k1', title: '旧标题', content: '', attachments: [] },
+        { id: 'k2', title: '二', content: '', attachments: [] },
+      ],
+    });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('dirty', new Set());
+    st.set('lib', lib);
+    const { ctx } = recorder(st, {
+      dom: { byId },
+      activeNoteData: () => state.甲.data.notes.find((n) => n.id === st.get('activeNoteId')),
+      collectEditChanges: () => collectEditChanges(ctx),
+      markDirty: (n) => st.get('dirty').add(n),
+    });
+    // 用户改了编辑框的值但 input 事件没有派发(程序化赋值等异常路径)——护栏必须兜住
+    byId('editTitle').value = '只改了值没派事件';
+    openNote(ctx, 'k2');
+    assert.equal(state.甲.data.notes[0].title, '只改了值没派事件',
+      '★ 切换前的收集必须把编辑框里的字带进内存');
+  });
+});
+
+test('★ openCategory:切换分类前同样先收集编辑框(护栏必须赶在 activeCat 改写之前)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib, state } = libStub({ jia: [{ id: 'k1', title: '旧标题', content: '', attachments: [] }] });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('dirty', new Set());
+    st.set('lib', lib);
+    const { ctx } = recorder(st, {
+      dom: { byId },
+      activeNoteData: () => state.甲.data.notes.find((n) => n.id === st.get('activeNoteId')),
+      collectEditChanges: () => collectEditChanges(ctx),
+      markDirty: (n) => st.get('dirty').add(n),
+    });
+    byId('editTitle').value = '跨分类切换前的新标题';
+    await openCategory(ctx, '乙');
+    assert.equal(state.甲.data.notes[0].title, '跨分类切换前的新标题',
+      '★ 切分类前必须收集 —— 此时 collect 还靠旧 activeCat 定位那篇笔记');
+    assert.equal(st.get('activeCat'), '乙', '正常切换到目标分类');
+  });
+});
+
+test('★ deleteCategory:删除后 editing 必须复位(否则留下「编辑态恒真」的脏状态)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib } = libStub({ jia: [{ id: 'k1', title: 'a', content: '', attachments: [] }] });
+    lib.deleteCategory = async () => {};           // libStub 没有这个方法,补上
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('dirty', new Set());
+    st.set('lib', lib);
+    const { ctx } = recorder(st, { dom: { byId }, modal: async () => true });
+    await deleteCategory(ctx);
+    assert.equal(st.get('activeCat'), null, '分类已删,选中清空');
+    assert.equal(st.get('editing'), false, '★ 编辑标志必须跟着复位');
+  });
 });

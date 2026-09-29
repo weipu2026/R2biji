@@ -241,6 +241,9 @@ export async function openCategory(ctx, name) {
    * 顺序必须用 F.sortNotes —— 与侧栏渲染同源,视觉第一行就是第一篇。
    * 例外:重载**当前**分类(冲突回云端 / 多标签页同步)时,原选中的笔记还在
    * 就保持不动 —— 那两种场景用户正读着它,拽到顶端等于把人踢走。 */
+  /* 切分类前收集编辑框(同 openNote:逐键收集已在,这道是结构护栏;必须赶在
+   * activeCat/activeNoteId 改写之前 —— collect 靠它们定位「正在编辑的那篇」)。 */
+  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }
   const catInfo = S.get('lib').categoryInfo(name);
   const notes = catInfo?.data ? F.sortNotes(catInfo.data.notes) : [];
   const prevId = S.get('activeNoteId');
@@ -335,7 +338,10 @@ export async function deleteCategory(ctx) {
     await S.get('lib').deleteCategory(activeCat);
     S.clearDirty(activeCat);
     S.get('tabs')?.send({ type: 'cats-changed' });
-    S.patch({ activeCat: null, activeNoteId: null });
+    // 删掉「正在编辑」所在的分类时,编辑视图随 showEmpty 一起消失,editing 必须
+    // 一并复位 —— 否则留下「编辑态恒真」的脏状态(moveNoteSelection 被它拦住、
+    // collectEditChanges 找不到笔记,后续行为难以推理)。
+    S.patch({ activeCat: null, activeNoteId: null, editing: false });
     renderCategoryList(ctx);
     renderNoteList(ctx);
     ctx.dom.byId('activeCatName').textContent = '未选择分类';
@@ -464,6 +470,10 @@ export function renderNoteList(ctx) {
 export function openNote(ctx, noteId) {
   const S = ctx.store;
   ctx.closeDrawer(); // 移动端:选完笔记收起抽屉
+  /* 切走前把编辑框收进内存:正常情况下逐键收集(shell 的 input 接线)早已同步,
+   * 这道是**结构护栏** —— 不变量「离开编辑态,字必须已进内存」不该依赖别处的
+   * 接线细节。收集必须赶在 activeNoteId 改写之前,否则 collect 找不到那篇笔记。 */
+  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }
   S.patch({ activeNoteId: noteId, editing: false });
   renderNoteList(ctx);
   ctx.renderReadView();

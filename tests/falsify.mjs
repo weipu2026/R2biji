@@ -709,6 +709,27 @@ const MUTANTS = [
     to: '  // MUTANT:不收集编辑框',
     expect: '先把编辑框收进内存再入回收站',
   },
+  {
+    label: '切换笔记前不收集编辑框(离开编辑态的字静默丢失)',
+    file: 'public/js/features/sidebar.js',
+    from: "  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }\n  S.patch({ activeNoteId: noteId, editing: false });",
+    to: '  S.patch({ activeNoteId: noteId, editing: false }); // MUTANT:切换前不收集',
+    expect: '切换前必须把编辑框收进内存',
+  },
+  {
+    label: '切换分类前不收集编辑框(跨分类切走时字静默丢失)',
+    file: 'public/js/features/sidebar.js',
+    from: "  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }\n  const catInfo = S.get('lib').categoryInfo(name);",
+    to: "  const catInfo = S.get('lib').categoryInfo(name); // MUTANT:切分类前不收集",
+    expect: '切换分类前同样先收集编辑框',
+  },
+  {
+    label: '删分类不复位 editing 标志(留下「编辑态恒真」的脏状态)',
+    file: 'public/js/features/sidebar.js',
+    from: "    S.patch({ activeCat: null, activeNoteId: null, editing: false });",
+    to: '    S.patch({ activeCat: null, activeNoteId: null }); // MUTANT:不复位 editing',
+    expect: 'editing 必须复位',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
