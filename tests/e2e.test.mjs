@@ -709,3 +709,81 @@ test('P3:401 必须带上服务端消息与 bad-token 码(响应体只读一次)
   assert.match(err.message, /令牌缺失或不正确/,
     '必须原样带出服务端的可读消息:旧实现二次读体会让它退化成通用文案(「服务器错误(401)」)');
 });
+
+/* ============================================================
+ * 跨分类移动(2026-09-29 新增)
+ * ------------------------------------------------------------
+ * 这是全应用唯一会**同时写两个分类文件**的操作,而两次写之间没有事务:
+ * 顺序反了(先删源、再写目标)遇上中断就是**笔记丢失**。所以钉三件事:
+ *   ① 正常路径 —— 目标多一篇、源少一篇,而且**另一台设备读到的也一致**;
+ *   ② 目标写失败(412 冲突)—— 源一动不动,目标的内存也要回滚(不留半成品);
+ *   ③ 两处篇数用**一次** vault 条件写 —— 请求数是免费版 Workers 的硬预算。
+ * ============================================================ */
+test('★ 跨分类移动:目标先写、源后删;目标冲突时源一动不动且内存回滚', async () => {
+  freshEnv();
+  API.clearToken();
+  const PW = '移动测试密码abc';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  API.setToken(authKeyHex);
+  const lib = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await lib.rescan();
+  await lib.createCategory('甲');
+  await lib.createCategory('乙');
+
+  /* 甲放两篇;乙要先真正落盘,后面才拿得到「已被别端改过」的 etag 基线 */
+  const jia = lib.categoryInfo('甲');
+  jia.data.notes.push(
+    { id: 'k1', title: '留下的', content: 'A', order: 1000, createdAt: 1, updatedAt: 1, attachments: [] },
+    { id: 'k2', title: '要搬走的', content: 'B', order: 2000, createdAt: 1, updatedAt: 1, attachments: [] },
+  );
+  assert.deepEqual(await lib.saveCategory('甲'), { ok: true });
+  const yi = lib.categoryInfo('乙');
+  yi.data.notes.push({ id: 'y1', title: '乙原有', content: 'C', order: 1000, createdAt: 1, updatedAt: 1, attachments: [] });
+  assert.deepEqual(await lib.saveCategory('乙'), { ok: true });
+  await lib.loadCategory('乙');   // 建立 lastSeenEtag —— 冲突路径要靠它
+
+  const moved = JSON.parse(JSON.stringify(jia.data.notes.find((n) => n.id === 'k2')));
+
+  /* ---- ① 目标先写 ---- */
+  await assert.rejects(() => lib.appendNoteToCategory('不存在的分类', moved), /分类不存在/);
+  moved.order = F.orderBetween(1000, null);          // 排到目标分类末尾
+  assert.deepEqual(await lib.appendNoteToCategory('乙', moved), { ok: true });
+  assert.equal(yi.data.notes.length, 2, '目标分类多了一篇');
+  assert.equal(jia.data.notes.length, 2, '★ append 只碰目标,绝不动源 —— 这正是「源不会先丢」的前提');
+  await assert.rejects(() => lib.appendNoteToCategory('乙', moved), /同一篇/);   // 同 id 去重
+
+  /* ---- 源后删 ---- */
+  jia.data.notes.splice(jia.data.notes.findIndex((n) => n.id === 'k2'), 1);
+  assert.deepEqual(await lib.saveCategory('甲'), { ok: true });
+
+  /* ---- ③ 两处篇数合并成一次条件写 ---- */
+  assert.equal(await lib.setCatCounts({ 甲: 1, 乙: 2 }), true, '两处篇数应当一次写完');
+  assert.equal(await lib.setCatCounts({ 甲: 1, 乙: 2 }), false,
+    '两处篇数没变化就不该再发一次云端条件写(免费版请求数预算,由内容比对把关)');
+  assert.equal((await API.fetchVault()).json.catMeta['乙'].count, 2, '篇数要真的落到 vault.json');
+
+  /* ---- 另一台设备读到的结果一致(证明两边云端都变了) ---- */
+  const b = await unlockAs(PW);
+  await b.rescan();
+  await b.loadCategory('甲');
+  await b.loadCategory('乙');
+  assert.deepEqual(b.categoryInfo('甲').data.notes.map((n) => n.id), ['k1'], '源分类里已无那篇');
+  assert.deepEqual(b.categoryInfo('乙').data.notes.map((n) => n.id).sort(), ['k2', 'y1'], '目标分类里有它');
+
+  /* ---- ② 目标被别的设备改过:必须报冲突,且两边内存都不留半成品 ---- */
+  b.categoryInfo('乙').data.notes.push(
+    { id: 'y2', title: '别端加的', content: 'D', order: 3000, createdAt: 1, updatedAt: 1, attachments: [] },
+  );
+  assert.deepEqual(await b.saveCategory('乙'), { ok: true });
+
+  const beforeYi = yi.data.notes.length;
+  const beforeJia = jia.data.notes.length;
+  const stale = { id: 'k1', title: '搬这篇', content: '', order: 5000, createdAt: 1, updatedAt: 1, attachments: [] };
+  assert.deepEqual(await lib.appendNoteToCategory('乙', stale), { conflict: true },
+    '★ 目标版本已变 → 必须如实报冲突,绝不静默覆盖');
+  assert.equal(yi.data.notes.length, beforeYi,
+    '★ 冲突后目标分类的内存必须回滚 —— 否则界面会多出一篇云端并不存在的笔记');
+  assert.equal(jia.data.notes.length, beforeJia,
+    '★ 冲突时源分类一动不动:笔记一篇都不能少(这是「先写目标」换来的安全性)');
+});

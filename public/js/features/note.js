@@ -432,3 +432,120 @@ export function moveNote(ctx, noteId, dir) {
   ctx.markDirty(activeCat);
   ctx.renderNoteList();
 }
+
+/* ================= 跨分类移动 ================= */
+
+/** 忙态守卫:跨分类移动要写两个文件、网络往返期间重复点击会造出两份副本。 */
+let movingNote = false;
+
+/**
+ * 把一篇笔记移到另一个分类。
+ *
+ * 写入顺序是刻意的 —— **先写目标、成功之后才动源**(见 Library.appendNoteToCategory):
+ *   ① 先写目标分类(含这篇笔记),失败则源一动不动,零损失;
+ *   ② 目标落盘成功后才从源分类删掉,并标脏交给常规保存流水线。
+ *   反序(先删源再写目标)遇上中断就是**笔记丢失**;按这个顺序最坏只剩短暂重复,
+ *   而且重复会被下一轮保存收敛、云端每分类还有 10 份备份兜底。
+ *
+ * 免费版 Workers 的请求数:目标已解密时 = 写目标 + 写源 + 1 次篇数(两处合并成一次
+ *   vault 条件写)。**不额外增加任何请求**,也不新建服务端键。
+ *
+ * @returns {Promise<boolean>} 是否真的移动成功(失败已自行 toast)
+ */
+export async function moveNoteToCategory(ctx, noteId, toName) {
+  const S = ctx.store;
+  if (movingNote) return false;
+  const fromName = S.get('activeCat');
+  if (!fromName || !toName || fromName === toName) return false;
+  const lib = S.get('lib');
+  const src = lib?.categoryInfo(fromName);
+  const note = src?.data?.notes.find((n) => n.id === noteId);
+  if (!note) return false;
+  const dst = lib.categoryInfo(toName);
+  if (!dst) { ctx.toast(`分类「${toName}」已不存在`, 'error'); return false; }
+
+  movingNote = true;
+  try {
+    // 深拷贝:这篇笔记随后要从源分类里删掉,两边不能共享同一个对象引用
+    const moved = JSON.parse(JSON.stringify(note));
+    delete moved.deletedAt;
+    // 目标分类的末尾 —— order 必须按**目标**分类自己的号段算,源分类的 order 在这里无意义
+    await lib.loadCategory(toName);
+    const dstNotes = dst.data ? F.sortNotes(dst.data.notes) : [];
+    moved.order = F.orderBetween(dstNotes.length ? dstNotes[dstNotes.length - 1].order : null, null);
+
+    const res = await lib.appendNoteToCategory(toName, moved);
+    if (!res?.ok) {
+      ctx.toast(res?.conflict
+        ? `「${toName}」刚被其他设备改过,本次移动未生效;源分类未改动,请重试`
+        : `移动到「${toName}」未生效:目标分类当前不可写入;源分类未改动`, 'error');
+      return false;
+    }
+
+    /* —— 目标已落盘,现在才动源 —— */
+    const idx = src.data.notes.findIndex((n) => n.id === noteId);
+    if (idx >= 0) src.data.notes.splice(idx, 1);
+    ctx.markDirty(fromName);
+    // 两处篇数合并成**一次** vault 条件写(拆成两次就是两次网络往返)
+    lib.setCatCounts({
+      [fromName]: src.data.notes.length,
+      [toName]: dst.data ? dst.data.notes.length : 0,
+    }).then(() => ctx.renderCategoryList()).catch(() => { /* 徽章晚一拍对齐,正文不受影响 */ });
+    // 目标分类的云端版本变了 → 通知其他标签页那张表失效(源分类的控制流在保存成功后自己发)
+    S.get('tabs')?.send({ type: 'cat-saved', name: toName });
+
+    if (S.get('activeNoteId') === noteId) {
+      S.patch({ activeNoteId: null, editing: false });
+      ctx.showEmpty(`「${moved.title || '无标题'}」已移动到「${toName}」`, null, 'list');
+    }
+    ctx.renderNoteList();
+    ctx.toast(`已移动到「${toName}」`);
+    return true;
+  } catch (e) {
+    ctx.toast(`移动失败:${e.message}`, 'error');
+    return false;
+  } finally {
+    movingNote = false;
+  }
+}
+
+/**
+ * 弹出分类清单让用户点选目标分类。
+ * 不做成「输入分类名」:名字要精确匹配,输错一次就白操作一遍(还可能误建同名分类)。
+ * 分类很多时清单可滚动(样式同回收站列表)。
+ */
+export async function pickCategoryForNote(ctx, noteId) {
+  const S = ctx.store;
+  const lib = S.get('lib');
+  const fromName = S.get('activeCat');
+  if (!lib || !fromName) { ctx.toast('先选择一个分类', 'warn'); return; }
+  const note = lib.categoryInfo(fromName)?.data?.notes.find((n) => n.id === noteId);
+  if (!note) return;
+  const names = lib.sortedCategories().filter((n) => n !== fromName);
+  if (!names.length) { ctx.toast('只有一个分类,先新建一个分类才能移动', 'warn'); return; }
+
+  let picked = null;
+  await ctx.modal({
+    type: 'custom',
+    title: '移动到其他分类',
+    text: `「${note.title || '无标题'}」将移动到所选分类的末尾;源分类的这篇会移除。`,
+    build: (body) => {
+      const list = document.createElement('div');
+      list.className = 'cat-pick';
+      for (const name of names) {
+        const b = document.createElement('button');
+        b.className = 'btn ghost block';
+        b.textContent = name;
+        const cnt = lib.catCount(name);
+        if (cnt !== null) b.title = `${cnt} 篇笔记`;
+        b.addEventListener('click', () => {
+          picked = name;
+          ctx.dom.byId('modal')?.close();   // 关弹窗(与弹窗自带「关闭」同一路径),再由下方执行移动
+        });
+        list.appendChild(b);
+      }
+      body.appendChild(list);
+    },
+  });
+  if (picked) await moveNoteToCategory(ctx, noteId, picked);
+}

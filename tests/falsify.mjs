@@ -293,11 +293,11 @@ const MUTANTS = [
     expect: '置顶优先',
   },
   {
-    label: '分类行的上移/下移按钮被摘掉(只剩置顶)',
+    label: '分类行的上移/下移/重命名按钮被摘掉(只剩置顶)',
     file: 'public/js/features/sidebar.js',
-    from: '    btns.append(upBtn, downBtn, pinBtn);   // 顺序与笔记列一致',
+    from: '    btns.append(upBtn, downBtn, pinBtn, renameBtn);   // 顺序与笔记列一致',
     to: '    btns.append(pinBtn); // MUTANT:只剩置顶',
-    expect: '分类行有 上移/下移/置顶 三个按钮',
+    expect: '分类行有 上移/下移/置顶/重命名 四个按钮',
   },
   /* ---- 2026-09-28 全站再审计(P1×3 + 本轮引入的 P2×6)的守卫 ---- */
   {
@@ -625,6 +625,73 @@ const MUTANTS = [
     from: '    start = null;\n    selChanged = false;',
     to: '    start = null;',
     expect: '新手势必须清掉',
+  },
+  /* ---- 2026-09-29:分类改名 / 跨分类移动的新守卫 ---- */
+  {
+    label: '分类改名:未选分类时退回静默 return(用户又会以为「没有这个功能」)',
+    file: 'public/js/features/sidebar.js',
+    from: "    ctx.toast('先选择一个要改名的分类', 'warn');\n    return;",
+    to: '    return; // MUTANT:点了毫无反馈',
+    expect: '没选分类时必须给出提示',
+  },
+  {
+    label: '分类行的重命名按钮改「当前选中」那个分类(点乙却把甲改了)',
+    file: 'public/js/features/sidebar.js',
+    from: "    renameBtn.addEventListener('click', (e) => { e.stopPropagation(); renameCategoryByName(ctx, name); });",
+    to: "    renameBtn.addEventListener('click', (e) => { e.stopPropagation(); renameCategoryByName(ctx, S.get('activeCat')); }); // MUTANT",
+    expect: '改的是它所在那一行',
+  },
+  {
+    label: '分类改名:不迁移本机的阅读位置记录(下次进应用位置丢失)',
+    file: 'public/js/features/sidebar.js',
+    from: '    ctx.renameLastReadCat?.(name, created);',
+    to: '    // MUTANT:不迁移阅读位置',
+    expect: 'renameCategoryByName:改',
+  },
+  {
+    label: '跨分类移动:改成「先删源、再写目标」(中途中断就是笔记丢失)',
+    file: 'public/js/features/note.js',
+    from: '    const res = await lib.appendNoteToCategory(toName, moved);',
+    to: '    const i0 = src.data.notes.findIndex((n) => n.id === noteId);\n'
+      + '    if (i0 >= 0) src.data.notes.splice(i0, 1); // MUTANT:先把源删了\n'
+      + '    ctx.markDirty(fromName);\n'
+      + '    const res = await lib.appendNoteToCategory(toName, moved);',
+    expect: '目标写失败(冲突)',
+  },
+  {
+    label: '跨分类移动:去掉忙态守卫(网络往返期间重复点击会造出两份副本)',
+    file: 'public/js/features/note.js',
+    from: "  if (movingNote) return false;\n  const fromName = S.get('activeCat');",
+    to: "  const fromName = S.get('activeCat'); // MUTANT:去掉忙态守卫",
+    expect: '并发第二次调用被忙态守卫挡住',
+  },
+  {
+    label: '跨分类移动:目标追加失败后不回滚内存(界面多出一篇云端并不存在的笔记)',
+    file: 'public/js/lib.js',
+    from: '    if (!res?.ok) dst.data.notes.length = before;',
+    to: '    // MUTANT:失败也不回滚',
+    expect: '源一动不动且内存回滚',
+  },
+  {
+    label: 'vault 元信息写入不再比对内容(没变化也照写 —— 白烧一次条件写与请求数)',
+    file: 'public/js/lib.js',
+    from: '      if (after === before) return false;',
+    to: '      if (false && after === before) return false; // MUTANT:不再比对内容',
+    expect: '没变化时不写云端',
+  },
+  {
+    label: '笔记行的「移动到其他分类」按钮被摘掉(功能又变成找不到)',
+    file: 'public/js/features/sidebar.js',
+    from: '    btns.append(upBtn, downBtn, pinBtn, moveBtn);',
+    to: '    btns.append(upBtn, downBtn, pinBtn); // MUTANT:摘掉移动入口',
+    expect: '笔记行的操作按钮是 4 个',
+  },
+  {
+    label: '阅读位置改名迁移时丢掉 noteId(下次进应用只回到分类顶端,不是那一篇)',
+    file: 'public/js/ui.js',
+    from: "      noteId: typeof v.noteId === 'string' && v.noteId ? v.noteId : null,\n    }));\n    return true;",
+    to: '      noteId: null, // MUTANT\n    }));\n    return true;',
+    expect: 'noteId 原样',
   },
 ];
 

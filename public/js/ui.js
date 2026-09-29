@@ -29,6 +29,7 @@ import {
 import {
   renderReadView, copyWholeNote, enterEditMode, collectEditChanges, exitEditMode,
   addAttachments, addNote, deleteNote, toggleNotePin, moveNote, bindReadSwipe,
+  pickCategoryForNote,
 } from './features/note.js';
 // shell 只导出 boot 给本文件用(「从备份恢复」后要重跑启动流程);
 // 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
@@ -47,6 +48,7 @@ const IDLE_SAVE_MS = 4000;               // 改动停止 4 秒后自动保存(�
 const ICON = {
   plus: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
   pencil: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  moveTo: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 20H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.7.9l.7 1.1a2 2 0 0 0 1.7.9H20a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2Z"/><path d="M9 13h6"/><path d="m12.5 10.5 2.5 2.5-2.5 2.5"/></svg>',
   copy: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="13" height="13" x="9" y="9" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
   up: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5"/><path d="m5 12 7-7 7 7"/></svg>',
   down: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14"/><path d="m19 12-7 7-7-7"/></svg>',
@@ -158,6 +160,7 @@ const ctx = {
   renderReadView: () => renderReadView(ctx),
   moveNote: (id, dir) => moveNote(ctx, id, dir),
   toggleNotePin: (id) => toggleNotePin(ctx, id),
+  pickCategoryForNote: (id) => pickCategoryForNote(ctx, id),
   // —— 以下为 shell.js 的入口绑定(一律不带 ctx,由这里接线)——
   showLock: (mode) => showLock(ctx, mode),
   lockNow: () => lockNow(ctx),
@@ -166,6 +169,7 @@ const ctx = {
   resumeSession: () => resumeSession(ctx),
   addCategory: () => addCategory(ctx),
   renameCategory: () => renameCategory(ctx),
+  renameLastReadCat: (from, to) => renameLastReadCat(from, to),
   deleteCategory: () => deleteCategory(ctx),
   openCategory: (n) => openCategory(ctx, n),
   enterEditMode: () => enterEditMode(ctx),
@@ -659,6 +663,30 @@ export function rememberRead(store = S) {
   const noteId = store.get('activeNoteId');
   if (!cat || !noteId) return;
   try { localStorage.setItem(LAST_READ_KEY, JSON.stringify({ cat, noteId })); } catch { /* 忽略 */ }
+}
+
+/**
+ * 分类改名后,把本机那条「上次读到哪」跟着换名。
+ *
+ * 不跟着改的后果:记录里仍是旧分类名 → 下次进应用时在分类清单里找不到它,
+ * 回落到「第一个分类」。降级不会崩,但用户会觉得「阅读位置又丢了」。
+ * 只替换 cat 字段,noteId 原样 —— 笔记本身没动,只是它所在的分类换了名字。
+ * 记录里不是这个分类就原样不动(不该被别的分类的改名牵连)。
+ * @returns {boolean} 是否真的改写了一条记录
+ */
+export function renameLastReadCat(from, to) {
+  if (!from || !to || from === to) return false;
+  try {
+    const raw = localStorage.getItem(LAST_READ_KEY);
+    if (!raw) return false;
+    const v = JSON.parse(raw);
+    if (!v || v.cat !== from) return false;
+    localStorage.setItem(LAST_READ_KEY, JSON.stringify({
+      cat: to,
+      noteId: typeof v.noteId === 'string' && v.noteId ? v.noteId : null,
+    }));
+    return true;
+  } catch { return false; }
 }
 
 /**

@@ -349,10 +349,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
  *
  * ⚠️ 槽位必须躲在悬停浮层按钮的左边 —— 否则悬停时按钮压在图钉上,
  *    点「置顶」命中的是被盖住的图钉,会静默变成「取消置顶」(实测踩过:两列都被压住)。
- *    每行给槽位预留的净空写死在下面两条规则里(实测值):
- *      分类列 3 个按钮(上移/下移/置顶)→ 槽位右外边距 34px
- *      笔记列 3 个按钮(上移/下移/置顶)→ 槽位右外边距 34px
- *    按钮宽度/尺寸若调整,这两个数要跟着改(真机脚本 pin-tail-verify.mjs 的 ⑧ 会翻红提醒)。 */
+ *    每行给槽位预留的净空写死在下面两条规则里:
+ *      分类列 4 个按钮(上移/下移/置顶/重命名)→ 槽位右外边距 34px
+ *      笔记列 4 个按钮(上移/下移/置顶/移动到)→ 槽位右外边距 36px
+ *    这两个数真正的护栏是「两列图钉落在同一条竖线」(assets.test.mjs 会翻红);
+ *    按钮宽度/尺寸若调整,要重新核对这条竖线等式。 */
 .pin-slot {
   flex: 0 0 auto;
   width: 15px;
@@ -370,10 +371,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .warn-slot svg { display: block; }
 /* 分类行:warn-slot 紧贴名字右侧(4px),两侧的槽位一起退到悬停浮层左边 */
 .cat-item .warn-slot { margin-left: 4px; margin-right: 8px; }
-/* 分类列加了上移/下移后与笔记列同形:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框),
- * 槽位右外距同为 34px ⇒ 两列的图钉落在同一条竖线上(2026-09-28) */
+/* 分类列加了重命名后与笔记列同形(都是 4 个按钮):浮层宽 ≈124px
+ * (4×28 按钮 + 3×2 gap + 4 内边距 + 2 边框),槽位右外距同为 34px
+ * ⇒ 两列的图钉落在同一条竖线上(2026-09-28) */
 .cat-item .pin-slot { margin-right: 34px; }
-/* 笔记列:浮层宽 ≈94px(3×28 按钮 + 2×2 gap + 4 内边距 + 2 边框)→ 右外距 34px。
+/* 笔记列:浮层宽同 ≈124px(4×28 按钮 + 3×2 gap + 4 内边距 + 2 边框)→ 右外距 34px。
  * ⚠️ 要 +2px 补偿:图钉的竖线由「槽位右外距 + 行的 padding-right」共同决定 ——
  *   .cat-item  是 padding: 7px 10px → 10 + 34 = 44px
  *   .note-item 是 padding: 7px 8px 7px 10px → 8 + 36 = 44px
@@ -603,7 +605,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   letter-spacing: 0;
 }
 .cat-item.active .cat-count { color: var(--accent); }
-/* 两列的浮层按钮数相同(都是 3 个 ≈94px),槽位预留的净空定义在
+/* 两列的浮层按钮数相同(都是 4 个 ≈124px),槽位预留的净空定义在
  * .pin-slot 那条规则附近(见文件上方),此处不再重复 */
 
 .note-list { flex: 1; }

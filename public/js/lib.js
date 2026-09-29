@@ -296,6 +296,64 @@ export class Library {
 
   /* ============ 分类:增删改 ============ */
 
+  /**
+   * 把一条笔记追加到目标分类并**立即**落盘(跨分类移动的第一阶段)。
+   *
+   * 为什么不走 markDirty + saveAll:saveAll 遍历的是脏标记集合(Set),**顺序不可控**。
+   *   跨分类移动会让源、目标两个分类同时进队列 —— 若先写源、后写目标,而两次网络写
+   *   之间中断(关标签页 / 锁屏),那条笔记就是「从源删掉了、没进目标」= **丢失**。
+   *   本方法把顺序握在代码手里:先写目标,成功之后调用方才去动源,于是最坏情况
+   *   只剩「短暂重复」—— 下一轮保存自动收敛,且云端每分类留 10 份备份。
+   *
+   * 失败语义:任何失败都**不留半成品** —— 目标分类的内存回滚到调用前,云端未被改动。
+   * @param {string} name 目标分类名
+   * @param {object} note 笔记对象(调用方应传深拷贝:随后要从源分类里把它删掉)
+   * @returns {Promise<{ok:true}|{conflict:true}|{skipped:true}>}
+   */
+  async appendNoteToCategory(name, note) {
+    const dst = this.categories.get(name);
+    if (!dst) throw new LibraryError(`分类不存在:${name}`, 'missing');
+    await this.loadCategory(name);          // 已解密过的分类:零网络请求
+    if (!dst.data) throw new LibraryError(`分类「${name}」当前无法读取`, 'stale');
+    if (dst.data.notes.some((n) => n.id === note.id)) {
+      throw new LibraryError(`「${name}」里已有同一篇笔记(id 重复)`, 'dup');
+    }
+    const before = dst.data.notes.length;
+    dst.data.notes.push(note);
+    let res;
+    try {
+      res = await this.saveCategory(name);
+    } catch (e) {
+      dst.data.notes.length = before;       // 回滚内存:绝不留「以为存上了」的假象
+      throw e;
+    }
+    if (!res?.ok) dst.data.notes.length = before;
+    return res ?? { skipped: true };
+  }
+
+  /**
+   * 一次条件写里更新**多个**分类的篇数(侧栏徽章的数据源)。
+   *
+   * 为什么要有批量版:跨分类移动会同时改变两个分类的篇数。逐个调 setCatCount
+   * 就是两次 vault.json 条件写 —— 两次网络往返、两次 412 重放机会,而免费版
+   * Workers 的每日请求数是硬上限。这里合并成一次 mutate。
+   * 只在真有变化时才写云端(updateVaultMeta 内部还会再比对一次内容)。
+   * @param {Record<string, number>} pairs 分类名 → 篇数
+   * @returns {Promise<boolean>} 是否真的写了一次云端
+   */
+  async setCatCounts(pairs) {
+    // 这一层只省本地开销(JSON 克隆 + 字符串比较);「要不要真的发一次云端条件写」
+    // 由 updateVaultMeta 内部的内容比对把关 —— 两层职责不同,别把这行当请求数守卫。
+    const todo = Object.entries(pairs)
+      .filter(([n, c]) => Number.isInteger(c) && c >= 0 && this.catCount(n) !== c);
+    if (!todo.length) return false;
+    return this.updateVaultMeta((json) => {
+      const meta = { ...(json.catMeta || {}) };
+      for (const [n, c] of todo) meta[n] = { ...(meta[n] || {}), count: c };
+      json.catMeta = meta;
+    });
+  }
+
   async createCategory(rawName) {
     const name = F.sanitizeCategoryName(rawName);
     if (!name) throw new LibraryError('分类名不能为空(或只含非法字符)', 'bad-name');

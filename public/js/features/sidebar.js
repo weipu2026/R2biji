@@ -20,6 +20,8 @@
  *   - renderReadView()     重绘阅读视图(note.js)
  *   - moveNote(id,dir)     笔记上移/下移(note.js)
  *   - toggleNotePin(id)    笔记置顶开关(note.js)
+ *   - pickCategoryForNote(id)  选目标分类的弹窗(note.js,跨分类移动)
+ *   - renameLastReadCat(from,to) 本机阅读位置记录跟着改名(ui.js)
  *   - showEmpty(...)       空状态区
  *   - closeDrawer()        移动端收起抽屉
  *   - format               { sortNotes }(也可以直接 import)
@@ -192,7 +194,19 @@ export function renderCategoryList(ctx) {
       }
       renderCategoryList(ctx);
     });
-    btns.append(upBtn, downBtn, pinBtn);   // 顺序与笔记列一致
+    /* 分类行内的重命名入口:与侧栏头部那支铅笔是「两个入口、同一实现」
+     * (按名字改,所以点哪一行就改哪一行)。只放在头部时用户找不到它 ——
+     * 那正是「缺少改名功能」这个反馈的真实来源(2026-09-29)。
+     * ⚠️ 按钮数必须与笔记列保持一致(都是 4 个):.pin-slot 的净空是按
+     *    「两列按钮数相同」推出来的,单侧变宽会让两列的图钉槽位错位。 */
+    const renameBtn = document.createElement('button');
+    renameBtn.className = 'icon-btn';
+    renameBtn.title = '重命名分类';
+    renameBtn.setAttribute('aria-label', renameBtn.title);
+    renameBtn.dataset.focusKey = `cat-rename:${name}`;
+    renameBtn.innerHTML = ctx.icons.pencil;
+    renameBtn.addEventListener('click', (e) => { e.stopPropagation(); renameCategoryByName(ctx, name); });
+    btns.append(upBtn, downBtn, pinBtn, renameBtn);   // 顺序与笔记列一致
     li.appendChild(btns);
 
     clickable(li, () => openCategory(ctx, name));
@@ -256,27 +270,52 @@ export async function addCategory(ctx) {
   }
 }
 
-export async function renameCategory(ctx) {
+/**
+ * 重命名指定分类(按名字,不依赖当前选中)。
+ * 侧栏头部的铅笔按钮与分类行内的铅笔按钮共用它 —— 后者点的是**任意一行**,
+ * 若直接复用「按当前选中改名」的入口就会改错分类。
+ */
+export async function renameCategoryByName(ctx, name) {
   const S = ctx.store;
-  const activeCat = S.get('activeCat');
-  if (!activeCat) return;
-  const name = await ctx.modal({ type: 'prompt', title: '重命名分类', value: activeCat, text: '改名只换文件名,笔记内容零改动、零重加密传输' });
-  if (name == null || name === activeCat) return;
+  if (!name) return;
+  const raw = await ctx.modal({
+    type: 'prompt',
+    title: `重命名分类「${name}」`,
+    value: name,
+    text: '改名只换文件名,笔记内容零改动、零重加密传输',
+  });
+  if (raw == null || raw === name) return;
   try {
-    const created = await S.get('lib').renameCategory(activeCat, name);
+    const created = await S.get('lib').renameCategory(name, raw);
     // 未保存的改动跟着搬到新名字:重命名只是换键名,本地这份改过的数据
     // 仍是最新内容;脏标记留在旧名上等于让它脱离保存队列(静默丢失)。
     // 代数一并搬迁 —— 重命名不改变内容新旧,saveAll 的窗口期判定要延续。
-    S.moveDirty(activeCat, created);
+    S.moveDirty(name, created);
+    // 本机的「上次读到哪」记的是分类名,不跟着换名就会在下次进应用时失效
+    // (降级不崩,但阅读位置丢成「第一个分类」)。
+    ctx.renameLastReadCat?.(name, created);
     S.get('tabs')?.send({ type: 'cats-changed' });
-    S.set('activeCat', created);
+    const wasActive = S.get('activeCat') === name;
+    if (wasActive) S.set('activeCat', created);
     renderCategoryList(ctx);
+    // 标题栏(activeCatName)由 renderNoteList 统一维护 —— 它写的是「名字 · N 篇」,
+    // 这里再手动覆盖一次只会把篇数抹掉(直到下次重绘才回来)。
     renderNoteList(ctx);
-    ctx.dom.byId('activeCatName').textContent = created;
     ctx.toast(`已重命名为「${created}」`);
   } catch (e) {
     ctx.toast(e.message, 'error');
   }
+}
+
+export async function renameCategory(ctx) {
+  const activeCat = ctx.store.get('activeCat');
+  if (!activeCat) {
+    // 从前的写法是静默 return —— 点了没有任何反馈,用户会判定「根本没有改名功能」
+    // (2026-09-29 用户反馈「缺少分类改名」,功能其实早就在)。与同文件的 deleteCategory 对齐。
+    ctx.toast('先选择一个要改名的分类', 'warn');
+    return;
+  }
+  await renameCategoryByName(ctx, activeCat);
 }
 
 export async function deleteCategory(ctx) {
@@ -397,7 +436,17 @@ export function renderNoteList(ctx) {
     pinBtn.dataset.focusKey = `note-pin:${note.id}`;
     pinBtn.innerHTML = ctx.icons.pin;
     pinBtn.addEventListener('click', (e) => { e.stopPropagation(); ctx.toggleNotePin(note.id); });
-    btns.append(upBtn, downBtn, pinBtn);
+    /* 跨分类移动:唯一会把笔记搬**出**当前列表的操作,所以排在排序类按钮之后
+     * (既有三颗的位置不动,不打断肌肉记忆)。按钮数必须与分类列一致(都是 4 个),
+     * 否则两列的图钉槽位会错位 —— 净空是按「两列按钮数相同」推出来的。 */
+    const moveBtn = document.createElement('button');
+    moveBtn.className = 'icon-btn';
+    moveBtn.title = '移动到其他分类';
+    moveBtn.setAttribute('aria-label', moveBtn.title);
+    moveBtn.dataset.focusKey = `note-move:${note.id}`;
+    moveBtn.innerHTML = ctx.icons.moveTo;
+    moveBtn.addEventListener('click', (e) => { e.stopPropagation(); ctx.pickCategoryForNote(note.id); });
+    btns.append(upBtn, downBtn, pinBtn, moveBtn);
     li.appendChild(btns);
 
     clickable(li, () => openNote(ctx, note.id));

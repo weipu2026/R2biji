@@ -11,93 +11,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { renderCategoryList, renderNoteList, activeNoteData, openCategory, clickable } from '../public/js/features/sidebar.js';
 import { Store } from '../public/js/store.js';
+import { withDom } from './dom-stub.mjs';
 
-/* ---- 最小 DOM 桩:只需 createElement + classList + textContent + appendChild ---- */
-class FakeNode {
-  constructor(tag) {
-    this.tag = tag;
-    this.children = [];
-    this.classes = new Set();
-    this.dataset = {};
-    this._text = null;
-    this.title = '';
-    this.innerHTML = '';
-    this.tabIndex = 0;
-    this.attrs = {};
-    this.handlers = {};      // 记录监听器,便于用例直接触发按钮行为(不模拟真实事件冒泡)
-  }
-  appendChild(c) { c._parent = this; this.children.push(c); return c; }
-  append(...cs) { for (const c of cs) this.appendChild(c); }
-  set textContent(v) { this.children = []; this._text = String(v); }
-  get textContent() {
-    if (this._text !== null) return this._text;
-    return this.children.map((c) => c.textContent).join('');
-  }
-  set className(v) { this.classes = new Set(String(v).split(/\s+/).filter(Boolean)); }
-  get className() { return [...this.classes].join(' '); }
-  get classList() {
-    const self = this;
-    return {
-      add: (...cs) => cs.forEach((c) => self.classes.add(c)),
-      remove: (...cs) => cs.forEach((c) => self.classes.delete(c)),
-      toggle: (c, on) => { if (on === undefined) { self.classes.has(c) ? self.classes.delete(c) : self.classes.add(c); } else if (on) self.classes.add(c); else self.classes.delete(c); },
-      contains: (c) => self.classes.has(c),
-    };
-  }
-  setAttribute(k, v) { this.attrs[k] = v; }
-  addEventListener(ev, fn) { (this.handlers[ev] ||= []).push(fn); }
-  removeEventListener() {}
-
-  /* ---- 以下三个供「整表重建后的焦点还原」用例(2026-09-29 审计 P3) ---- */
-  contains(n) { let p = n; while (p) { if (p === this) return true; p = p._parent; } return false; }
-  /** 只支持 [data-focus-key="…"] —— 生产代码只用这一种选择器 */
-  querySelector(sel) {
-    const m = /^\[data-focus-key="(.*)"\]$/.exec(sel);
-    if (!m) return null;
-    let found = null;
-    const walk = (n) => {
-      for (const c of n.children || []) {
-        if (!found && c.dataset && c.dataset.focusKey === m[1]) found = c;
-        if (!found) walk(c);
-      }
-    };
-    walk(this);
-    return found;
-  }
-  focus() { if (global.document) global.document.activeElement = this; }
-}
-
-/* ★ 所有调用方一律 `await withDom(...)` —— **同步体也要 await**:
- *   本函数在 finally 里 `delete global.document`,不 await 时这次清理会与下一个
- *   用例的建桩在微任务队列里交错,「测试能不能过」就变成依赖调度顺序的侥幸。
- *   (2026-09-28 复查:withDom 改成 async 后旧用例没跟着 await,当时靠队列顺序侥幸成立。) */
-async function withDom(fn) {
-  const nodes = new Map();
-  global.document = {
-    createElement: (tag) => new FakeNode(tag),
-    createTextNode: (t) => { const n = new FakeNode(undefined); n._text = t; return n; },
-    activeElement: null,          // focus() 会写它;captureFocusKey 读它
-  };
-  // byId 返回稳定的节点:同一 id 反复取到同一个,便于断言
-  const byId = (id) => {
-    if (!nodes.has(id)) nodes.set(id, new FakeNode('div'));
-    return nodes.get(id);
-  };
-  const ctx = (store) => ({
-    store,
-    dom: { byId },
-    icons: new Proxy({}, { get: () => '<svg></svg>' }),
-    toast: () => {},
-    modal: async () => null,
-  });
-  try {
-    // await:调用方可能传 async 函数(如 openCategory)——不 await 的话,
-    // finally 会在异步体跑到一半时就删掉 global.document,中途报「undefined」假错
-    return await fn(ctx, byId);
-  } finally {
-    delete global.document;
-  }
-}
+/* DOM 替身与建桩已抽到 tests/dom-stub.mjs —— 多个测试文件共用同一份,
+ * 避免同一替身写两遍后分叉(替身与真实 DOM 的语义分叉 = 假绿的常见来源)。
+ * 本文件用默认 ctx:icons 万能替身 / 静默 toast / 取消的 modal。 */
 
 test('★ renderCategoryList:lib 为 null 时不抛错(锁屏竞态护栏)', async () => {
   await withDom((ctx) => {
@@ -236,13 +154,16 @@ test('★ openCategory:真正空分类才落空状态,并给「新建笔记」�
   });
 });
 
-/* ---- 分类行「上移/下移/置顶」三按钮(2026-09-28 用户要求)----
- * 分类此前只有置顶一个按钮,顺序被名称字典序钉死。加了手动调序后分类行与笔记行同形
- * (3 个按钮),于是 .cat-item .pin-slot 的净空也必须与笔记列一致(34px,见 style.css)。
- * 这里钉两件事:①三个按钮都在、顺序与笔记列一致;②每个都有可访问名 ——
+/* ---- 分类行「上移/下移/置顶/重命名」四按钮 ----
+ * 分类此前只有置顶一个按钮,顺序被名称字典序钉死。加了手动调序后分类行与笔记行同形。
+ * 2026-09-29 用户反馈「缺少分类改名」—— 功能其实早就在,只是入口只有侧栏头部一支
+ * 铅笔、纯图标无文字,用户找不到。于是在分类行内补一个重命名入口,笔记行同时补
+ * 「移动到其他分类」,**两列一起变成 4 个**:.pin-slot 的净空是按「两列按钮数相同」
+ * 推出来的,只加一侧会让两列的图钉槽位错位(见 style.css 的 34px/36px 注释)。
+ * 这里钉两件事:①四个按钮都在、顺序与笔记列一致;②每个都有可访问名 ——
  * 图标 svg 带 aria-hidden,title 不算可访问名,漏了 aria-label 读屏器只会播报「按钮」
  * (2026-09-27 审计 P3-4 的同一类问题)。 */
-test('★ renderCategoryList:分类行有 上移/下移/置顶 三个按钮且都有可访问名', async () => {
+test('★ renderCategoryList:分类行有 上移/下移/置顶/重命名 四个按钮且都有可访问名', async () => {
   await withDom((ctx, byId) => {
     const st = new Store();
     st.set('lib', {
@@ -256,8 +177,8 @@ test('★ renderCategoryList:分类行有 上移/下移/置顶 三个按钮且�
     const li = byId('catList').children[0];
     const btns = li.children.find((c) => c.className === 'cat-btns');
     assert.ok(btns, '分类行必须有 .cat-btns 浮层');
-    assert.deepEqual(btns.children.map((b) => b.title), ['上移', '下移', '置顶'],
-      '★ 按钮顺序必须与笔记列一致(上移/下移/置顶)');
+    assert.deepEqual(btns.children.map((b) => b.title), ['上移', '下移', '置顶', '重命名分类'],
+      '★ 按钮顺序必须与笔记列一致(排序三项在前,跨分类/改名在后)');
     for (const b of btns.children) {
       assert.equal(b.attrs['aria-label'], b.title,
         `「${b.title}」按钮缺 aria-label(读屏器只会播报「按钮」)`);
