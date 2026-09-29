@@ -556,6 +556,41 @@ const MUTANTS = [
     to: 'if (nowSel > 0) return;',
     expect: '页面残留着上一次的选区',
   },
+  {
+    label: '进应用不判空库(一个分类都没有也去打开一个不存在的分类)',
+    file: 'public/js/ui.js',
+    from: '  if (!names.length) return null;',
+    to: '  // MUTANT:不判空库',
+    expect: '一个分类都没有',
+  },
+  {
+    label: '进应用忽略阅读位置记忆(每次都从头打开第一个分类)',
+    file: 'public/js/ui.js',
+    from: '  if (last && names.includes(last.cat)) return last.cat;',
+    to: '  // MUTANT:忽略记忆',
+    expect: '记忆里的分类还在',
+  },
+  {
+    label: '进应用不校验记忆里的分类是否还在(去打开一个已删除的分类)',
+    file: 'public/js/ui.js',
+    from: '  if (last && names.includes(last.cat)) return last.cat;',
+    to: '  if (last && last.cat) return last.cat;',
+    expect: '记忆里的分类已被删',
+  },
+  {
+    label: '复位状态也写进阅读位置记忆(把用户的位置抹掉)',
+    file: 'public/js/ui.js',
+    from: '  if (!cat || !noteId) return;',
+    to: '  // MUTANT:复位也写',
+    expect: '复位态',
+  },
+  {
+    label: '算出了该回到哪一篇却不落地(activeNoteId 不摆进去)',
+    file: 'public/js/ui.js',
+    from: "  ctx.store.set('activeNoteId', last && last.cat === cat ? last.noteId : null);",
+    to: "  ctx.store.set('activeNoteId', null);",
+    expect: '回到上次读的那一篇',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

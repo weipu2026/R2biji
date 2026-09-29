@@ -633,6 +633,70 @@ async function rescanFromTabs() {
 
 /* ================= 进入应用 ================= */
 
+/* ---- 上次读到哪:解锁后把内容直接摆上来 ---- */
+
+const LAST_READ_KEY = 'jmbiji.lastRead';
+
+/**
+ * 读上次的阅读位置。任何形态不对的值一律当成「没有」——
+ * 坏数据不该把启动流程带进异常分支。
+ * @returns {{cat:string,noteId:string|null}|null}
+ */
+export function readLastRead() {
+  try {
+    const raw = localStorage.getItem(LAST_READ_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (!v || typeof v.cat !== 'string' || !v.cat) return null;
+    return { cat: v.cat, noteId: typeof v.noteId === 'string' && v.noteId ? v.noteId : null };
+  } catch { return null; }
+}
+
+/** 记住当前正在读的笔记。复位(null)一律跳过 —— 那不是「用户读到了哪」。
+ *  必须走 store.get():状态都在 _state 里,实例上没有字段(代理与原实例都支持 get)。 */
+export function rememberRead(store = S) {
+  const cat = store.get('activeCat');
+  const noteId = store.get('activeNoteId');
+  if (!cat || !noteId) return;
+  try { localStorage.setItem(LAST_READ_KEY, JSON.stringify({ cat, noteId })); } catch { /* 忽略 */ }
+}
+
+/**
+ * 进应用该打开哪个分类 —— 纯函数,把三级降级链钉死。
+ * @param {string[]} names 视觉顺序的分类名(置顶 → 手动 order → 名称兜底)
+ * @param {{cat:string,noteId:string|null}|null} last
+ * @returns {string|null} 要打开的分类;null = 一个分类都没有
+ *
+ *   ① 上次读的分类还在 → 回到它(那篇笔记还在就回到那篇,不在就落到它的顶端)
+ *   ② 上次的分类没了(改名/删除/换了个库)→ 第一个分类
+ *   ③ 一个分类都没有 → null,由调用方给「新建分类」引导
+ */
+export function pickRestoreCategory(names, last) {
+  if (!names.length) return null;
+  if (last && names.includes(last.cat)) return last.cat;
+  return names[0];
+}
+
+/**
+ * 进应用时把内容摆到阅读区:优先回到上次读的那篇,否则打开第一个分类的顶端那篇。
+ * @returns {Promise<boolean>} 是否真的打开了内容(false = 一个分类都没有)
+ */
+export async function restoreReading(ctx) {
+  const names = ctx.store.get('lib').sortedCategories();  // 视觉顺序单一来源,与侧栏首行同源
+  const last = readLastRead();
+  const cat = pickRestoreCategory(names, last);
+  if (!cat) return false;
+  /* 先把 activeNoteId 摆成记忆里那篇:openCategory 的既定行为是
+   * 「列表里还有就保持不动,否则取顶端那篇」——笔记已删的降级由它兜住,
+   * 这里不再重复判断一遍(判两处必然有一天会分家)。 */
+  ctx.store.set('activeNoteId', last && last.cat === cat ? last.noteId : null);
+  await openCategory(ctx, cat);
+  return true;
+}
+
+/** 记住阅读位置的订阅只注册一次(enterApp 每次解锁都会跑,重复订阅会叠加回调)。 */
+let readPosSubscribed = false;
+
 async function enterApp() {
   $('lock').hidden = true;
   $('app').hidden = false;
@@ -645,13 +709,26 @@ async function enterApp() {
    *   (lockMode 非空就整类 return)会让解锁一次之后 Ctrl+K / Ctrl+S / Ctrl+Enter /
    *   J/K / Alt+↑↓ **全部永久失效**。真机 S0【14】的 Ctrl+K / Alt+↓ 正对照当场抓到。 */
   S.lockMode = null;
+  /* 先复位:解锁有可能是「换了个库」,上一条会话的分类/笔记若留着,界面会显示成
+   * 新库里某个同名分类的内容。复位之后再按**当前库**重新定位该读哪篇。 */
   S.activeCat = null;
   S.activeNoteId = null;
   S.editing = false;
   renderNoteList(ctx);
-  const hasCats = S.lib.listCategories().length > 0;
-  showEmpty(hasCats ? '从左侧选择一个分类' : '还没有分类,先建一个',
-    hasCats ? null : { label: '新建分类', fn: () => addCategory(ctx) });
+  if (!readPosSubscribed) {
+    readPosSubscribed = true;
+    /* 所有改变「正在读哪篇」的路径都会写 activeNoteId(点列表 / J / K / 滑动翻篇 /
+     * 换分类 / 删除后自动选相邻),订阅这一处就全覆盖,不必在每个入口各写一遍。 */
+    S.subscribe('activeNoteId', () => rememberRead());
+  }
+  /* 有分类时先给一句过渡文案再异步打开 —— 否则会先闪一下「从左侧选择一个分类」,
+   * 用户刚看完那句,内容又跳出来了。 */
+  if (S.lib.sortedCategories().length) showEmpty('正在载入…');
+  /* 2026-09-29 用户反馈:电脑版、手机版打开都是一片空白 +「从左侧选择一个分类」——
+   * 等于每次进来都要自己重新找一遍位置。现在直接摆上:上次读的那篇 / 第一个分类的顶端。 */
+  if (!await restoreReading(ctx)) {
+    showEmpty('还没有分类,先建一个', { label: '新建分类', fn: () => addCategory(ctx) });
+  }
   refreshSaveStatus();
   startIdleTimer();
   refreshExportDue(ctx);
