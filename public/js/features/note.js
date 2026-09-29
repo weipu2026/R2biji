@@ -60,15 +60,31 @@ export function readSwipeIntent({ dx, dy, atTop, atBottom }) {
 }
 
 /**
+ * 当前文本选区的字符数。无 DOM 环境(纯 Node 单测)恒为 0。
+ * 手机端「长按选字 / 拖选区手柄」与「上下滑动翻篇」抬起的都是同一种触摸事件,
+ * 只有它能区分两者 —— 详见 bindReadSwipe 的 touchend。
+ */
+function selectionLength() {
+  const g = typeof window !== 'undefined' ? window : null;
+  if (!g || typeof g.getSelection !== 'function') return 0;
+  const sel = g.getSelection();
+  return sel ? String(sel).length : 0;
+}
+
+/**
  * 在阅读面绑定触屏上下滑动翻篇。**启动时调一次**即可 ——
  * 它跟着 DOM 节点活,不跟渲染走(每次 renderReadView 都绑会叠加监听,
  * 一次滑动翻好几篇)。
+ *
+ * 除了翻篇,它还负责**不抢**一种同样会抬起触摸的操作:手机上长按选字 / 拖着
+ * 选区手柄扩展选区。这两件事的手指位移与翻篇手势长得一模一样,只有一个判据能
+ * 区分 —— 手势期间「选区的有无或长度变了没有」。
  * @param {object} ctx
  */
 export function bindReadSwipe(ctx) {
   const view = ctx.dom.byId('readView');
   if (!view || typeof view.addEventListener !== 'function') return;
-  /** 手势起点 + **起点时刻**的贴边状态;null = 当前没有进行中的手势。 */
+  /** 手势起点 + **起点时刻**的贴边状态与选区长度;null = 当前没有进行中的手势。 */
   let start = null;
   const edges = () => {
     const max = view.scrollHeight - view.clientHeight;
@@ -80,7 +96,7 @@ export function bindReadSwipe(ctx) {
     // 多指(捏合缩放)不接管;编辑态兜底(readView 那时本就隐藏)
     if (e.touches.length !== 1 || ctx.store.get('editing')) return;
     const t = e.touches[0];
-    start = { x: t.clientX, y: t.clientY, ...edges() };
+    start = { x: t.clientX, y: t.clientY, ...edges(), selLen: selectionLength() };
   }, { passive: true });
   view.addEventListener('touchend', (e) => {
     if (!start) return;
@@ -88,6 +104,13 @@ export function bindReadSwipe(ctx) {
     start = null;
     const t = e.changedTouches && e.changedTouches[0];
     if (!t) return;
+    /* 手势期间选区的有无/长度变了 → 用户在选字(长按选词、拖手柄扩展选区),
+     * 这不是翻篇手势,必须让给系统;否则会在选到一半时把用户翻到别的笔记去。
+     * 判据用「长度**变化**」而不是「当前有选区」:后者会让页面上残留的旧选区
+     * 永久挡住翻篇 —— 用户选完字没点空白取消,就再也划不动了。
+     * 无 DOM 环境(纯 Node 单测)两端都是 0,不受影响。 */
+    const nowSel = selectionLength();
+    if (nowSel > 0 && nowSel !== from.selLen) return;
     const delta = readSwipeIntent({
       dx: t.clientX - from.x, dy: t.clientY - from.y, atTop: from.atTop, atBottom: from.atBottom,
     });

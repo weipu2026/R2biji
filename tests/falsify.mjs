@@ -542,6 +542,20 @@ const MUTANTS = [
     to: '    // MUTANT:不翻篇',
     expect: '接线:底部上划 → 翻下一篇',
   },
+  {
+    label: '滑动翻篇不区分选字手势(用户在选字,笔记却被翻走)',
+    file: 'public/js/features/note.js',
+    from: '    const nowSel = selectionLength();\n    if (nowSel > 0 && nowSel !== from.selLen) return;',
+    to: '    // MUTANT:不比对选区变化',
+    expect: '划动过程中选出文字',
+  },
+  {
+    label: '只要有选区就一律不翻篇(残留选区变成永久挡板)',
+    file: 'public/js/features/note.js',
+    from: 'if (nowSel > 0 && nowSel !== from.selLen) return;',
+    to: 'if (nowSel > 0) return;',
+    expect: '页面残留着上一次的选区',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

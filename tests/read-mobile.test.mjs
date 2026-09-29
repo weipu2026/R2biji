@@ -245,3 +245,72 @@ test('接线:越界时静默 —— moveNoteSelection 说不翻就什么都不�
 test('bindReadSwipe:阅读面不存在时不抛(锁屏竞态下 byId 可能拿不到)', () => {
   assert.doesNotThrow(() => bindReadSwipe({ dom: { byId: () => null }, store: { get: () => false }, moveNoteSelection() {} }));
 });
+
+/* ---------- 4. 手势与「选中文字」的竞争 ----------
+ * 手机上长按选字、或拖着选区手柄扩展,手指同样会抬起一次纵向位移可能 >56px 的触摸。
+ * 若不区分「用户在选字」和「用户想翻篇」,就会在选字到一半时把用户翻到别的笔记去。
+ * 判据:手势期间**选区的有无/长度变了** → 这是文本操作,让给系统;没变 → 才是翻篇手势。
+ * 用长度比对而不是「当前有无选区」,是为了不误伤「页面上残留着上一次的选区、
+ * 用户此刻只想翻篇」这条路径(那一条必须仍然能翻)。 */
+
+/** 临时装一个最小 window 桩(只提供 getSelection),并在回调里允许改选区文本。 */
+function withWindow(initialText, fn) {
+  const has = Object.prototype.hasOwnProperty.call(globalThis, 'window');
+  const orig = globalThis.window;
+  let text = initialText;
+  globalThis.window = { getSelection: () => ({ toString: () => text }) };
+  try {
+    return fn({ setSel: (t) => { text = t; } });
+  } finally {
+    if (has) globalThis.window = orig; else delete globalThis.window;
+  }
+}
+
+/** 内容短到滚不动 —— 两端边界同时满足,是这个缺陷最容易发作的场景。 */
+const SHORT = { scrollTop: 0, scrollHeight: 400, clientHeight: 400 };
+
+test('★ 手势:划动过程中选出文字(长按选字)不得被当成翻篇', () => {
+  const h = harness(SHORT);
+  withWindow('', ({ setSel }) => {
+    h.view.emit('touchstart', h.touch(200, 700));
+    setSel('被选中的一段话');                      // 拖动过程中系统选出了文字
+    h.view.emit('touchend', h.touch(200, 600));
+  });
+  assert.deepEqual(h.moves, [], '手势期间新选出了文字 → 是选字操作,必须放行给系统');
+});
+
+test('★ 手势:起始已有选区、拖动扩展选区(长度变化)不得被当成翻篇', () => {
+  const h = harness(SHORT);
+  withWindow('词', ({ setSel }) => {
+    h.view.emit('touchstart', h.touch(200, 700));   // 此时已有 1 字选区
+    setSel('词扩展成了很长的一段');                  // 拖着选区手柄往下扩
+    h.view.emit('touchend', h.touch(200, 600));
+  });
+  assert.deepEqual(h.moves, [], '选区长度变了 → 是文本操作,必须放行给系统');
+});
+
+test('手势:页面残留着上一次的选区、但它没变时,仍然要能翻篇(别过度拦截)', () => {
+  const h = harness(SHORT);
+  withWindow('上次留下的选区', () => {
+    h.view.emit('touchstart', h.touch(200, 700));
+    h.view.emit('touchend', h.touch(200, 600));     // 选区全程未变 → 用户是想翻篇
+  });
+  assert.deepEqual(h.moves, [1], '选区没被本次手势改动过 → 不得因为「页面上有选区」就一律拦截');
+});
+
+test('手势:无选区时照常翻篇(基线 —— 上面的断言必须靠它才有判别力)', () => {
+  const h = harness(SHORT);
+  withWindow('', () => {
+    h.view.emit('touchstart', h.touch(200, 700));
+    h.view.emit('touchend', h.touch(200, 600));
+  });
+  assert.deepEqual(h.moves, [1], '基线:无选区时本场景必须翻篇');
+});
+
+test('手势:无 DOM 环境(纯 Node)下选区检测不抛异常', () => {
+  const h = harness(SHORT);
+  assert.equal(typeof globalThis.window, 'undefined', '本用例前提:没有 window 桩');
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [1], '没有 window 也要能正常翻篇');
+});
