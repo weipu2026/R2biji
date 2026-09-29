@@ -501,6 +501,13 @@ const MUTANTS = [
     expect: '手机端阅读标题纵向堆叠',
   },
   {
+    label: '正文段落改用 break-all(为长 URL 图省事,却把「逐字一行」那类风险放开)',
+    file: 'public/css/style.css',
+    from: '.read-body p { margin: 10px 0; word-break: break-word; white-space: pre-wrap; }',
+    to: '.read-body p { margin: 10px 0; word-break: break-all; white-space: pre-wrap; } /* MUTANT */',
+    expect: 'break-all 只有已知安全的一处',
+  },
+  {
     label: '滑动翻篇不看边界(中段上划也被当成翻篇,长笔记读不下去)',
     file: 'public/js/features/note.js',
     from: '  if (dy < 0) return atBottom ? 1 : 0;   // 上划(手指向上):已到底 → 下一篇\n  return atTop ? -1 : 0;                 // 下划(手指向下):已到顶 → 上一篇',

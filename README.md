@@ -237,8 +237,8 @@ CI 验收会自动退回 workers.dev;确实只想要一个入口 → 设 `HIDE_W
 ## 开发
 
 ```bash
-npm test                # 离线单测 292 项(加密/格式/库/渲染/搜索/Worker/端到端/弹窗/会话/同步/ZIP/应急页/阅读站/手机端阅读/资源清单/部署配置/store 纪律/侧栏护栏),Node ≥ 22
-npm run test:falsify    # 鉴伪:逐条破坏 71 个守卫 → 确认对应用例真的会变红 → 自动还原
+npm test                # 离线单测 293 项(加密/格式/库/渲染/搜索/Worker/端到端/弹窗/会话/同步/ZIP/应急页/阅读站/手机端阅读/资源清单/部署配置/store 纪律/侧栏护栏),Node ≥ 22
+npm run test:falsify    # 鉴伪:逐条破坏 72 个守卫 → 确认对应用例真的会变红 → 自动还原
 ./start.sh              # 本地体验(内存 R2,重启即清空)
 npx wrangler dev        # 本地真实 Worker + R2 模拟
 ```

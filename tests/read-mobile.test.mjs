@@ -78,6 +78,23 @@ test('手机端阅读标题纵向堆叠(标题独占一行,操作按钮换到下
     '窄屏下操作按钮要能换行,否则 4 个按钮自己就会横向溢出');
 });
 
+test('★ 全站 word-break:break-all 只有已知安全的一处(把「逐字一行」钉成一类)', () => {
+  /* 这个缺陷不是「某一行写错了」,而是四条同时成立才发作:
+   *   可换行的中文文本 + 在 flex 横排里可收缩 + 兄弟节点 flex-shrink:0 + break-all
+   * 与其为每个场景各写一条断言(改一个地方就要补一处),不如**把 break-all 的落点
+   * 收成一张白名单**:将来任何地方新加 break-all 都会在这里变红。
+   * 目前唯一允许的是块级上下文里的行内代码 —— 它的可用宽度是整个正文宽,不存在挤压,
+   * 而长 hash/URL 又确实需要能在任意位置断。
+   * (2026-09-29 全站审计:另外 9 处 flex-shrink:0 场景的兄弟要么是按钮、
+   *  要么自身 nowrap + ellipsis,均无此风险。) */
+  const hits = [...css.matchAll(/([^{}]+)\{([^}]*)\}/g)]
+    .filter(([, , body]) => /word-break:\s*break-all/.test(body))
+    .map(([, sel]) => sel.trim().replace(/\s+/g, ' '));
+  assert.deepEqual(hits, ['.read-body code'],
+    `break-all 只允许出现在 .read-body code,实际出现在 ${JSON.stringify(hits)} —— `
+    + '新增的这处若处于 flex 横排里且可收缩,窄屏上就会退化成「一字一行」');
+});
+
 /* ---------- 2. 滑动翻篇:纯函数判定 ---------- */
 
 test('上下滑动翻篇:位移不足阈值不算翻篇', () => {
