@@ -390,6 +390,9 @@ export async function deleteNote(ctx) {
   if (!note) return;
   const yes = await ctx.modal({ type: 'confirm', danger: true, title: '删除笔记', text: `「${note.title || '无标题'}」将被删除(保存后生效,云端旧版有自动备份)。` });
   if (!yes) return;
+  // 用户确认删除的是「眼前这份」(含编辑框里未提交的字),不是上次收尾的旧版 ——
+  // 先收集再入回收站(2026-09-29 审计;与移动分类同一处修复模式)。
+  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状删除 */ } }
   const activeCat = S.get('activeCat');
   const cat = S.get('lib').categoryInfo(activeCat);
   // 延期删除:先进本分类密文内的回收站,30 天内可恢复;真正清除由
@@ -466,6 +469,12 @@ export async function moveNoteToCategory(ctx, noteId, toName) {
 
   movingNote = true;
   try {
+    // 正在编辑的就是这篇:先把编辑框里未提交的标题/正文收进内存,再拷贝出去。
+    // 否则移动走的是「上次收尾时提交的旧内容」,编辑框里的字随移动静默丢失
+    // (2026-09-29 审计;收集失败不阻断移动 —— 顶多退回旧行为)。
+    if (S.get('editing') && S.get('activeNoteId') === noteId) {
+      try { ctx.collectEditChanges?.(); } catch { /* 收集不了就按内存现状移动 */ }
+    }
     // 深拷贝:这篇笔记随后要从源分类里删掉,两边不能共享同一个对象引用
     const moved = JSON.parse(JSON.stringify(note));
     delete moved.deletedAt;

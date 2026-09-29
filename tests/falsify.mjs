@@ -693,6 +693,20 @@ const MUTANTS = [
     to: '      noteId: null, // MUTANT\n    }));\n    return true;',
     expect: 'noteId 原样',
   },
+  {
+    label: '移动「正在编辑」的笔记前不收集编辑框(未提交的字随移动静默丢失)',
+    file: 'public/js/features/note.js',
+    from: "    if (S.get('editing') && S.get('activeNoteId') === noteId) {\n      try { ctx.collectEditChanges?.(); } catch { /* 收集不了就按内存现状移动 */ }\n    }",
+    to: '    // MUTANT:不收集编辑框',
+    expect: '编辑框未提交的修改收进内存',
+  },
+  {
+    label: '编辑中删除笔记不收集编辑框(进回收站的是上次收尾的旧版,不是用户眼前这份)',
+    file: 'public/js/features/note.js',
+    from: "  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状删除 */ } }",
+    to: '  // MUTANT:不收集编辑框',
+    expect: '先把编辑框收进内存再入回收站',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

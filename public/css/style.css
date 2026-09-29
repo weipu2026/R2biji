@@ -1053,6 +1053,9 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 }
 .modal-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
 .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+/* 移动笔记的目标分类清单:纵向排列 + 间距。
+ * 没有这条时 .btn.block 零间距叠放成一整块(2026-09-29 审计);滚动交给 #modalBody。 */
+.cat-pick { display: grid; gap: 8px; }
 
 #toasts {
   position: fixed;

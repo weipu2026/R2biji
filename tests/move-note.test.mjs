@@ -17,7 +17,7 @@ import assert from 'node:assert/strict';
 import { withDom, withLocalStorage } from './dom-stub.mjs';
 import { Store } from '../public/js/store.js';
 import { renameCategory, renameCategoryByName, renderCategoryList, renderNoteList } from '../public/js/features/sidebar.js';
-import { moveNoteToCategory, pickCategoryForNote } from '../public/js/features/note.js';
+import { moveNoteToCategory, pickCategoryForNote, deleteNote } from '../public/js/features/note.js';
 
 /** 把一个 Store + 一堆「被调过就记下来」的桩拼成 ctx。
  *  dom 必须由调用方(通常是 withDom 的 byId)注入 —— 见文件头那条说明。 */
@@ -322,4 +322,84 @@ test('★ renderNoteList:笔记行的操作按钮是 4 个且含「移动到其�
       assert.equal(b.attrs['aria-label'], b.title, `「${b.title}」按钮缺 aria-label`);
     }
   });
+});
+
+/* ================= 2026-09-29 下午审计补丁 ================= */
+
+test('★ moveNoteToCategory:移动「正在编辑」的这篇前,必须先把编辑框未提交的修改收进内存', async () => {
+  await withDom(async (f, byId) => {
+    const { lib, state } = libStub({ jia: [{ id: 'k1', title: '旧标题', content: '旧内容' }] });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('lib', lib);
+    let collected = 0;
+    const { ctx } = recorder(st, {
+      dom: { byId },
+      // 模拟真实 collectEditChanges:把编辑框内容写进 note 对象
+      collectEditChanges: () => {
+        collected += 1;
+        state.甲.data.notes.find((n) => n.id === 'k1').title = '编辑框里的新标题';
+      },
+    });
+
+    const ok = await moveNoteToCategory(ctx, 'k1', '乙');
+
+    assert.equal(ok, true);
+    assert.equal(collected, 1, '★ 移动前必须先收集编辑框,否则未提交的字随移动丢失');
+    assert.equal(state.乙.data.notes[0].title, '编辑框里的新标题',
+      '★ 移动副本必须带着编辑框的最新内容,而不是上次收尾的旧版');
+  });
+});
+
+test('★ moveNoteToCategory:编辑的是别的笔记时不收集(不惊动无关的编辑框)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib } = libStub({ jia: [{ id: 'k1', title: 'a', content: '' }] });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', '另一篇');
+    st.set('editing', true);
+    st.set('lib', lib);
+    let collected = 0;
+    const { ctx } = recorder(st, { dom: { byId }, collectEditChanges: () => { collected += 1; } });
+
+    await moveNoteToCategory(ctx, 'k1', '乙');
+
+    assert.equal(collected, 0, '编辑的不是这篇就别碰编辑框');
+  });
+});
+
+test('★ deleteNote:编辑中删除,先把编辑框收进内存再入回收站(用户确认的是「眼前这份」)', async () => {
+  await withDom(async (f, byId) => {
+    const { lib, state } = libStub({ jia: [{ id: 'k1', title: '旧标题', content: 'c' }] });
+    const st = new Store();
+    st.set('activeCat', '甲');
+    st.set('activeNoteId', 'k1');
+    st.set('editing', true);
+    st.set('lib', lib);
+    const { ctx } = recorder(st, {
+      dom: { byId },
+      modal: async () => true,   // 确认删除
+      activeNoteData: () => state.甲.data.notes.find((n) => n.id === st.get('activeNoteId')),
+      collectEditChanges: () => {
+        state.甲.data.notes.find((n) => n.id === 'k1').title = '编辑框里的新标题';
+      },
+    });
+
+    await deleteNote(ctx);
+
+    assert.equal(state.甲.data.notes.length, 0, '源列表里删掉');
+    assert.equal(state.甲.data.trash.length, 1, '进了回收站');
+    assert.equal(state.甲.data.trash[0].title, '编辑框里的新标题',
+      '★ 回收站里必须是编辑框的最新内容,而不是上次收尾的旧版');
+  });
+});
+
+test('★ .cat-pick 必须有纵向间距规则(没有时弹层按钮零间距叠放成一整块)', async () => {
+  const { readFileSync } = await import('node:fs');
+  const css = readFileSync(new URL('../public/css/style.css', import.meta.url), 'utf8');
+  const rule = /\.cat-pick\s*\{[^}]*\}/.exec(css);
+  assert.ok(rule, '.cat-pick 规则必须存在');
+  assert.match(rule[0], /gap:\s*\d+px/, '★ 必须声明 gap(按钮间距)');
 });
