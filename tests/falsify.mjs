@@ -591,6 +591,41 @@ const MUTANTS = [
     to: "  ctx.store.set('activeNoteId', null);",
     expect: '回到上次读的那一篇',
   },
+  {
+    label: '进应用:载入失败也回报「已打开」(兜底分支永不触发,阅读区永远停在「正在载入…」)',
+    file: 'public/js/ui.js',
+    from: "  return ctx.store.get('activeCat') !== null;",
+    to: '  return true;',
+    expect: '如实返回「没打开」',
+  },
+  {
+    label: '进应用:兜底不再区分「载入失败」与「一个分类都没有」',
+    file: 'public/js/ui.js',
+    from: "    if (names.length) {\n      showEmpty('内容没能载入",
+    to: "    if (false) {\n      showEmpty('内容没能载入",
+    expect: '落「可重试」的兜底',
+  },
+  {
+    label: '滑动翻篇:忽略 selectionchange 直接信号,只看抬起瞬间的选区快照',
+    file: 'public/js/features/note.js',
+    from: '    if (selChanged || (nowSel > 0 && nowSel !== from.selLen)) return;',
+    to: '    if (nowSel > 0 && nowSel !== from.selLen) return;',
+    expect: 'selectionchange 变过',
+  },
+  {
+    label: '滑动翻篇:不注册 selectionchange 监听(直接信号整条失效)',
+    file: 'public/js/features/note.js',
+    from: "    doc.addEventListener('selectionchange', () => { if (start) selChanged = true; });",
+    to: '    // MUTANT:不注册',
+    expect: 'selectionchange 变过',
+  },
+  {
+    label: '滑动翻篇:新手势不复位「选过字」标记(选完字就再也划不动)',
+    file: 'public/js/features/note.js',
+    from: '    start = null;\n    selChanged = false;',
+    to: '    start = null;',
+    expect: '新手势必须清掉',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

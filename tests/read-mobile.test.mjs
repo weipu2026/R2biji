@@ -149,8 +149,19 @@ class FakeView {
   get bound() { return Object.keys(this.handlers); }
 }
 
+/** document 桩:只提供 selectionchange 的注册与触发(选区事件只发在 document 上)。
+ *  给它挂到 view.ownerDocument 上,测试就不必去动全局 document。 */
+function mkDoc() {
+  const handlers = {};
+  return {
+    addEventListener(type, fn) { (handlers[type] ||= []).push(fn); },
+    emit(type) { for (const fn of handlers[type] || []) fn({}); },
+  };
+}
+
 function harness(opts = {}, { locked = false, editing = false } = {}) {
   const view = new FakeView(opts);
+  view.ownerDocument = mkDoc();
   const moves = [];
   const ctx = {
     dom: { byId: (id) => (id === 'readView' ? view : null) },
@@ -159,7 +170,7 @@ function harness(opts = {}, { locked = false, editing = false } = {}) {
   };
   bindReadSwipe(ctx);
   const touch = (x, y) => ({ touches: [{ clientX: x, clientY: y }], changedTouches: [{ clientX: x, clientY: y }] });
-  return { ctx, view, moves, touch };
+  return { ctx, view, doc: view.ownerDocument, moves, touch };
 }
 
 test('bindReadSwipe 会绑上 touchstart / touchend / touchcancel(缺一条手势就没反应或无法作废)', () => {
@@ -313,4 +324,60 @@ test('手势:无 DOM 环境(纯 Node)下选区检测不抛异常', () => {
   h.view.emit('touchstart', h.touch(200, 700));
   h.view.emit('touchend', h.touch(200, 600));
   assert.deepEqual(h.moves, [1], '没有 window 也要能正常翻篇');
+});
+
+/* ---------- 5. 选区事件的**直接信号**(比抬起瞬间的快照更靠得住) ----------
+ * 只看 touchend 那一刻的选区长度有个缺口:某些移动浏览器在抬起时,系统选择控件会
+ * 先清掉/重建选区(拖手柄扩展选区时尤其明显),那一刻读到的长度可能正好是 0 ——
+ * 于是「用户在选字」被判成「用户在翻篇」,缺陷照旧。selectionchange 发生在手势
+ * **过程中**,是这件事的直接信号。下面这组合同时钉住两条判据的可用性,以及
+ * 「标记必须在新手势开始时清掉」这条容易漏的收尾。 */
+
+test('★★ 选字:手势期间 selectionchange 变过 → 不翻篇(哪怕抬起时已读不到选区)', () => {
+  const h = harness(SHORT);   // 两端都贴边:不被拦就必然翻篇
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.doc.emit('selectionchange');              // 手势进行中,选区变了
+  h.view.emit('touchend', h.touch(200, 600)); // 抬起时读不到选区(无 window 桩 → 长度 0)
+  assert.deepEqual(h.moves, [], '手势期间选区变过 = 用户在选字,不得翻篇');
+});
+
+test('★★ 基线:同一场景(两端贴边 + 上划)没有选区事件时会翻篇', () => {
+  const h = harness(SHORT);
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [1], '基线:证明上面那条断言有判别力(否则它可能是恒绿的)');
+});
+
+test('★★ 新手势必须清掉上一轮的「选过字」标记(否则选完字就再也划不动了)', () => {
+  const h = harness(SHORT);
+  // 第一次:选字手势 → 被拦
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.doc.emit('selectionchange');
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [], '第一次是选字,不该翻篇');
+  // 第二次:纯滑动 → 必须能翻(标记若没清,这里会被上一轮挡死)
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [1], '新手势开始时必须把标记清掉');
+});
+
+test('选区事件发生在手势之外(上一轮残留 / 只是选中)→ 不影响本轮翻篇', () => {
+  const h = harness(SHORT);
+  h.doc.emit('selectionchange');              // 手势还没开始
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [1], '不在手势期间的选区变化与本轮无关,不得误伤');
+});
+
+test('选区事件在手势被 touchcancel 作废后发出 → 不残留成下一轮的挡箭牌', () => {
+  const h = harness(SHORT);
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchcancel');                 // 系统手势打断:本次手势作废
+  h.doc.emit('selectionchange');              // 打断之后系统重设了选区
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [], '被取消的手势本就不翻篇');
+  // 再来一次干净手势:必须能翻(标记不得跨手势残留)
+  h.view.emit('touchstart', h.touch(200, 700));
+  h.view.emit('touchend', h.touch(200, 600));
+  assert.deepEqual(h.moves, [1], '作废手势期间的选区事件不得污染下一次手势');
 });

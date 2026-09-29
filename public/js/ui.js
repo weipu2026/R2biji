@@ -679,7 +679,16 @@ export function pickRestoreCategory(names, last) {
 
 /**
  * 进应用时把内容摆到阅读区:优先回到上次读的那篇,否则打开第一个分类的顶端那篇。
- * @returns {Promise<boolean>} 是否真的打开了内容(false = 一个分类都没有)
+ * @returns {Promise<boolean>} 阅读区是否已经归属到某个分类(false = 调用方该落兜底)
+ *
+ * ⚠️ 不能写成「没抛错就算成功」。`openCategory` 把**加载失败吞在自己的 catch 里**
+ *    (只 toast + 重画分类列表),它**不碰阅读区**;若这里无条件返回 true,调用方的
+ *    兜底分支就永不触发 —— 阅读区会**永久停在「正在载入…」**,比原来那句可操作的
+ *    「从左侧选择一个分类」更糟(用户既看不到内容,也没有任何东西可点)。
+ *    触发场景真实存在:离线打开、网络抖动、本机 vault 缓存里的分类已被别端删掉。
+ *    判据取 `activeCat`:openCategory 只在**真正打开成功**后才写它。
+ * ⚠️ 判「非空」而不是「等于 cat」:加载慢时用户可能已在侧栏自己点了别的分类,
+ *    那时 activeCat 是**他选的那个** —— 那是他想要的,不该被这里判成失败。
  */
 export async function restoreReading(ctx) {
   const names = ctx.store.get('lib').sortedCategories();  // 视觉顺序单一来源,与侧栏首行同源
@@ -691,13 +700,16 @@ export async function restoreReading(ctx) {
    * 这里不再重复判断一遍(判两处必然有一天会分家)。 */
   ctx.store.set('activeNoteId', last && last.cat === cat ? last.noteId : null);
   await openCategory(ctx, cat);
-  return true;
+  return ctx.store.get('activeCat') !== null;
 }
 
 /** 记住阅读位置的订阅只注册一次(enterApp 每次解锁都会跑,重复订阅会叠加回调)。 */
 let readPosSubscribed = false;
 
-async function enterApp() {
+/** 解锁成功后的第一屏:复位 → 定位该读哪篇 → 兜底 → 收尾。
+ *  ★ 导出**只为可测**:这条链路的每一步顺序错了界面都会对不上,而此前它一行都没被
+ *    覆盖 —— 那 14 条用例只到 `restoreReading` 为止,壳子里的接线是裸的。 */
+export async function enterApp() {
   $('lock').hidden = true;
   $('app').hidden = false;
   $('searchBox').value = '';
@@ -721,13 +733,28 @@ async function enterApp() {
      * 换分类 / 删除后自动选相邻),订阅这一处就全覆盖,不必在每个入口各写一遍。 */
     S.subscribe('activeNoteId', () => rememberRead());
   }
+  const names = S.lib.sortedCategories();
   /* 有分类时先给一句过渡文案再异步打开 —— 否则会先闪一下「从左侧选择一个分类」,
    * 用户刚看完那句,内容又跳出来了。 */
-  if (S.lib.sortedCategories().length) showEmpty('正在载入…');
+  if (names.length) showEmpty('正在载入…');
   /* 2026-09-29 用户反馈:电脑版、手机版打开都是一片空白 +「从左侧选择一个分类」——
    * 等于每次进来都要自己重新找一遍位置。现在直接摆上:上次读的那篇 / 第一个分类的顶端。 */
   if (!await restoreReading(ctx)) {
-    showEmpty('还没有分类,先建一个', { label: '新建分类', fn: () => addCategory(ctx) });
+    /* 兜底必须分两种 —— 它们对用户是**完全不同的处境**:
+     *   · 一个分类都没有 → 确实没东西可打开,给「新建分类」
+     *   · 有分类却没打开 → 载入失败(离线 / 网络抖动 / 该分类已在别端删掉)。
+     *     少了这一支,上面那句「正在载入…」就会一直挂着:用户既看不到内容,
+     *     屏幕上也没有任何东西可点 —— 比改动前那句可操作的提示更糟。 */
+    if (names.length) {
+      showEmpty('内容没能载入,可重试或从左侧选择其他分类', {
+        label: '重试',
+        fn: async () => {
+          if (!await restoreReading(ctx)) ctx.toast('仍然打不开:网络不通,或该分类已不存在', 'error');
+        },
+      });
+    } else {
+      showEmpty('还没有分类,先建一个', { label: '新建分类', fn: () => addCategory(ctx) });
+    }
   }
   refreshSaveStatus();
   startIdleTimer();

@@ -16,11 +16,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  pickRestoreCategory, readLastRead, rememberRead, restoreReading,
+  pickRestoreCategory, readLastRead, rememberRead, restoreReading, enterApp,
 } from '../public/js/ui.js';
 import { openCategory, activeNoteData, renderNoteList } from '../public/js/features/sidebar.js';
 import { renderReadView } from '../public/js/features/note.js';
-import { Store } from '../public/js/store.js';
+import { Store, store as appStore } from '../public/js/store.js';
 
 const KEY = 'jmbiji.lastRead';
 
@@ -84,7 +84,10 @@ class FakeNode {
       },
     };
   }
-  set textContent(v) { this.children = []; this._text = String(v); }
+  /* ⚠️ 空串要当成「清空」而不是「文本就是空」:真实 DOM 里 `el.textContent = ''`
+   * 会清掉子节点,之后再 appendChild 的内容仍算在 textContent 里。若把 '' 记成有效
+   * 文本,showEmpty 那种「先清空再逐块追加」的写法就会让断言读到空串(实测踩过)。 */
+  set textContent(v) { this.children = []; const s = String(v); this._text = s === '' ? null : s; }
   get textContent() {
     if (this._text !== null) return this._text;
     return this.children.map((c) => c.textContent).join('');
@@ -110,8 +113,10 @@ async function withDom(fn) {
   }
 }
 
-/** cats: { 分类名: 笔记数组 } —— 真实 Store + 真实 feature 函数接线后的 ctx */
-function mkCtx(cats) {
+/** cats: { 分类名: 笔记数组 } —— 真实 Store + 真实 feature 函数接线后的 ctx
+ *  @param {{failLoad?:boolean}} [opts] failLoad: 让 loadCategory 抛错,模拟
+ *    离线 / 网络抖动 / 该分类已在别端删掉 */
+function mkCtx(cats, { failLoad = false } = {}) {
   const nodes = new Map();
   const byId = (id) => {
     if (!nodes.has(id)) nodes.set(id, new FakeNode('div'));
@@ -119,7 +124,7 @@ function mkCtx(cats) {
   };
   const store = new Store();
   store.set('lib', {
-    loadCategory: async () => {},
+    loadCategory: async () => { if (failLoad) throw new Error('网络不通'); },
     listCategories: () => Object.keys(cats),
     sortedCategories: () => Object.keys(cats),
     catCount: (n) => (cats[n] ? cats[n].length : null),
@@ -304,6 +309,132 @@ test('★ 进应用:一个分类都没有 → 如实报告没打开(由调用方
 
       assert.equal(opened, false, '没有分类就不能假装打开了');
       assert.equal(store.get('activeCat'), null, '不该凭空写一个分类进去');
+    });
+  });
+});
+
+test('★ restoreReading:分类加载失败 → 如实返回「没打开」(否则调用方的兜底永不触发)', async () => {
+  await withDom(async () => {
+    const { ctx, store } = mkCtx({ 甲: [mkNote('a', 1000)] }, { failLoad: true });
+    await withStorage(async () => {
+      const opened = await restoreReading(ctx);
+
+      assert.equal(opened, false,
+        'openCategory 把失败吞在自己的 catch 里、且不碰阅读区 —— 这里若回报 true,调用方就永远不会落兜底');
+      assert.equal(store.get('activeCat'), null, '失败时不该留下一个「像是打开了」的分类');
+    });
+  });
+});
+
+/* ---------- 4. enterApp 壳子:复位 → 定位 → 兜底 → 收尾 ----------
+ * 为什么要单测这一层:上面所有用例都从 restoreReading 起步,而用户看到的是 enterApp。
+ * 「复位顺序 / 兜底文案 / 订阅只注册一次」这三件事错了界面就对不上 —— 此前一行都没被
+ * 覆盖(2026-09-29 复查自己上一轮改动时发现的缺口:改动主体不可测 = 等于没有护栏)。 */
+
+/** enterApp 走的是模块级 `$() = document.getElementById`,所以要一整套 document 桩。
+ *  任意 id 返回同一个节点:与真实页面同构(节点是静态的,只有 hidden 与文本在变)。 */
+async function withAppDom(fn) {
+  const nodes = new Map();
+  const get = (id) => {
+    if (!nodes.has(id)) nodes.set(id, new FakeNode('div'));
+    return nodes.get(id);
+  };
+  const has = Object.prototype.hasOwnProperty.call(globalThis, 'document');
+  const orig = globalThis.document;
+  globalThis.document = {
+    getElementById: get,
+    createElement: (tag) => new FakeNode(tag),
+    createTextNode: (t) => { const n = new FakeNode('#text'); n._text = String(t); return n; },
+    addEventListener() {}, removeEventListener() {},
+  };
+  try {
+    return await fn(get);
+  } finally {
+    /* enterApp 收尾会挂一个防抖计时器(刷新保存状态),它 500ms 后要碰 document ——
+     * 本桩那时已撤掉。真实页面 document 一直在,这里必须显式取消,否则会变成
+     * 「测试结束后仍有异步活动」的噪音报错。 */
+    clearTimeout(appStore.get('statusTimer'));
+    if (has) globalThis.document = orig; else delete globalThis.document;
+  }
+}
+
+/** enterApp 用的是 ui.js 模块内的 store 单例(不是自造 ctx 里的那个)—— 要往那一个里种库。 */
+function seedAppLib(cats, { failLoad = false } = {}) {
+  appStore.set('lib', {
+    loadCategory: async () => { if (failLoad) throw new Error('网络不通'); },
+    listCategories: () => Object.keys(cats),
+    sortedCategories: () => Object.keys(cats),
+    catCount: (n) => (cats[n] ? cats[n].length : null),
+    catPin: () => false,
+    categoryInfo: (n) => (cats[n] ? { data: { notes: cats[n] } } : null),
+  });
+}
+
+/** 空态框上那个按钮的文字(没有按钮返回 null) */
+function emptyActionText(byId) {
+  const btn = byId('emptyState').children.find((c) => c.tagName === 'BUTTON');
+  return btn ? btn.textContent : null;
+}
+
+test('★ 进应用(壳):有分类 → 内容真的摆上阅读区,空态收起', async () => {
+  await withAppDom(async (byId) => {
+    await withStorage(async () => {
+      seedAppLib({ 甲: [mkNote('a', 1000), mkNote('b', 500)] });
+
+      await enterApp();
+
+      assert.equal(appStore.get('activeCat'), '甲');
+      assert.equal(byId('readView').hidden, false, '阅读区必须显示出来');
+      assert.equal(byId('emptyState').hidden, true, '空态必须收起');
+      assert.equal(appStore.get('lockMode'), null,
+        '进应用必须清 lockMode —— 否则全局快捷键(含 J/K)会被守卫整类拦掉');
+    });
+  });
+});
+
+test('★★ 进应用(壳):分类在、但载入失败 → 落「可重试」的兜底,绝不停在「正在载入…」', async () => {
+  await withAppDom(async (byId) => {
+    await withStorage(async () => {
+      seedAppLib({ 甲: [mkNote('a', 1000)] }, { failLoad: true });
+
+      await enterApp();
+
+      const box = byId('emptyState');
+      assert.equal(box.hidden, false, '必须落到空态上,不能把阅读区晾着');
+      assert.ok(!box.textContent.includes('正在载入'),
+        `「正在载入…」不得成为最终文案(用户会一直等一个永远不会来的内容),实际:${box.textContent}`);
+      assert.ok(box.textContent.includes('内容没能载入'), `实际文案:${box.textContent}`);
+      assert.equal(emptyActionText(byId), '重试', '必须给一个能点的重试,而不是只留一句话等人猜');
+    });
+  });
+});
+
+test('进应用(壳):一个分类都没有 → 落「新建分类」,与载入失败区分开', async () => {
+  await withAppDom(async (byId) => {
+    await withStorage(async () => {
+      seedAppLib({});
+
+      await enterApp();
+
+      const box = byId('emptyState');
+      assert.equal(box.hidden, false);
+      assert.ok(box.textContent.includes('还没有分类'), `实际文案:${box.textContent}`);
+      assert.equal(emptyActionText(byId), '新建分类');
+    });
+  });
+});
+
+test('进应用(壳):反复解锁不会重复订阅 activeNoteId(否则回调越挂越多)', async () => {
+  await withAppDom(async () => {
+    await withStorage(async () => {
+      seedAppLib({ 甲: [mkNote('a', 1000)] });
+
+      await enterApp();
+      await enterApp();
+
+      const subs = appStore._subs.get('activeNoteId');
+      assert.equal(subs ? subs.size : 0, 1,
+        '「记住读到哪」必须只订阅一次:本函数每次解锁都会跑,重复订阅会让每次切换笔记都重复写一遍');
     });
   });
 });

@@ -86,6 +86,18 @@ export function bindReadSwipe(ctx) {
   if (!view || typeof view.addEventListener !== 'function') return;
   /** 手势起点 + **起点时刻**的贴边状态与选区长度;null = 当前没有进行中的手势。 */
   let start = null;
+  /** 本轮手势期间选区**变化过**没有 —— 由 selectionchange 直接置位,手势开始时清掉。
+   *  为什么不能只在 touchend 读一次:某些移动浏览器在抬起的那一刻,系统选择控件会
+   *  先清掉/重建选区(拖手柄时尤其明显),此刻读到的长度可能正好是 0 —— 于是
+   *  「用户在选字」被判成「用户在翻篇」,缺陷照旧。selectionchange 是这件事的**直接
+   *  信号**,发生在手势过程中,不依赖抬起瞬间的状态。两条判据都留:拿不到 document
+   *  的环境(如纯 Node 单测)注册不了监听,那时快照那条仍在兜底。 */
+  let selChanged = false;
+  const doc = view.ownerDocument || (typeof document !== 'undefined' ? document : null);
+  if (doc && typeof doc.addEventListener === 'function') {
+    // 启动时绑一次、不解绑:本函数全场只调一次,监听跟着页面活
+    doc.addEventListener('selectionchange', () => { if (start) selChanged = true; });
+  }
   const edges = () => {
     const max = view.scrollHeight - view.clientHeight;
     // 内容短到滚不动时 max ≈ 0:此时两端同时成立,两个方向都能翻篇
@@ -93,6 +105,7 @@ export function bindReadSwipe(ctx) {
   };
   view.addEventListener('touchstart', (e) => {
     start = null;
+    selChanged = false;
     // 多指(捏合缩放)不接管;编辑态兜底(readView 那时本就隐藏)
     if (e.touches.length !== 1 || ctx.store.get('editing')) return;
     const t = e.touches[0];
@@ -106,11 +119,11 @@ export function bindReadSwipe(ctx) {
     if (!t) return;
     /* 手势期间选区的有无/长度变了 → 用户在选字(长按选词、拖手柄扩展选区),
      * 这不是翻篇手势,必须让给系统;否则会在选到一半时把用户翻到别的笔记去。
-     * 判据用「长度**变化**」而不是「当前有选区」:后者会让页面上残留的旧选区
+     * 判据用「**变化**」而不是「当前有选区」:后者会让页面上残留的旧选区
      * 永久挡住翻篇 —— 用户选完字没点空白取消,就再也划不动了。
-     * 无 DOM 环境(纯 Node 单测)两端都是 0,不受影响。 */
+     * 无 DOM 环境(纯 Node 单测)两条都不成立,不受影响。 */
     const nowSel = selectionLength();
-    if (nowSel > 0 && nowSel !== from.selLen) return;
+    if (selChanged || (nowSel > 0 && nowSel !== from.selLen)) return;
     const delta = readSwipeIntent({
       dx: t.clientX - from.x, dy: t.clientY - from.y, atTop: from.atTop, atBottom: from.atBottom,
     });
