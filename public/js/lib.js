@@ -286,6 +286,10 @@ export class Library {
       etag = cur.etag;
     }
 
+    // 保存前给所有笔记拍快照(内容寻址去重:只对真变了的正文产生上传)。
+    // snapshotNote 失败不抛 —— 快照是保险,正文保存必须继续。
+    for (const note of cat.data.notes) await this.snapshotNote(note);
+
     const outBytes = await V.encryptCategory(this.keys.contentKey, cat.data);
     const res = await API.putCat(name, outBytes, { etag });
     if (res.status === 412) return { conflict: true };
@@ -471,6 +475,63 @@ export class Library {
     return V.decryptBlob(this.keys.attachKey, bytes);
   }
 
+  /* ============ 版本历史(快照) ============ */
+  /*
+   * 快照 = 笔记正文的加密副本,走与附件完全同一条内容寻址 blob 流水线:
+   * 同内容必然同名 → 天然去重,多端各自产生的同一版本也不冲突、不重复存储。
+   * 引用存进 note.snaps(最新在前,{file,ts}),随分类密文一起加密保存,
+   * 不新增任何服务端键;备份导出 / 恢复也自动带上(blob 走通用清单)。
+   */
+
+  /**
+   * 给一篇笔记的「当前正文」拍快照:与最新快照同内容则不动。
+   * opt.anchor=true(恢复历史前调用):把当前正文钉成永久锚 —— 恢复永远可逆。
+   * 失败(网络等)只放弃本次快照,绝不抛出 —— 历史是保险,不是主数据,
+   * 不能因为它阻塞正文保存;同名幂等,下次保存会自然补上。
+   * @returns {Promise<boolean>} 是否真的新增/合并了一档
+   */
+  async snapshotNote(note, opt = {}) {
+    const content = typeof note?.content === 'string' ? note.content : '';
+    if (!content) return false; // 空正文不入史
+    try {
+      const bytes = new TextEncoder().encode(content);
+      const file = await V.blobFileNameFor(this.keys.filenameKey, bytes, 'snap.md');
+      const snaps = Array.isArray(note.snaps) ? note.snaps : [];
+      const next = F.pushSnap(snaps, { file, ts: Date.now() }, { anchor: opt.anchor === true });
+      if (next === snaps) return false; // 同内容去重:无新条目
+      await API.putBlob(file, await V.encryptBlob(this.keys.attachKey, bytes));
+      note.snaps = next;
+      return true;
+    } catch (e) {
+      console.warn('snapshotNote:快照上传失败,本次跳过(不影响正文保存)', e);
+      return false;
+    }
+  }
+
+  /** 读一个历史版本的正文(blob 名来自 note.snaps) */
+  async readSnapshot(blobName) {
+    const bytes = await API.getBlob(blobName);
+    if (!bytes) throw new LibraryError(`历史版本不存在:${blobName}`, 'missing');
+    return new TextDecoder().decode(await V.decryptBlob(this.keys.attachKey, bytes));
+  }
+
+  /**
+   * 恢复历史版本:先把「恢复前的当前正文」拍进历史(恢复可逆 —— 想反悔,
+   * 历史列表最上面那条就是),再把正文换掉。由调用方负责 markDirty + 保存。
+   * @returns {Promise<{ok:boolean, reason?:string}>}
+   */
+  async restoreSnapshot(catName, noteId, blobName) {
+    const cat = this.categories.get(catName);
+    const note = cat?.data?.notes.find((n) => n.id === noteId);
+    if (!note) return { ok: false, reason: '笔记不存在或分类未解锁' };
+    const text = await this.readSnapshot(blobName);
+    // anchor:把「恢复前的正文」钉成永久锚 —— 恢复永远可逆(列表里就能反悔)
+    await this.snapshotNote(note, { anchor: true });
+    note.content = text;
+    note.updatedAt = Date.now();
+    return { ok: true };
+  }
+
   /**
    * 手动清理:解密全部分类,收集引用,删除未被任何笔记引用的 blob。
    *
@@ -496,10 +557,12 @@ export class Library {
       if (!cat.data) { unreadable.push(name); continue; }
       for (const note of cat.data.notes) {
         for (const att of note.attachments) refs.add(att.file);
+        for (const s of (note.snaps || [])) refs.add(s.file); // 版本历史也是活的引用,清了就回不去
       }
       // 回收站里的笔记仍引用着图片:不数进去,恢复回来就是一排裂图
       for (const note of (cat.data.trash || [])) {
         for (const att of (note.attachments || [])) refs.add(att.file);
+        for (const s of (note.snaps || [])) refs.add(s.file);
       }
     }
     if (unreadable.length) {

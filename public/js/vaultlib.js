@@ -2,7 +2,7 @@
  * JMbiji 库级操作 —— vault.json / 笔记数据 / 附件(纯模块)
  * ============================================================ */
 
-import { TRASH_DAYS, TRASH_MAX } from './format.js';
+import { TRASH_DAYS, TRASH_MAX, normalizeSnaps } from './format.js';
 import {
   PBKDF2_ITERATIONS_DEFAULT, PBKDF2_ITERATIONS_MIN, PBKDF2_ITERATIONS_MAX, MAGIC, FORMAT_VERSION,
   clampIterations,
@@ -156,6 +156,8 @@ export function normalizeNoteData(raw) {
         .filter((a) => a && typeof a.file === 'string')
         .map((a) => ({ file: a.file, name: typeof a.name === 'string' ? a.name : a.file }))
       : [],
+    // 版本历史引用(内容寻址 blob 名,最新在前):归一化收敛脏数据,超上限丢最旧
+    snaps: normalizeSnaps(n?.snaps),
   }));
 
   // 回收站:同一密文文件内的延期删除区(trash 数组,条目 = 笔记 + deletedAt)。
@@ -168,7 +170,7 @@ export function normalizeNoteData(raw) {
       if (!t || typeof t !== 'object' || Array.isArray(t)) return null;
       const deletedAt = Number.isFinite(t.deletedAt) ? t.deletedAt
         : (Number.isFinite(t.updatedAt) ? t.updatedAt : now); // 缺日期的兜底,再一起参与过期判定
-      return { ...t, deletedAt };
+      return { ...t, deletedAt, snaps: normalizeSnaps(t?.snaps) };
     })
     .filter(Boolean)
     .filter((t) => now - t.deletedAt < dayMs)

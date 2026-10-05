@@ -248,6 +248,69 @@ export const TRASH_DAYS = 30;
 /** 回收站条目上限:防极端情况无界膨胀,超出时丢最旧的 */
 export const TRASH_MAX = 500;
 
+/* ---------- 笔记版本历史(快照) ---------- */
+
+/** 每篇笔记保留的历史版本数上限:超出丢最旧的 */
+export const SNAP_KEEP = 10;
+/** 窗口合并:距最新快照不足该时长的连续保存合并为同一版本 ——
+ * 否则「停笔 4 秒自动存」会在一次连续编辑里把 10 个历史槽全刷成中间态,
+ * 真正想回去的「编辑前定稿」反而被挤掉。窗口合并后历史里留下的是:
+ * 编辑前的旧版本 + 每段连续编辑的最终态,信息密度最高。 */
+export const SNAP_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * 追加一条历史版本引用(纯函数,不改入参)。
+ * snaps 为「最新在前」的引用数组,条目 = { file: 内容寻址 blob 名, ts: 保存时刻 }。
+ * blob 名由内容 HMAC 派生 → 同内容必然同名,去重不需要存正文哈希。
+ *
+ * 两种条目:
+ *   - 普通条目(无 m 标记)= 「会话起点锚」:一段连续编辑开始时的正文;
+ *   - 合并条目(m:1)= 「会话内最新态」:同一段连续编辑的最新版本,随保存滚动更新。
+ * 这样 4 秒自动保存不会把历史刷成中间态,而真正想回去的「编辑前定稿」
+ * (= 上一段会话的最后一次保存)永远以锚的形式留在历史里。
+ *
+ * 规则(普通保存):
+ *   ① 与最新版同内容 → 原引用返回(不产生新条目、不重复上传);
+ *   ② 窗口内(SNAP_WINDOW_MS)且 head 是合并槽 → 替换它(滚动最新态);
+ *   ③ 窗口内且 head 是普通锚 → 新开合并槽,head 锚原样保留;
+ *   ④ 窗口外 → 插入普通条目(新会话起点)。超 keep 丢最旧。
+ * 恢复历史版本走 anchor:true:先把 head 降级为普通锚(m 摘除),再插入普通条目
+ * —— 「恢复前的正文」被永久钉住,恢复永远可逆。
+ *
+ * @returns {Array} 新数组;无变化时返回原引用(调用方据此判断是否写回)
+ */
+export function pushSnap(snaps, entry, { keep = SNAP_KEEP, windowMs = SNAP_WINDOW_MS, anchor = false } = {}) {
+  const list = Array.isArray(snaps) ? snaps : [];
+  if (!entry || typeof entry.file !== 'string' || !entry.file) return list;
+  const ts = Number.isFinite(entry.ts) ? entry.ts : Date.now();
+  // anchor:恢复前的正文必须成为永久锚 —— head 若是合并槽,先摘掉 m(内容原样保留)
+  const demoted = (anchor && list[0]?.m) ? [{ file: list[0].file, ts: list[0].ts }, ...list.slice(1)] : list;
+  const head = demoted[0];
+  if (head && head.file === entry.file) return demoted;              // ① 同内容去重
+  if (!anchor && head && ts - head.ts < windowMs) {                  // ②③ 窗口内
+    const next = head.m
+      ? [{ file: entry.file, ts, m: 1 }, ...demoted.slice(1)]        // ② 滚动合并槽
+      : [{ file: entry.file, ts, m: 1 }, ...demoted];                // ③ 锚保留,新开合并槽
+    return next.length > keep ? next.slice(0, keep) : next;
+  }
+  const plain = [{ file: entry.file, ts }, ...demoted];              // ④/anchor 新会话起点
+  return plain.length > keep ? plain.slice(0, keep) : plain;
+}
+
+/** 快照引用归一化(读取 / 多端同步时收敛脏数据):只留合法条目,超上限丢最旧。
+ * m 标记原样保留(它决定下一段窗口里 head 是被替换还是被保留)。
+ * 放在 normalizeNoteData 里做 → 「解密 → 保存」任何路径都会顺带完成清理。 */
+export function normalizeSnaps(raw, { keep = SNAP_KEEP } = {}) {
+  if (!Array.isArray(raw)) return [];
+  const out = [];
+  for (const s of raw) {
+    if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
+    if (typeof s.file !== 'string' || !s.file) continue;
+    out.push({ file: s.file, ts: Number.isFinite(s.ts) ? s.ts : 0, ...(s.m ? { m: 1 } : {}) });
+  }
+  return out.slice(0, keep);
+}
+
 /* ---------- 随机密码生成 ---------- */
 
 /** 生成池刻意剔除易混淆字符(0/O/o、1/l/I):抄写密码时少一次看错的风险 */
