@@ -730,6 +730,43 @@ const MUTANTS = [
     to: '    S.patch({ activeCat: null, activeNoteId: null }); // MUTANT:不复位 editing',
     expect: 'editing 必须复位',
   },
+
+  /* ---- 版本历史(快照)守卫 ---- */
+  {
+    label: 'pushSnap 窗口合并判据失效(4 秒自动保存把历史刷成中间态)',
+    file: 'public/js/format.js',
+    from: 'if (!anchor && head && ts - head.ts < windowMs) {                  // ②③ 窗口内',
+    to: 'if (false) { // MUTANT:窗口合并判据失效',
+    expect: 'pushSnap:窗口内滚动合并',
+  },
+  {
+    label: 'pushSnap 同内容去重失效(每存一次就多一条重复历史)',
+    file: 'public/js/format.js',
+    from: 'if (head && head.file === entry.file) return demoted;              // ① 同内容去重',
+    to: 'if (false && head && head.file === entry.file) return demoted; // MUTANT:去重失效',
+    expect: '与最新版同内容',
+  },
+  {
+    label: '恢复前的正文不再被钉成永久锚(恢复操作可能被后续保存冲掉)',
+    file: 'public/js/format.js',
+    from: "const demoted = (anchor && list[0]?.m) ? [{ file: list[0].file, ts: list[0].ts }, ...list.slice(1)] : list;",
+    to: 'const demoted = list; // MUTANT:不降级合并槽',
+    expect: 'pushSnap:anchor(恢复前)',
+  },
+  {
+    label: '孤儿清理漏收版本快照引用(清理把历史全部误删)',
+    file: 'public/js/lib.js',
+    from: "for (const s of (note.snaps || [])) refs.add(s.file); // 版本历史也是活的引用,清了就回不去",
+    to: '// MUTANT:快照引用不参与清点',
+    expect: '全生命周期:建库',
+  },
+  {
+    label: '恢复历史不再先拍「恢复前快照」(恢复不可逆)',
+    file: 'public/js/lib.js',
+    from: 'await this.snapshotNote(note, { anchor: true });',
+    to: 'await this.snapshotNote(note); // MUTANT:丢掉 anchor,恢复前的正文会被窗口合并吞掉',
+    expect: '全库备份:导出',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

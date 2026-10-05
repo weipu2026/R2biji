@@ -9,6 +9,7 @@ import {
   stripEnc, isEncryptedName, SEAFILE_IGNORE_CONTENT,
   assessPassword, PASSWORD_MIN_LEN, relTime, genPassword,
   statusAllowsOverride, STATUS_RANK,
+  pushSnap, normalizeSnaps, SNAP_KEEP, SNAP_WINDOW_MS,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -352,4 +353,102 @@ test('P3:清洗后的分类名不得残留服务端会拒的字符(客户端该�
   assert.equal(sanitizeCategoryName('秘钥'), '秘钥');
   // 边界:整串都是非法字符 → null(而不是空串,空串会静默建出一个无名分类)
   assert.equal(sanitizeCategoryName('&&&'), null);
+});
+
+/* ---------- 版本历史(快照)纯函数 ---------- */
+
+test('pushSnap:空历史 → 新版本入史,且不改入参(纯函数)', () => {
+  const snaps = [];
+  const out = pushSnap(snaps, { file: 'b1.md', ts: 1000 });
+  assert.deepEqual(out, [{ file: 'b1.md', ts: 1000 }]);
+  assert.equal(snaps.length, 0, '入参不得被原地修改');
+  assert.notEqual(out, snaps);
+});
+
+test('pushSnap:与最新版同内容 → 原引用返回(去重,不产生新条目)', () => {
+  const snaps = [{ file: 'b1.md', ts: 1000 }];
+  assert.equal(pushSnap(snaps, { file: 'b1.md', ts: 999000 }), snaps);
+  assert.equal(pushSnap(snaps, { file: 'b1.md', ts: 1000 + SNAP_WINDOW_MS + 1 }), snaps);
+});
+
+test('pushSnap:窗口内滚动合并 —— 锚保留,合并槽随保存滚动更新', () => {
+  // 会话起点:head 是普通锚 → 新开合并槽,锚原样保留
+  const s1 = pushSnap([{ file: 'v1.md', ts: 0 }], { file: 'v2.md', ts: 1000 });
+  assert.deepEqual(s1, [{ file: 'v2.md', ts: 1000, m: 1 }, { file: 'v1.md', ts: 0 }]);
+  // 会话内继续保存:head 是合并槽 → 原地滚动,锚不动
+  const s2 = pushSnap(s1, { file: 'v3.md', ts: 2000 });
+  assert.deepEqual(s2, [{ file: 'v3.md', ts: 2000, m: 1 }, { file: 'v1.md', ts: 0 }]);
+  assert.equal(s2.length, 2, '连打期间的中间态不占新槽');
+  // 入参不可变
+  assert.equal(s1[0].file, 'v2.md');
+});
+
+test('pushSnap:窗口外 → 新会话起点(普通条目),旧合并槽保留为历史', () => {
+  const out = pushSnap([{ file: 'v3.md', ts: 0, m: 1 }, { file: 'v1.md', ts: -99 }], { file: 'v4.md', ts: SNAP_WINDOW_MS });
+  assert.deepEqual(out, [
+    { file: 'v4.md', ts: SNAP_WINDOW_MS },
+    { file: 'v3.md', ts: 0, m: 1 },
+    { file: 'v1.md', ts: -99 },
+  ]);
+});
+
+test('pushSnap:恰好等于窗口时长 → 不合并(判据是严格小于)', () => {
+  const out = pushSnap([{ file: 'old.md', ts: 0 }], { file: 'new.md', ts: SNAP_WINDOW_MS });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].m, undefined, '新会话起点必须是普通条目');
+});
+
+test('pushSnap:anchor(恢复前)—— head 合并槽先降级为锚,当前正文钉成永久锚', () => {
+  // 现场:v1 锚 + v3 合并槽;恢复前当前正文是 v3(已保存,head.file === entry.file)
+  const snaps = [{ file: 'v3.md', ts: 1000, m: 1 }, { file: 'v1.md', ts: 0 }];
+  const out = pushSnap(snaps, { file: 'v3.md', ts: 2000 }, { anchor: true });
+  assert.deepEqual(out, [{ file: 'v3.md', ts: 1000 }, { file: 'v1.md', ts: 0 }],
+    '不新增条目,但 head 的 m 必须被摘掉(升格为永久锚)');
+  // 恢复后的新内容(v0)落史:v1 锚、v3 锚都不许被窗口规则吞掉
+  const out2 = pushSnap(out, { file: 'v0.md', ts: 3000 }, { anchor: true });
+  assert.deepEqual(out2, [
+    { file: 'v0.md', ts: 3000 },
+    { file: 'v3.md', ts: 1000 },
+    { file: 'v1.md', ts: 0 },
+  ], 'anchor 不受窗口合并约束');
+  // 恢复前有未保存改动:当前正文 C 与 head 不同 → C 也要成为锚
+  const out3 = pushSnap(out, { file: 'C.md', ts: 2500 }, { anchor: true });
+  assert.equal(out3[0].m, undefined, 'anchor 插入的必须是普通条目');
+});
+
+test('pushSnap:超过保留上限 → 丢最旧,长度守恒', () => {
+  const far = (i) => ({ file: 'b' + i + '.md', ts: i * SNAP_WINDOW_MS * 2 });
+  let snaps = [];
+  for (let i = 0; i < SNAP_KEEP; i++) snaps = pushSnap(snaps, far(i));
+  assert.equal(snaps.length, SNAP_KEEP);
+  assert.equal(snaps[0].file, 'b' + (SNAP_KEEP - 1) + '.md');
+  snaps = pushSnap(snaps, { file: 'newest.md', ts: SNAP_KEEP * SNAP_WINDOW_MS * 2 });
+  assert.equal(snaps.length, SNAP_KEEP, '超限后长度守恒');
+  assert.equal(snaps[0].file, 'newest.md');
+  assert.equal(snaps.at(-1).file, 'b1.md', '最旧的 b0 被挤出');
+});
+
+test('pushSnap:非法条目 / 非数组历史 → 原样返回或按空处理;缺 ts 兜底当前时刻', () => {
+  const snaps = [{ file: 'b1.md', ts: 1000 }];
+  assert.equal(pushSnap(snaps, null), snaps);
+  assert.equal(pushSnap(snaps, {}), snaps, '缺 file 的条目不得入史');
+  assert.equal(pushSnap(snaps, { file: '' }), snaps);
+  assert.deepEqual(pushSnap(null, { file: 'b1.md', ts: 1 }), [{ file: 'b1.md', ts: 1 }]);
+  assert.deepEqual(pushSnap('垃圾', { file: 'b1.md', ts: 1 }), [{ file: 'b1.md', ts: 1 }]);
+  const t0 = Date.now();
+  const out = pushSnap([], { file: 'b1.md' });
+  assert.equal(out.length, 1);
+  assert.ok(out[0].ts >= t0, '缺 ts 兜底为当前时刻');
+});
+
+test('normalizeSnaps:收敛脏数据(非数组 / 坏条目 / 坏 ts / 超上限)', () => {
+  assert.deepEqual(normalizeSnaps(null), []);
+  assert.deepEqual(normalizeSnaps('x'), []);
+  assert.deepEqual(normalizeSnaps([null, 3, { file: 42 }, { ts: 5 }, { file: 'ok.md', ts: 7.5 }]),
+    [{ file: 'ok.md', ts: 7.5 }], '只留「file 为非空字符串」的条目,并收敛为 {file,ts} 白名单');
+  assert.deepEqual(normalizeSnaps([{ file: 'a.md' }]), [{ file: 'a.md', ts: 0 }], '缺 ts 兜底 0');
+  assert.deepEqual(normalizeSnaps([{ file: 'a.md', ts: 3, m: 1 }, { file: 'b.md', ts: 2, m: 'x' }]),
+    [{ file: 'a.md', ts: 3, m: 1 }, { file: 'b.md', ts: 2, m: 1 }], '真值 m 一律收敛为 m:1(决定窗口内 head 的去向)');
+  const many = Array.from({ length: SNAP_KEEP + 3 }, (_, i) => ({ file: 'f' + i + '.md', ts: i }));
+  assert.equal(normalizeSnaps(many).length, SNAP_KEEP, '超上限丢最旧(按存储序)');
 });

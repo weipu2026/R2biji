@@ -153,11 +153,22 @@ test('全生命周期:建库 → 写读 → 多端 CAS 冲突 → 改密码换�
   assert.equal(cCat.notes[0].attachments[0].file, att.file, '附件引用跨改密码不变');
   assert.deepEqual(await c.readAttachment(att.file), img);
 
-  /* ---- 孤儿清理:删笔记引用后回收 ---- */
+  /* ---- 版本历史:保存自动留档,快照引用必须护住 blob 不被误清 ---- */
+  const liveBlobs = await API.listBlobs();
+  assert.ok(liveBlobs.some((f) => f.endsWith('.md')), '保存应已自动产生版本快照 blob(内容寻址 .md)');
+  const liveRefs = new Set([att.file]);
+  for (const n of cCat.notes) for (const s of (n.snaps || [])) liveRefs.add(s.file);
+  const removedLive = await c.cleanupOrphanBlobs();
+  assert.ok(removedLive.every((f) => !liveRefs.has(f)),
+    '清理不许碰任何仍被引用的 blob(图片与快照);可清的只应是合并槽滚动后遗弃的孤儿');
+
+  /* ---- 孤儿清理:删笔记引用后回收(快照随引用消失,一并回收) ---- */
   cCat.notes = [];
   await c.saveCategory('秘钥');
   const removed = await c.cleanupOrphanBlobs();
-  assert.deepEqual(removed, [att.file]);
+  assert.ok(removed.includes(att.file), '被删笔记的图片必须被回收');
+  assert.ok(removed.every((f) => f !== '' && f.endsWith('.md') || f === att.file), '回收清单只应含孤儿 blob');
+  assert.equal((await API.listBlobs()).length, 0, 'notes 已清空:图片与版本快照全部失去引用,桶应被清空');
 });
 
 /* ============================================================
@@ -317,7 +328,7 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   });
   assert.ok(plan, 'exportBackup 必须先报总量');
   assert.equal(plan.cats, 2, '两个分类');
-  assert.equal(plan.blobs, 2, '两张图片');
+  assert.equal(plan.blobs, 3, '两张图片 + 1 份版本快照(保存自动留档,必须随备份走)');
   assert.ok(plan.bytes > 0, '总量应当大于 0');
   assert.ok(exported.bytes.length > 0);
   assert.ok(exported.bytes[0] === 0x50 && exported.bytes[1] === 0x4b, '应当是 zip(PK 开头)');
@@ -332,7 +343,7 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   assert.equal(r.vaultCreated, true, '空桶 → 应当把 vault.json 建出来');
   assert.deepEqual(r.catsAdded.sort(), ['攻略', '秘钥'], '两个分类都该恢复');
   assert.deepEqual(r.catsSkipped, []);
-  assert.equal(r.blobsAdded, 2, '两张图片都该恢复');
+  assert.equal(r.blobsAdded, 3, '两张图片 + 1 份版本快照都该恢复');
   assert.deepEqual(r.failed, [], '不该有失败项');
 
   /* ---- 关键:用**原主密码**解锁恢复出来的库,内容必须一模一样 ---- */
@@ -351,6 +362,27 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   assert.equal(notes.notes[0].attachments[0].file, att1.file);
   assert.deepEqual(await b.readAttachment(att1.file), img1, '附件必须能解密回原始字节');
   assert.deepEqual(await b.readAttachment(att2.file), img2);
+  /* 版本快照跨「导出 → 桶清空 → 恢复」必须完好:引用在分类密文里、正文在 blob 里,
+   * 两头都活着才算真的活下来 */
+  const snap0 = notes.notes[0].snaps?.[0];
+  assert.ok(snap0 && snap0.file, '恢复出的笔记必须带着版本快照引用');
+  assert.equal(await b.readSnapshot(snap0.file), '**base_url**: https://x', '快照正文必须能解密回原文');
+
+  /* ---- 版本历史:恢复必须可逆(恢复前的正文永远能取回) ---- */
+  const v1 = (await b.loadCategory('秘钥')).notes[0];
+  const v1file = v1.snaps[0].file;
+  v1.content = '第二版内容';
+  assert.deepEqual(await b.saveCategory('秘钥'), { ok: true });
+  const rr = await b.restoreSnapshot('秘钥', 'n1', v1file);
+  assert.ok(rr.ok, '恢复必须成功');
+  assert.equal((await b.loadCategory('秘钥')).notes[0].content, '**base_url**: https://x',
+    '恢复后正文必须回到所选版本');
+  await b.saveCategory('秘钥'); // 恢复后再存一次(窗口内):不许把「恢复前的正文」挤掉
+  const afterTexts = [];
+  for (const s of (await b.loadCategory('秘钥')).notes[0].snaps) {
+    afterTexts.push(await b.readSnapshot(s.file));
+  }
+  assert.ok(afterTexts.includes('第二版内容'), '恢复前的正文必须仍在历史里(恢复可逆)');
 });
 
 test('全库备份:目标是另一个库时必须拒绝(否则得到一堆解不开的文件)', async () => {
