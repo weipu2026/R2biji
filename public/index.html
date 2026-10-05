@@ -129,6 +129,7 @@
             <div class="read-actions">
               <button id="btnCopyAll" class="btn ghost small">复制全文</button>
               <button id="btnExportMd" class="btn ghost small" title="下载为 .md 文件">.md</button>
+              <button id="btnHistory" class="btn ghost small" title="查看本笔记的历史版本(每次保存自动留档)">历史</button>
               <button id="btnEdit" class="btn primary small">编辑</button>
               <button id="btnDelNote" class="btn ghost small danger">删除</button>
             </div>
@@ -159,8 +160,10 @@
           <textarea id="editBody" class="edit-body" spellcheck="false" aria-label="笔记正文"
             placeholder="正文…&#10;Markdown:# 标题 · **加粗** · *斜体* · ~~删除线~~ · ==高亮== · `代码` · - 列表"></textarea>
           <div class="edit-foot">
+            <button id="btnMono" class="btn ghost small" aria-pressed="false" title="编辑器切换等宽字体(记住偏好)">等宽</button>
             <button id="btnAddAtt" class="btn ghost small" title="也可以直接把图片粘贴到正文区(Ctrl+V)">添加图片</button>
             <input id="attInput" type="file" accept="image/*" multiple hidden>
+            <span id="editCount" class="edit-count" title="正文字数(不含空白)"></span>
             <span class="edit-hint">Ctrl+S 保存(停笔 4 秒也会自动存);图片可直接 Ctrl+V 粘贴</span>
             <button id="btnSaveNow" class="btn primary small">保存</button>
             <button id="btnDone" class="btn small">完成</button>

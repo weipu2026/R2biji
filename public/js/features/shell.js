@@ -166,6 +166,24 @@ function bindEvents(ctx) {
   });
   $('btnCopyAll').addEventListener('click', () => ctx.copyWholeNote());
   $('btnDelNote').addEventListener('click', () => ctx.deleteNote());
+  $('btnHistory').addEventListener('click', () => ctx.openHistory());
+  // 等宽字体开关:偏好只存本浏览器(localStorage,非敏感),键名随 jmbiji.* 约定,
+  // 存取失败(隐私模式)静默降级为仅本次会话生效 —— 与主题偏好同一套纪律
+  const monoBtn = $('btnMono');
+  if (monoBtn) {
+    const monoApply = (on) => {
+      $('editBody').classList.toggle('mono', on);
+      monoBtn.setAttribute('aria-pressed', String(on));
+    };
+    let monoOn = false;
+    try { monoOn = localStorage.getItem('jmbiji.mono') === '1'; } catch { monoOn = false; }
+    monoApply(monoOn);
+    monoBtn.addEventListener('click', () => {
+      monoOn = !monoOn;
+      monoApply(monoOn);
+      try { localStorage.setItem('jmbiji.mono', monoOn ? '1' : '0'); } catch { /* 仅本次会话生效 */ }
+    });
+  }
   $('btnAddAtt').addEventListener('click', () => $('attInput').click());
   $('attInput').addEventListener('change', (e) => {
     ctx.addAttachments([...e.target.files]);

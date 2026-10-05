@@ -246,6 +246,16 @@ export async function copyWholeNote(ctx) {
 
 /* ================= 编辑视图 ================= */
 
+/** 编辑器实时字数:不含空白字符(中英文统一按字符数,Markdown 语法符也算在内
+ * —— 用户看到的就是自己敲的每一个字符,口径最不意外)。打字热路径上只改一段
+ * textContent,不做任何布局级操作。 */
+function updateEditCount(ctx) {
+  const ta = ctx.dom.byId('editBody');
+  const el = ctx.dom.byId('editCount');
+  if (!ta || !el) return;
+  el.textContent = `${String(ta.value).replace(/\s/g, '').length} 字`;
+}
+
 export function enterEditMode(ctx) {
   const S = ctx.store;
   const $ = (id) => ctx.dom.byId(id);
@@ -257,6 +267,7 @@ export function enterEditMode(ctx) {
   $('editView').hidden = false;
   $('editTitle').value = note.title;
   $('editBody').value = note.content;
+  updateEditCount(ctx);
   renderEditAttachments(ctx, note);
   $('editTitle').focus();
 }
@@ -274,6 +285,7 @@ export function collectEditChanges(ctx) {
     note.updatedAt = Date.now();
     ctx.markDirty(S.get('activeCat'));
   }
+  updateEditCount(ctx);
   renderEditAttachments(ctx, note);
 }
 
@@ -557,4 +569,65 @@ export async function pickCategoryForNote(ctx, noteId) {
     },
   });
   if (picked) await moveNoteToCategory(ctx, noteId, picked);
+}
+
+/* ================= 版本历史(快照) ================= */
+
+/** 恢复一条历史版本。不做二次确认弹窗:恢复动作本身可逆
+ * (lib.restoreSnapshot 会先把恢复前的正文拍进历史,列表最顶上就是),
+ * 与回收站「恢复」同一种交互 —— 行内按钮即执行,反馈在行内 + toast。 */
+async function restoreFromHistory(ctx, catName, note, snap, row) {
+  const lib = ctx.store.get('lib');
+  if (!lib) return;
+  try {
+    const r = await lib.restoreSnapshot(catName, note.id, snap.file);
+    if (!r.ok) { ctx.toast(r.reason || '恢复失败', 'error'); return; }
+    ctx.markDirty(catName);
+    ctx.saveAll();
+    ctx.renderReadView();
+    ctx.renderNoteList();
+    row.querySelector('.trash-meta').textContent = '已恢复(恢复前的正文已存入历史)';
+    for (const b of row.querySelectorAll('button')) b.disabled = true;
+    ctx.toast('已恢复到所选版本');
+  } catch (e) {
+    ctx.toast(`恢复失败:${e?.message || '历史版本读取异常'}`, 'error');
+  }
+}
+
+/** 历史版本列表:note.snaps(最新在前)逐条列出,行内「恢复」。
+ * 引用与正文同存于分类密文,不新增服务端键;这里只读,不触发任何上传。 */
+export async function openHistory(ctx) {
+  const S = ctx.store;
+  const catName = S.get('activeCat');
+  const note = ctx.activeNoteData();
+  if (!note || !catName) return;
+  const snaps = Array.isArray(note.snaps) ? note.snaps : [];
+  await ctx.modal({
+    type: 'custom',
+    title: `历史版本(${snaps.length} 条,保留最近 ${F.SNAP_KEEP} 版)`,
+    text: snaps.length
+      ? '每次保存自动留档;10 分钟内的连续保存合并为一版。恢复前会先存好当前正文,随时可反悔。'
+      : '还没有历史版本:编辑并保存后,这里会自动出现留档。',
+    build: (body) => {
+      for (const snap of snaps) {
+        const row = document.createElement('div');
+        row.className = 'trash-row';
+        const info = document.createElement('div');
+        info.className = 'trash-info';
+        const meta = document.createElement('div');
+        meta.className = 'trash-meta';
+        meta.textContent = `${ctx.fmtTime(snap.ts)} · ${F.relTime(snap.ts)}`;
+        info.appendChild(meta);
+        const ops = document.createElement('div');
+        ops.className = 'trash-ops';
+        const restore = document.createElement('button');
+        restore.className = 'btn small primary';
+        restore.textContent = '恢复此版';
+        restore.addEventListener('click', () => restoreFromHistory(ctx, catName, note, snap, row));
+        ops.appendChild(restore);
+        row.append(info, ops);
+        body.appendChild(row);
+      }
+    },
+  });
 }

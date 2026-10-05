@@ -913,6 +913,9 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding-top: 12px;
 }
 .edit-hint { flex: 1; color: var(--muted); font-size: 12px; text-align: right; }
+/* 编辑器小件:实时字数(等宽数字,不随打字跳动)与等宽字体偏好 */
+.edit-count { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.edit-body.mono { font-family: var(--mono); font-size: 13px; }
 
 /* ---------- 编辑器轻工具栏:分段控件 ---------- */
 
