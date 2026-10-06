@@ -53,11 +53,16 @@ export function renderSearchResult(result, query) {
     const snip = document.createElement('div');
     snip.className = 'search-item-snippet';
     const offset = result.snipOffset;
-    highlightInto(snip, result.snippet.slice(0, offset), '');
+    /* ⚠️ 片段必须**按节点追加**,不能三次调用 highlightInto ——
+     * 它的空 query 分支是 `parent.textContent = text`,而赋值 textContent 会
+     * **删掉全部已有子节点**:第二次调用会把前一次写好的前文与 <mark> 一起抹掉,
+     * 结果只剩匹配词之后的一截且没有高亮(2026-10-06 审计 P0,探针实测:
+     * 高亮数 0、前缀「重要说明: 账号 」消失)。 */
+    if (offset > 0) snip.appendChild(document.createTextNode(result.snippet.slice(0, offset)));
     const mark = document.createElement('mark');
     mark.textContent = result.snippet.slice(offset, offset + query.length);
     snip.appendChild(mark);
-    highlightInto(snip, result.snippet.slice(offset + query.length), '');
+    snip.appendChild(document.createTextNode(result.snippet.slice(offset + query.length)));
     li.appendChild(snip);
   }
 

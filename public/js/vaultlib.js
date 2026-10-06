@@ -154,7 +154,9 @@ export function normalizeNoteData(raw) {
     attachments: Array.isArray(n?.attachments)
       ? n.attachments
         .filter((a) => a && typeof a.file === 'string')
-        .map((a) => ({ file: a.file, name: typeof a.name === 'string' ? a.name : a.file }))
+        // spread-first:多端版本错配时,attachments 里的**新增可选字段**(如 mime/size)
+        // 不能因为本版本不认识就被静默抹掉(与 notes 顶层的 ...n 同一策略,2026-10-06 审计)
+        .map((a) => ({ ...a, file: a.file, name: typeof a.name === 'string' ? a.name : a.file }))
       : [],
     // 版本历史引用(内容寻址 blob 名,最新在前):归一化收敛脏数据,超上限丢最旧
     snaps: normalizeSnaps(n?.snaps),

@@ -16,6 +16,11 @@ import { zipStore, readZipStore } from './zip.js';
 
 const td = new TextDecoder();
 
+/** 每篇笔记「上次已存正文」的记忆位(WeakMap:随笔记对象一起回收,不进密文、不进存储)。
+ *  保存路径靠它判断「这篇这次改没改」—— 只比字符串,不碰加密。
+ *  见 Library.snapshotPrev 的注释。 */
+const lastSavedContent = new WeakMap();
+
 export class LibraryError extends Error {
   constructor(msg, code) { super(msg); this.name = 'LibraryError'; this.code = code; }
 }
@@ -219,11 +224,22 @@ export class Library {
 
   /* ============ 分类:读 ============ */
 
-  /** 懒加载:点开才解密 */
-  async loadCategory(name) {
+  /**
+   * 懒加载:点开才解密。
+   * opt.force = **忽略已缓存的 cat.data,强制重新拉取并解密**。
+   *   孤儿清理必须走这条:rescan() 有意保留已解密明文(锁屏才整体丢弃),若清理时
+   *   直接拿那份明文清点引用,清点到的就是「几小时前的库」—— 此后别的设备上传的
+   *   图片会被判成孤儿删掉,而 blobs 是全应用唯一没有备份层的东西(不可恢复)。
+   *   force 时一并清掉 error/transient,让上次失败的分类还有一次重拉机会
+   *   (真失败会重新写回,照旧进 unreadable → 整次中止,保守不删这条不受影响)。
+   * ⚠️ force 会**替换** cat.data 对象:此前取引用(data.notes 等)的调用方拿到的是
+   *   过期对象,改动它不会进库。跨 force 的读写一律重新 loadCategory 取。
+   */
+  async loadCategory(name, opt = {}) {
     const cat = this.categories.get(name);
     if (!cat) throw new LibraryError(`分类不存在:${name}`, 'missing');
-    if (cat.data) return cat.data;
+    if (cat.data && !opt.force) return cat.data;
+    if (opt.force) { cat.error = null; cat.transient = null; }
     try {
       const got = await API.getCat(name);
       if (!got) { cat.error = '服务器上已不存在'; throw new LibraryError(`分类「${name}」已不存在`, 'missing'); }
@@ -231,6 +247,11 @@ export class Library {
       cat.lastSeenEtag = got.etag;
       cat.error = null;
       cat.transient = null;
+      /* 预置「上次已存正文」记忆位:解密出来的这一版就是**上一版**。
+       * 不预置的话,「加载后第一次编辑再保存」时记忆位是空的 → 改之前那一版
+       * 永远进不了历史,而那恰恰是用户最想回退的那一版(2026-10-06 审计)。
+       * 只存字符串引用,不额外占内存(正文本来就在),也不做加密运算。 */
+      for (const note of cat.data.notes) lastSavedContent.set(note, typeof note.content === 'string' ? note.content : '');
     } catch (e) {
       /* ★ 错误分两类(2026-09-29 审计 P2-7):
        *   永久 —— 密文损坏 / 解不开(FormatError / CryptoError)、服务器上已不存在(LibraryError):
@@ -251,13 +272,25 @@ export class Library {
     return cat.data;
   }
 
-  async loadAllCategories() {
-    for (const name of this.categories.keys()) {
-      const cat = this.categories.get(name);
-      if (!cat.data && !cat.error) {
-        try { await this.loadCategory(name); } catch { /* 单个损坏不拖垮搜索,error 已记录 */ }
+  /**
+   * 全部解密。opt 透传给 loadCategory({force:true} 时**强制重拉**,
+   * 孤儿清理与「最近删除」都靠它拿到与云端一致的引用面。
+   * 限并发 4 路(与导出同口径):纯串行在几十个分类的大库里要等十几秒,
+   * 而全并发会挤爆连接 —— 实测 40 分类 6.2s → 1.1s(5.7×)。
+   */
+  async loadAllCategories(opt = {}) {
+    const names = [...this.categories.keys()];
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(4, names.length) }, async () => {
+      while (i < names.length) {
+        const name = names[i++];
+        const cat = this.categories.get(name);
+        if (!cat) continue;
+        if (opt.force || (!cat.data && !cat.error)) {
+          try { await this.loadCategory(name, opt); } catch { /* 单个损坏不拖垮搜索,error 已记录 */ }
+        }
       }
-    }
+    }));
   }
 
   /* ============ 分类:写 ============ */
@@ -286,14 +319,17 @@ export class Library {
       etag = cur.etag;
     }
 
-    // 保存前给所有笔记拍快照(内容寻址去重:只对真变了的正文产生上传)。
-    // snapshotNote 失败不抛 —— 快照是保险,正文保存必须继续。
-    for (const note of cat.data.notes) await this.snapshotNote(note);
+    // 保存前给「改动过的那几篇」留档上一版正文(没改动的篇目零加密开销,
+    // 首存零上传 —— 见 snapshotPrev 的注释)
+    for (const note of cat.data.notes) await this.snapshotPrev(note);
 
     const outBytes = await V.encryptCategory(this.keys.contentKey, cat.data);
     const res = await API.putCat(name, outBytes, { etag });
-    if (res.status === 412) return { conflict: true };
+    // ★ conflict 此前全项目**从未被置 true**(2026-10-06 审计):侧栏那个
+      // 「疑似同步冲突」警示因此是死分支。现在 412 时置位、成功时清零。
+    if (res.status === 412) { cat.conflict = true; return { conflict: true }; }
     if (res.status !== 200) throw new LibraryError(`保存失败(HTTP ${res.status})`, 'save');
+    cat.conflict = false;
     cat.lastSeenEtag = res.etag;
     return { ok: true };
   }
@@ -331,7 +367,16 @@ export class Library {
       dst.data.notes.length = before;       // 回滚内存:绝不留「以为存上了」的假象
       throw e;
     }
-    if (!res?.ok) dst.data.notes.length = before;
+    if (!res?.ok) {
+      dst.data.notes.length = before;
+      // saveCategory 里已跑过快照循环,被追加的那篇可能带上了 snaps + 已上传的 blob;
+      // 只还原长度不够 —— 那个 blob 会成为孤儿(内容寻址、无泄漏,但白占空间,
+      // 靠 cleanupOrphanBlobs 兜底,这里顺手把多出来的引用截掉)
+      const added = dst.data.notes[before];
+      if (added && Array.isArray(added.snaps) && added.snaps.length) {
+        added.snaps = added.snaps.slice(0, added.snaps.length - 1);
+      }
+    }
     return res ?? { skipped: true };
   }
 
@@ -490,9 +535,16 @@ export class Library {
    * 不能因为它阻塞正文保存;同名幂等,下次保存会自然补上。
    * @returns {Promise<boolean>} 是否真的新增/合并了一档
    */
-  async snapshotNote(note, opt = {}) {
-    const content = typeof note?.content === 'string' ? note.content : '';
-    if (!content) return false; // 空正文不入史
+  /**
+   * 给**指定内容**存一份快照(内容寻址:同内容自动去重,不重复上传)。
+   * @param {object} note 笔记对象(引用会写进 note.snaps)
+   * @param {string} content 要留档的正文
+   * @param {{anchor?:boolean, strict?:boolean}} [opt]
+   *   anchor=true 把这条钉成永久锚(恢复历史前用:保证「恢复前的正文」回得去);
+   *   strict=true 失败即抛(存档是后续动作的前提时用,见 restoreSnapshot)。
+   */
+  async snapshotContent(note, content, opt = {}) {
+    if (typeof content !== 'string' || !content) return false; // 空正文不入史
     try {
       const bytes = new TextEncoder().encode(content);
       const file = await V.blobFileNameFor(this.keys.filenameKey, bytes, 'snap.md');
@@ -503,9 +555,37 @@ export class Library {
       note.snaps = next;
       return true;
     } catch (e) {
-      console.warn('snapshotNote:快照上传失败,本次跳过(不影响正文保存)', e);
+      if (opt.strict) throw e;
+      console.warn('snapshotContent:快照上传失败,本次跳过(不影响正文保存)', e);
       return false;
     }
+  }
+
+  /** 给一篇笔记的「当前正文」拍快照(恢复流程与显式补档用) */
+  async snapshotNote(note, opt = {}) {
+    return this.snapshotContent(note, typeof note?.content === 'string' ? note.content : '', opt);
+  }
+
+  /**
+   * 保存路径专用:给「上一版正文」留档,然后把记忆位更新为当前正文。
+   *
+   * ★ 为什么不是「每次保存都存当前正文」(2026-10-06 审计 P1/P2 重构):
+   *   ① 稳态下每次保存要对分类内**每篇**笔记做 TextEncoder + SHA-256 + HMAC
+   *      只为判断「内容变没变」—— 实测 100 篇×20KB 约 6~7ms/次,占本地加密
+   *      开销 40~60%,而「4 秒停笔就自动存」意味着每 4 秒付一次;
+   *   ② 老库首次保存时 snaps 全为空 → **每篇笔记各触发一次串行 blob 上传**
+   *      (100 篇 = 100 次串行请求,一次保存堵十几秒)。
+   *   改法:用 WeakMap 记住每篇「上次已存内容」,保存时只比字符串(零加密开销),
+   *   变了才给**上一版**留档。语义反而更准:历史要回答的是「我刚才改坏了什么」,
+   *   需要的正是改之前的那一版,而不是刚才存下去的当前版。
+   *   首存为 0 次上传,稳态为「改动篇数次」上传 + 0 次额外哈希。
+   */
+  async snapshotPrev(note, opt = {}) {
+    const current = typeof note?.content === 'string' ? note.content : '';
+    const prev = lastSavedContent.get(note);
+    lastSavedContent.set(note, current); // 先记下本次,下一轮比的是它
+    if (prev === undefined || prev === current || !prev) return false; // 首次 / 没改过 / 原为空
+    return this.snapshotContent(note, prev, opt);
   }
 
   /** 读一个历史版本的正文(blob 名来自 note.snaps) */
@@ -524,9 +604,21 @@ export class Library {
     const cat = this.categories.get(catName);
     const note = cat?.data?.notes.find((n) => n.id === noteId);
     if (!note) return { ok: false, reason: '笔记不存在或分类未解锁' };
-    const text = await this.readSnapshot(blobName);
-    // anchor:把「恢复前的正文」钉成永久锚 —— 恢复永远可逆(列表里就能反悔)
-    await this.snapshotNote(note, { anchor: true });
+    let text;
+    try {
+      text = await this.readSnapshot(blobName);
+    } catch (e) {
+      return { ok: false, reason: `历史版本读取失败:${e?.message || '未知错误'}` };
+    }
+    // anchor:把「恢复前的正文」钉成永久锚 —— 恢复可逆的前提。
+    // ⚠️ strict:true = 存档失败就中止(2026-10-06 审计 P1):否则网络失败时
+    //   「恢复前的正文」既没进历史也没上传,而 content 已被覆盖 —— 这一版
+    //   永久丢失,却让用户以为「随时可反悔」。
+    try {
+      await this.snapshotNote(note, { anchor: true, strict: true });
+    } catch (e) {
+      return { ok: false, reason: `当前正文存档失败(${e?.message || '网络异常'}),已中止恢复 —— 否则这次恢复不可逆` };
+    }
     note.content = text;
     note.updatedAt = Date.now();
     return { ok: true };
@@ -544,13 +636,17 @@ export class Library {
    *      —— 只按本地清单清点,那些分类的图片全成了「孤儿」。故先 rescan。
    *   2. 某个分类读不出来(密文损坏,或一次瞬时 GET 失败)时,它的引用无从得知。
    *      旧实现 `if (!cat.data) continue;` 把它跳过,等于把它引用的图全判成孤儿。
+   *   3. **已解密的分类在 rescan 后仍是旧明文**(rescan 有意保留 data):
+   *      若直接拿旧明文清点,清点面就是「本机上次打开该分类时」的库 ——
+   *      此后别的设备传上来的图不在引用里,会被当孤儿删掉(2026-10-06 审计 P0)。
+   *      故这里用 force:true 强制全部重拉重解密:慢一点,换「绝不删正在用的图」。
    *
-   * 残余窗口:rescan 到删除之间(秒级)别的设备若恰好新建分类并附图,仍可能误删。
+   * 残余窗口:强制重拉到删除之间(秒级)别的设备若恰好新建分类并附图,仍可能误删。
    * 要更硬的保证得在服务端做标记-清扫或给新 blob 设冷却期,暂不引入。
    */
   async cleanupOrphanBlobs() {
     await this.rescan(); // ① 清单必须是新的:本机那份可能已经落后于别的设备
-    await this.loadAllCategories(); // ② 全部解密,才能清点引用
+    await this.loadAllCategories({ force: true }); // ② 全部**重新**解密,清点面必须是当下的库
     const refs = new Set();
     const unreadable = [];
     for (const [name, cat] of this.categories) {
@@ -729,9 +825,11 @@ export class Library {
         const res = await API.putCat(name, e.bytes, { createOnly: true });
         if (res.status === 201) catsAdded.push(name);
         else if (res.status === 409) catsSkipped.push(name);
-        else failed.push(name);
-      } catch {
-        failed.push(name);
+        else failed.push(`${name}:HTTP ${res.status}`);
+      } catch (e) {
+        // 失败项带上原因(2026-10-06 审计 P3):只给名字的话用户无法判断是网络、
+        // 密文不匹配还是别的 —— recover.html 那边已是「名称:原因」的同一口径
+        failed.push(`${name}:${e?.message || '未知原因'}`);
       }
     }
 
@@ -744,8 +842,8 @@ export class Library {
       try {
         const status = await API.putBlob(name, e.bytes);
         if (status === 201) blobsAdded += 1; else blobsExisted += 1;
-      } catch {
-        failed.push(name);
+      } catch (e) {
+        failed.push(`${name}:${e?.message || '未知原因'}`);
       }
     }
 

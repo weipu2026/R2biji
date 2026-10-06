@@ -306,7 +306,8 @@ export function normalizeSnaps(raw, { keep = SNAP_KEEP } = {}) {
   for (const s of raw) {
     if (!s || typeof s !== 'object' || Array.isArray(s)) continue;
     if (typeof s.file !== 'string' || !s.file) continue;
-    out.push({ file: s.file, ts: Number.isFinite(s.ts) ? s.ts : 0, ...(s.m ? { m: 1 } : {}) });
+    // spread-first:不认识的可选字段原样带过,只规范化 file/ts/m 三项
+    out.push({ ...s, file: s.file, ts: Number.isFinite(s.ts) ? s.ts : 0, ...(s.m ? { m: 1 } : {}) });
   }
   return out.slice(0, keep);
 }
