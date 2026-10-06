@@ -163,7 +163,11 @@ test('全生命周期:建库 → 写读 → 多端 CAS 冲突 → 改密码换�
     '清理不许碰任何仍被引用的 blob(图片与快照);可清的只应是合并槽滚动后遗弃的孤儿');
 
   /* ---- 孤儿清理:删笔记引用后回收(快照随引用消失,一并回收) ---- */
-  cCat.notes = [];
+  /* ⚠️ 上一轮 cleanup 走的是 force 重拉,cat.data 已被**换成新对象** ——
+   *   手里这份旧引用再改就改到不相干的对象上了(2026-10-06 审计 P0-2 修复时踩到)。
+   *   取数据一律重新 loadCategory,不要跨 force 复用旧引用。 */
+  const cCat2 = await c.loadCategory('秘钥');
+  cCat2.notes = [];
   await c.saveCategory('秘钥');
   const removed = await c.cleanupOrphanBlobs();
   assert.ok(removed.includes(att.file), '被删笔记的图片必须被回收');
@@ -171,6 +175,148 @@ test('全生命周期:建库 → 写读 → 多端 CAS 冲突 → 改密码换�
   assert.equal((await API.listBlobs()).length, 0, 'notes 已清空:图片与版本快照全部失去引用,桶应被清空');
 });
 
+/* ★ 2026-10-06 审计 P0:「已解密的分类」在 rescan 后仍是**旧明文**
+ * (rescan 有意保留 data,只锁屏才整体丢弃)。清理若直接拿旧明文清点引用,
+ * 清点面就是「本机上次打开该分类时」的库 —— 此后别的设备传上来的图不在引用里,
+ * 会被当孤儿删掉,而 blobs 没有备份层 = 永久丢失。
+ * 反向验证:去掉 loadAllCategories 的 force,本用例的 removedB 必须含 attB.file(失败)。 */
+test('孤儿清理:必须用当下明文清点(已解密分类也要强制重拉,否则删掉别端刚传的图)', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('陈旧清点密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('资料');
+
+  /* 设备 A:打开并保存过一次 → cat.data 已解密并缓存在内存(此后不再碰它) */
+  a.categoryInfo('资料').data.notes.push({
+    id: 'n1', title: '本机笔记', content: 'A 写的', order: 1000, createdAt: 1, updatedAt: 1, attachments: [],
+  });
+  assert.deepEqual(await a.saveCategory('资料'), { ok: true });
+  await a.loadCategory('资料');
+  assert.ok(a.categoryInfo('资料').data, '前提:A 内存里已有该分类的解密明文');
+
+  /* 设备 B:同一库,给这篇笔记补一张图并保存(A 完全不知情) */
+  const b = await unlockAs('陈旧清点密码abc');
+  await b.rescan();
+  const bCat = await b.loadCategory('资料');
+  const imgB = new Uint8Array([137, 80, 78, 71, 9, 9, 9]);
+  const attB = await b.addAttachment(imgB, '别端截图.png');
+  bCat.notes[0].attachments = [{ file: attB.file, name: '别端截图.png' }];
+  assert.deepEqual(await b.saveCategory('资料'), { ok: true });
+
+  /* 设备 A:点「清理未引用图片」——绝不能把 B 的图当孤儿删掉 */
+  const stale = a.categoryInfo('资料').data.notes[0].attachments.length; // 0 = A 的缓存确实是旧的
+  assert.equal(stale, 0, '前提:A 的缓存里没有 B 后加的那张图');
+  const removed = await a.cleanupOrphanBlobs();
+  assert.ok(!removed.includes(attB.file), '别端刚上传的图片被当成孤儿删掉了(不可恢复)');
+  assert.ok(await env.VAULT.head(`blobs/${attB.file}`), 'B 的图片必须原样留在 R2');
+  assert.deepEqual(await a.readAttachment(attB.file), imgB, '图片必须仍能读回原始字节');
+});
+
+/* ============================================================
+ * 版本历史的**成本契约**(2026-10-06 审计 P1/P2 重构)
+ *
+ * 快照存的是「上一版」正文,且只在**内容真的变了**时才留档:
+ *   首存 0 次上传(此前老库首次保存是每篇笔记一次串行 blob 上传)
+ *   改 1 篇 = 1 次上传;无改动保存 = 0 次
+ * 这条一旦退化成「每次保存给当前正文拍档」,就会回到 N 次串行上传 +
+ * 每次保存对全部分类做一遍 SHA-256+HMAC(实测占本地加密开销 40~60%)。
+ * ============================================================ */
+
+test('快照成本:首存 0 次上传 / 改 1 篇 1 次 / 无改动 0 次', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('快照成本密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  // 数 blob 上传次数(包一层 R2.put,不动产品代码)
+  const origPut = env.VAULT.put.bind(env.VAULT);
+  let puts = 0;
+  env.VAULT.put = async (key, ...rest) => {
+    if (String(key).startsWith('blobs/')) puts += 1;
+    return origPut(key, ...rest);
+  };
+  try {
+    const lib = new Library(await V.deriveAllKeys(dek), json, dek, null);
+    await lib.rescan();
+    await lib.createCategory('大库');
+    const cat = lib.categoryInfo('大库').data;
+    const body = 'x'.repeat(8 * 1024);
+    for (let i = 0; i < 20; i++) {
+      cat.notes.push({
+        id: `n${i}`, title: `笔记${i}`, content: `${body}\n第${i}篇`,
+        order: (i + 1) * 1000, createdAt: 1, updatedAt: 1, attachments: [],
+      });
+    }
+    await lib.loadCategory('大库'); // 解密 → 预置「上一版」记忆位
+
+    puts = 0;
+    assert.deepEqual(await lib.saveCategory('大库'), { ok: true });
+    assert.equal(puts, 0, '★ 首存不得产生任何快照上传(20 篇不该是 20 次)');
+
+    cat.notes[7].content = `${body}\n第7篇(改过了)`;
+    puts = 0;
+    assert.deepEqual(await lib.saveCategory('大库'), { ok: true });
+    assert.equal(puts, 1, '★ 改 1 篇 = 恰好 1 次快照上传');
+
+    puts = 0;
+    assert.deepEqual(await lib.saveCategory('大库'), { ok: true });
+    assert.equal(puts, 0, '★ 无改动的保存不得产生快照上传');
+
+    const n = (await lib.loadCategory('大库')).notes[7];
+    assert.equal(n.snaps.length, 1, '改过的那篇应留下一份「上一版」');
+    assert.equal(await lib.readSnapshot(n.snaps[0].file), `${body}\n第7篇`, '快照内容 = 改之前那一版');
+    // 注:直接塞进 cat.data.notes 的裸对象没经过 normalizeNoteData,snaps 可能不存在
+    assert.equal(((await lib.loadCategory('大库')).notes[5].snaps || []).length, 0, '没改过的篇目不留档');
+  } finally {
+    env.VAULT.put = origPut;
+  }
+});
+
+/* ★ 恢复历史时的故障注入:把「恢复前的正文」存档失败必须**中止恢复**
+ * (2026-10-06 审计 P1:此前 anchor 存档失败被 snapshotContent 吞掉,恢复照做 ——
+ *  「恢复前的正文」既没进历史也没上传,而 content 已被覆盖,那一版永久丢失,
+ *  而 UI 文案承诺的是「随时可反悔」。strict:true 就是这条保证的开关。 */
+test('恢复历史:存档失败必须中止恢复(否则恢复前的正文永久丢失)', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('恢复守卫密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const lib = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await lib.rescan();
+  await lib.createCategory('秘钥');
+  lib.categoryInfo('秘钥').data.notes.push({
+    id: 'n1', title: 'T', content: '第一版正文', order: 1000, createdAt: 1, updatedAt: 1, attachments: [],
+  });
+  await lib.saveCategory('秘钥');
+  lib.categoryInfo('秘钥').data.notes[0].content = '第二版正文';
+  assert.deepEqual(await lib.saveCategory('秘钥'), { ok: true });
+  const note = (await lib.loadCategory('秘钥')).notes[0];
+  const v1file = note.snaps[0].file;
+
+  // 故障注入:blob 上传一律失败(模拟断网)
+  const origPut = env.VAULT.put.bind(env.VAULT);
+  env.VAULT.put = async (key, ...rest) => {
+    if (String(key).startsWith('blobs/')) throw new Error('模拟断网');
+    return origPut(key, ...rest);
+  };
+  try {
+    const r = await lib.restoreSnapshot('秘钥', 'n1', v1file);
+    assert.equal(r.ok, false, '★ 存档失败时必须中止恢复');
+    assert.match(r.reason || '', /存档失败|中止/, '必须说明为什么中止');
+    assert.equal((await lib.loadCategory('秘钥')).notes[0].content, '第二版正文',
+      '★ 正文必须原封不动(否则「恢复前的正文」既没存档又被覆盖 = 永久丢失)');
+  } finally {
+    env.VAULT.put = origPut;
+  }
+});
 /* ============================================================
  * 孤儿清理的 fail-closed 守卫(两条都是真实数据丢失路径的回归)
  *
@@ -328,7 +474,8 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   });
   assert.ok(plan, 'exportBackup 必须先报总量');
   assert.equal(plan.cats, 2, '两个分类');
-  assert.equal(plan.blobs, 3, '两张图片 + 1 份版本快照(保存自动留档,必须随备份走)');
+  // 首存不产生快照:快照存的是「上一版」,而这篇笔记自建库起没被改过(2026-10-06 审计重构)
+  assert.equal(plan.blobs, 2, '两张图片(没改过的笔记没有「上一版」可存)');
   assert.ok(plan.bytes > 0, '总量应当大于 0');
   assert.ok(exported.bytes.length > 0);
   assert.ok(exported.bytes[0] === 0x50 && exported.bytes[1] === 0x4b, '应当是 zip(PK 开头)');
@@ -343,7 +490,7 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   assert.equal(r.vaultCreated, true, '空桶 → 应当把 vault.json 建出来');
   assert.deepEqual(r.catsAdded.sort(), ['攻略', '秘钥'], '两个分类都该恢复');
   assert.deepEqual(r.catsSkipped, []);
-  assert.equal(r.blobsAdded, 3, '两张图片 + 1 份版本快照都该恢复');
+  assert.equal(r.blobsAdded, 2, '两张图片都该恢复');
   assert.deepEqual(r.failed, [], '不该有失败项');
 
   /* ---- 关键:用**原主密码**解锁恢复出来的库,内容必须一模一样 ---- */
@@ -362,27 +509,46 @@ test('全库备份:导出 → 桶清空 → 恢复,笔记与图片必须完好',
   assert.equal(notes.notes[0].attachments[0].file, att1.file);
   assert.deepEqual(await b.readAttachment(att1.file), img1, '附件必须能解密回原始字节');
   assert.deepEqual(await b.readAttachment(att2.file), img2);
-  /* 版本快照跨「导出 → 桶清空 → 恢复」必须完好:引用在分类密文里、正文在 blob 里,
-   * 两头都活着才算真的活下来 */
-  const snap0 = notes.notes[0].snaps?.[0];
-  assert.ok(snap0 && snap0.file, '恢复出的笔记必须带着版本快照引用');
-  assert.equal(await b.readSnapshot(snap0.file), '**base_url**: https://x', '快照正文必须能解密回原文');
-
-  /* ---- 版本历史:恢复必须可逆(恢复前的正文永远能取回) ---- */
-  const v1 = (await b.loadCategory('秘钥')).notes[0];
-  const v1file = v1.snaps[0].file;
-  v1.content = '第二版内容';
+  /* ---- 版本历史:改一次正文 → 自动给「上一版」留档(2026-10-06 审计重构后的语义:
+   *   快照存的是**改之前**那一版,不是当前版 —— 首存不产生快照,没改过就没有可回退的) ---- */
+  const n0 = (await b.loadCategory('秘钥')).notes[0];
+  assert.deepEqual(n0.snaps || [], [], '没改过的笔记不该有历史(首存零上传)');
+  n0.content = '第二版:换了 base_url';
   assert.deepEqual(await b.saveCategory('秘钥'), { ok: true });
-  const rr = await b.restoreSnapshot('秘钥', 'n1', v1file);
+  const n1 = (await b.loadCategory('秘钥')).notes[0];
+  assert.equal(n1.snaps.length, 1, '改动保存后必须留下一份「上一版」快照');
+  const v1file = n1.snaps[0].file;
+  assert.equal(await b.readSnapshot(v1file), '**base_url**: https://x', '快照正文 = 改之前那一版');
+
+  /* 快照也要活过「导出 → 桶清空 → 恢复」:引用在分类密文里、正文在 blob 里,两头都在才行 */
+  const exported2 = await b.exportBackup({});
+  freshEnv();
+  API.setToken(authKeyHex);
+  const r2 = await b.importBackup(exported2.bytes);
+  assert.equal(r2.vaultCreated, true);
+  const b2 = new Library(await V.deriveAllKeys(dek), JSON.parse(JSON.stringify(r2.vaultJson || vaultAfter.json)), dek, null);
+  await b2.rescan();
+  const n2 = (await b2.loadCategory('秘钥')).notes[0];
+  assert.equal(n2.content, '第二版:换了 base_url', '恢复出的正文必须是最新那一版');
+  assert.equal(n2.snaps.length, 1, '版本快照引用必须随备份活下来');
+  assert.equal(await b2.readSnapshot(n2.snaps[0].file), '**base_url**: https://x', '快照正文必须能解密回原文');
+
+  /* ---- 恢复必须可逆:恢复前的正文永远能取回 ---- */
+  const rr = await b2.restoreSnapshot('秘钥', 'n1', n2.snaps[0].file);
   assert.ok(rr.ok, '恢复必须成功');
-  assert.equal((await b.loadCategory('秘钥')).notes[0].content, '**base_url**: https://x',
+  assert.equal((await b2.loadCategory('秘钥')).notes[0].content, '**base_url**: https://x',
     '恢复后正文必须回到所选版本');
-  await b.saveCategory('秘钥'); // 恢复后再存一次(窗口内):不许把「恢复前的正文」挤掉
+  /* ★ 恢复的那一刻,恢复前的正文就已经进历史 —— 不必等下一次保存成功:
+   *   若这步失败(断网/关页面),没有它的话用户点完恢复就再也回不去了 */
+  const afterRestore = (await b2.loadCategory('秘钥')).notes[0];
+  assert.equal(await b2.readSnapshot(afterRestore.snaps[0].file), '第二版:换了 base_url',
+    '★ 恢复后立刻能取回恢复前的正文(不等下一次保存)');
+  await b2.saveCategory('秘钥'); // 恢复后再存一次:不许把「恢复前的正文」挤掉
   const afterTexts = [];
-  for (const s of (await b.loadCategory('秘钥')).notes[0].snaps) {
-    afterTexts.push(await b.readSnapshot(s.file));
+  for (const s of (await b2.loadCategory('秘钥')).notes[0].snaps) {
+    afterTexts.push(await b2.readSnapshot(s.file));
   }
-  assert.ok(afterTexts.includes('第二版内容'), '恢复前的正文必须仍在历史里(恢复可逆)');
+  assert.ok(afterTexts.includes('第二版:换了 base_url'), '恢复前的正文必须仍在历史里(恢复可逆)');
 });
 
 test('全库备份:目标是另一个库时必须拒绝(否则得到一堆解不开的文件)', async () => {

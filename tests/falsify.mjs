@@ -122,7 +122,7 @@ const MUTANTS = [
   {
     label: '迭代次数不再设上限(被篡改的 vault.json 可冻死标签页)',
     file: 'public/js/crypto.js',
-    from: '  return Math.min(Math.floor(iterations), PBKDF2_ITERATIONS_MAX);',
+    from: '  return Math.min(Math.max(1, Math.floor(iterations)), PBKDF2_ITERATIONS_MAX);',
     to: '  return Math.floor(iterations); // MUTANT',
     expect: '迭代次数收口',
   },
@@ -317,8 +317,8 @@ const MUTANTS = [
   {
     label: '跨标签页同步只重扫分类清单,不重拉 vault 元信息(顺序/置顶永远陈旧)',
     file: 'public/js/ui.js',
-    from: '    await S.lib.refreshVaultMeta();',
-    to: '    // MUTANT:不重拉 vault 元信息',
+    from: '    await Promise.all([S.lib.rescan(), S.lib.refreshVaultMeta()]);',
+    to: '    await S.lib.rescan(); // MUTANT:不重拉 vault 元信息',
     expect: '收到 cats-changed',
   },
   {
@@ -670,8 +670,9 @@ const MUTANTS = [
   {
     label: '跨分类移动:目标追加失败后不回滚内存(界面多出一篇云端并不存在的笔记)',
     file: 'public/js/lib.js',
-    from: '    if (!res?.ok) dst.data.notes.length = before;',
-    to: '    // MUTANT:失败也不回滚',
+    from: '    if (!res?.ok) {\n      dst.data.notes.length = before;',
+    // 变异:把长度回滚整行注释掉(块体其余语句保留,语法仍合法)
+    to: '    if (!res?.ok) {\n      // MUTANT:不回滚长度',
     expect: '源一动不动且内存回滚',
   },
   {
@@ -731,6 +732,57 @@ const MUTANTS = [
     expect: 'editing 必须复位',
   },
 
+  /* ---- 2026-10-06 审计:搜索高亮 / 孤儿清理陈旧数据 / 阅读站按行遮罩 / 快照成本 ---- */
+  {
+    label: '搜索片段不再按节点追加(退回三次 highlightInto → 前文与高亮被整体抹掉)',
+    file: 'public/js/search.js',
+    from: '    if (offset > 0) snip.appendChild(document.createTextNode(result.snippet.slice(0, offset)));',
+    to: '    if (false) snip.appendChild(document.createTextNode(result.snippet.slice(0, offset))); // MUTANT:前缀不写入',
+    expect: '片段保留前缀',
+  },
+  {
+    label: '孤儿清理退回用缓存明文清点(删掉别端刚传的图)',
+    file: 'public/js/lib.js',
+    from: 'await this.loadAllCategories({ force: true }); // ② 全部**重新**解密,清点面必须是当下的库',
+    to: 'await this.loadAllCategories(); // MUTANT',
+    expect: '必须用当下明文清点',
+  },
+  {
+    label: '阅读站遮罩只处理段内第一行(命中即吞掉其余正文)',
+    file: 'public/recover.html',
+    from: '  for (var i = 0; i < lines.length; i++) {',
+    to: '  for (var i = 0; i < 1; i++) { // MUTANT:只处理第一行,段内其余正文被丢掉',
+    // 期望串必须是**用例名**里出现的字样(falsify 匹配测试名,不匹配断言消息)
+    expect: '主站 renderInline 与阅读站 rdrInline',
+  },
+  {
+    label: '快照退回「每次保存给当前正文拍档」(首存 N 次串行上传 + 全量哈希)',
+    file: 'public/js/lib.js',
+    from: '    if (prev === undefined || prev === current || !prev) return false; // 首次 / 没改过 / 原为空',
+    to: '    // MUTANT:不再判断是否改过',
+    expect: '快照成本',
+  },
+  {
+    label: 'saveAll 在途时退回 undefined(等待方等于没等)',
+    file: 'public/js/ui.js',
+    from: '  if (S.saving) { S.resavePending = true; return S.savePromise || Promise.resolve(); }',
+    to: '  if (S.saving) { S.resavePending = true; return; } // MUTANT',
+    expect: 'saveAll 是单例',
+  },
+  {
+    label: '锁屏不再关共用 <dialog>(锁屏上方仍浮着弹窗内容)',
+    file: 'public/js/features/lock.js',
+    from: '  const dlg = $(\'modal\');',
+    to: '  // MUTANT:不关弹窗',
+    expect: '共用 <dialog>',
+  },
+  {
+    label: '恢复历史时存档失败不再中止(恢复前的正文被覆盖 = 永久丢失)',
+    file: 'public/js/lib.js',
+    from: '      await this.snapshotNote(note, { anchor: true, strict: true });',
+    to: '      await this.snapshotNote(note, { anchor: true }); // MUTANT:strict 丢失 → 失败被吞,恢复照做',
+    expect: '存档失败必须中止恢复',
+  },
   /* ---- 版本历史(快照)守卫 ---- */
   {
     label: 'pushSnap 窗口合并判据失效(4 秒自动保存把历史刷成中间态)',
@@ -759,13 +811,6 @@ const MUTANTS = [
     from: "for (const s of (note.snaps || [])) refs.add(s.file); // 版本历史也是活的引用,清了就回不去",
     to: '// MUTANT:快照引用不参与清点',
     expect: '全生命周期:建库',
-  },
-  {
-    label: '恢复历史不再先拍「恢复前快照」(恢复不可逆)',
-    file: 'public/js/lib.js',
-    from: 'await this.snapshotNote(note, { anchor: true });',
-    to: 'await this.snapshotNote(note); // MUTANT:丢掉 anchor,恢复前的正文会被窗口合并吞掉',
-    expect: '全库备份:导出',
   },
 ];
 

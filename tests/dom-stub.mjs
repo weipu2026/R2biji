@@ -71,7 +71,35 @@ export class FakeNode {
     walk(this);
     return found;
   }
+  /** 只支持「后代里的 .class」与「自身 .class」两种 —— 生产代码(render.js 的
+   *  敏感行预判)只用这一种。不支持的 selector 直接抛错,免得「静默返回空」
+   *  让用例把「选择器没匹配上」读成「元素不存在」(2026-10-06 踩过)。 */
+  querySelectorAll(sel) {
+    const cls = /^\.([\w-]+)$/.exec(sel);
+    if (!cls) throw new Error(`FakeNode.querySelectorAll 只支持 .class,收到:${sel}`);
+    const out = [];
+    const walk = (n) => {
+      for (const c of n.children || []) {
+        if (c.classes && c.classes.has(cls[1])) out.push(c);
+        walk(c);
+      }
+    };
+    walk(this);
+    return out;
+  }
   focus() { if (globalThis.document) globalThis.document.activeElement = this; }
+  /** 深克隆(render.js 的 cloneWithoutStars 会用)。子树结构复制,
+   *  children 逐个克隆 —— 与真实 DOM 的 cloneNode(true) 语义一致。 */
+  cloneNode(deep = false) {
+    const c = new FakeNode(this.tag);
+    c.classes = new Set(this.classes);
+    c.dataset = { ...this.dataset };
+    c.attrs = { ...this.attrs };
+    c._text = this._text;
+    c.title = this.title;
+    if (deep) for (const ch of this.children) c.children.push(ch.cloneNode ? ch.cloneNode(true) : ch);
+    return c;
+  }
   remove() { const p = this._parent; if (p) p.children = p.children.filter((c) => c !== this); }
   /** <dialog> 的关闭。用例可覆盖它来观测「弹窗被关掉」这件事。 */
   close() { this.open = false; }
@@ -99,6 +127,11 @@ export async function withDom(fn, makeCtx) {
     createTextNode: (t) => { const n = new FakeNode(undefined); n._text = t; return n; },
     activeElement: null,          // focus() 会写它;captureFocusKey 读它
     getElementById: (id) => byId(id),
+    // 生产代码在 document 上挂 visibilitychange / pagehide 等监听(ui.js 的
+    // startIdleTimer、shell.js 的离开前保存),缺了会直接抛 TypeError
+    addEventListener() {},
+    removeEventListener() {},
+    hidden: false,
   };
   const build = makeCtx || ((store, byIdFn) => ({
     store,

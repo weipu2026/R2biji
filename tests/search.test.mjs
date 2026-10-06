@@ -5,7 +5,8 @@
  * ============================================================ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { findMatches } from '../public/js/search.js';
+import { findMatches, renderSearchResult } from '../public/js/search.js';
+import { withDom } from './dom-stub.mjs';
 
 function notesOf(content, title = '无标题') {
   return new Map([['工作', [{ id: 'n1', title, content }]]]);
@@ -40,4 +41,53 @@ test('findMatches:标题命中不产片段;无命中返回空数组', () => {
 
 test('findMatches:空查询直接返回空', () => {
   assert.deepEqual(findMatches(notesOf('任意'), ''), []);
+});
+
+/* ---------- 渲染层(2026-10-06 审计 P0:高亮与前缀曾被整体抹掉) ---------- */
+
+test('renderSearchResult:片段保留前缀 + 恰好一个 <mark> 包住匹配词', async () => {
+  await withDom(async () => {
+    const content = '重要说明: 账号 admin123 保密,勿泄露。';
+    const [hit] = findMatches(notesOf(content), 'admin123');
+    const li = renderSearchResult(hit, 'admin123');
+    const snip = li.children.find((c) => c.tag === 'div' && c.className === 'search-item-snippet');
+    const marks = snip.children.filter((c) => c.tag === 'mark');
+    assert.equal(marks.length, 1, '必须恰好一个高亮节点');
+    assert.equal(marks[0].textContent, 'admin123', '高亮内容必须是匹配词本身');
+    // ★ 前缀必须完整保留:旧实现第二次 highlightInto(...,'') 用 textContent 赋值
+    //   把前文与 <mark> 一起抹掉,实测只剩「 保密,勿泄露。」
+    assert.ok(snip.textContent.startsWith('重要说明: 账号 '), `前缀丢失,实得:${JSON.stringify(snip.textContent)}`);
+    assert.equal(snip.textContent, content, '片段拼回来必须等于原文');
+  });
+});
+
+test('renderSearchResult:命中词在片段开头/结尾/整段命中三种边界都不丢内容', async () => {
+  await withDom(async () => {
+    for (const [content, q] of [
+      ['admin123 是账号,勿泄露', 'admin123'],          // 命中在开头
+      ['前置说明很长,末尾是 admin123', 'admin123'],   // 命中在结尾
+      ['admin123', 'admin123'],                       // 整段就是命中词
+    ]) {
+      const [hit] = findMatches(notesOf(content), q);
+      const li = renderSearchResult(hit, q);
+      const snip = li.children.find((c) => c.tag === 'div' && c.className === 'search-item-snippet');
+      const marks = snip.children.filter((c) => c.tag === 'mark');
+      assert.equal(marks.length, 1, `「${content}」高亮数不对`);
+      assert.equal(marks[0].textContent, q);
+      assert.ok(snip.textContent.includes(q), `「${content}」匹配词丢失`);
+      if (content !== q) assert.ok(snip.textContent.length > q.length, `「${content}」其余内容被吃掉`);
+    }
+  });
+});
+
+test('renderSearchResult:标题命中走 <mark>、标题未命中不高亮', async () => {
+  await withDom(async () => {
+    const [hit] = findMatches(notesOf('正文里没有 query', 'CF 中转配置'), '中转');
+    const li = renderSearchResult(hit, '中转');
+    const title = li.children.find((c) => c.tag === 'div' && c.className === 'search-item-title');
+    const marks = title.children.filter((c) => c.tag === 'mark');
+    assert.equal(marks.length, 1, '标题命中必须有高亮');
+    assert.equal(marks[0].textContent, '中转');
+    assert.equal(title.textContent, 'CF 中转配置');
+  });
 });

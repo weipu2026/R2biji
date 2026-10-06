@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { withDom } from './dom-stub.mjs';
 
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const src = readFileSync(join(ROOT, 'public/recover.html'), 'utf8');
@@ -206,10 +207,78 @@ test('敏感行遮罩:多行段落的非首行也必须遮(与主站 render.js �
   const html = rd.rdrMd('这是第一行说明\n密码: sk-leak-777\n第三行普通文字');
   assert.ok(html.includes('class="secret masked"'), '段内第 2 行的敏感值必须被遮罩(缺 m 会漏遮)');
   assert.ok(html.includes('sk-leak-777'), '敏感值仍应在 DOM 里(点击可显形)');
-  // 已知取舍(与主站 render.js 一致,非本缺陷引入):命中敏感行时 rdrInline 提前 return,
-  // 同段落里**该行之外**的文字不进入输出。主站 render.js:95/121 也是整段交给 renderInline,
-  // 行为相同 —— 这里把契约钉住,防止将来单方面「修」成两边不一致。
   assert.ok(html.includes('密码: '), '命中行的前缀保留(遮罩 span 跟着它)');
+  /* ★ 2026-10-06 审计 P0:旧实现在此提前 return,段内**其余行被整段吞掉**
+   *   (非敏感正文丢失 = 离线阅读站「打码即删段」)。此前本用例把该行为钉成
+   *   「已知取舍」,理由写的是「主站也是整段交给 renderInline」—— 那条理由在
+   *   主站 2026-09-27 改成按行切分之后就已经不成立了,属过期契约,一并纠正。 */
+  assert.ok(html.includes('这是第一行说明'), '敏感行之前的正文必须保留');
+  assert.ok(html.includes('第三行普通文字'), '敏感行之后的正文必须保留');
+});
+
+test('★ 主站 renderInline 与阅读站 rdrInline 必须逐字一致(平行实现不得漂移)', async () => {
+  /* 两处是同语义的**两份实现**:主站 DOM 版(render.js)/ 阅读站字符串版(recover.html)。
+   * 2026-10-06 的 P0 正是「主站修了按行切分、阅读站没跟」造成的:打码命中后
+   * 阅读站把整段正文吞掉。⇒ 同一批文本两边必须产出**逐字相同**的可见文本。
+   * ⚠️ 比对对象必须是 renderInline/rdrInline 这一对平行函数:文档级
+   *   renderMarkdown().textContent 不含块间换行,而 rdrMd 的 HTML 串含,
+   *   直接比整篇会把「块拼接方式」读成「内容不一致」(2026-10-06 踩过)。 */
+  const readerCode = extractBetween(
+    mod.READER_TEMPLATE, '/*READER-SCRIPT-START*/', '/*READER-SCRIPT-END*/', 'READER-SCRIPT',
+  );
+  const rd = await import('data:text/javascript,' + encodeURIComponent(
+    readerCode + '\nexport { rdrInline, rdrMd };',
+  ));
+  await withDom(async () => {
+    const { renderInline } = await import('../public/js/render.js');
+    const cases = [
+      '普通一段文字',
+      '第一行说明\n密码: sk-leak-777\n第三行普通文字',   // 段内单行敏感(P0 现场)
+      '多行\n全部\n敏感\n行',                          // 每行都敏感
+      '口令:bbb\n密钥:ccc',                              // 段内多行敏感
+      '没有敏感行\n只有换行',
+      '正文 **加粗** 与 `代码` 混排\n密码: aaa\n- 不是列表',
+      'key: abcdefghijklmnopqrstuvwxyz0123456789',       // 星号上限(>24 截断)
+      '密码: 带 空格 的 值',
+      'pwd=123456789',
+    ];
+    const strip = (html) => html
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#39;/g, "'");
+    for (const src of cases) {
+      const host = document.createElement('span');
+      renderInline(host, src);
+      const main = host.textContent;
+      const reader = strip(rd.rdrInline(src, true));
+      assert.equal(reader, main,
+        `两处行内渲染不一致:\n输入:${JSON.stringify(src)}\n主站:${JSON.stringify(main)}\n阅读站:${JSON.stringify(reader)}`);
+    }
+  });
+});
+
+test('★ 主站 renderMarkdown 与阅读站 rdrMd 的可见文本必须一致(块拼接归一后)', async () => {
+  const readerCode = extractBetween(
+    mod.READER_TEMPLATE, '/*READER-SCRIPT-START*/', '/*READER-SCRIPT-END*/', 'READER-SCRIPT',
+  );
+  const rd = await import('data:text/javascript,' + encodeURIComponent(readerCode + '\nexport { rdrMd };'));
+  await withDom(async () => {
+    const { renderMarkdown } = await import('../public/js/render.js');
+    // 去掉全部空白后比对:主站 DOM 的 textContent 不含块间分隔,阅读站 HTML 串含 ——
+    // 那是**块拼接方式**的差异,不是内容差异(行级细节由上一条 renderInline 用例守住)
+    const visible = (s) => s.replace(/\s+/g, '');
+    for (const src of [
+      '第一行说明\n密码: sk-leak-777\n第三行普通文字',
+      '标题一\n密码: aaa\n正文 **加粗** 与 `代码`\n- 列表项',
+      '多行\n全部\n敏感\n行',
+    ]) {
+      assert.equal(
+        visible(rd.rdrMd(src).replace(/<[^>]+>/g, '')),
+        visible(renderMarkdown(src).textContent),
+        `文档级可见文本不一致:${JSON.stringify(src)}`,
+      );
+    }
+  });
 });
 
 test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据,不是 e.target)', async () => {
