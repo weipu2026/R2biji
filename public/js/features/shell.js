@@ -51,9 +51,12 @@ export async function boot(ctx) {
         return;
       }
       // 服务端 fail closed(ACCESS_KEY 未配置/过短):原样显示它给的可操作提示
-      ctx.dom.byId('lockErr').textContent = e.code === 'setup-required' ? e.message : `无法连接服务器:${e.message}`;
+      // api.js 的网络分支已拼过「无法连接服务器:」,这里别再拼一遍(实测显示双前缀)
+      ctx.dom.byId('lockErr').textContent = e.message;
       ctx.dom.byId('lockErr').hidden = false;
       ctx.dom.byId('lockLoading').hidden = true;
+      // 把解锁表单放出来:此前只显示错误,既没密码框也没重试入口(2026-10-06 审计 P3)
+      ctx.dom.byId('lockForm').hidden = false;
       return;
     }
     if (res.status === 404) { ctx.showLock('setup'); return; }
@@ -322,6 +325,10 @@ function bindEvents(ctx) {
     if (document.querySelector('dialog[open]')) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
+      // 与「保存」按钮同一条路:先 collect 再 save。按钮那条 collect、快捷键这条不 collect,
+      // 靠 input 监听逐键同步才碰巧等价 —— 任何不触发 input 的赋值(自动填充/
+      // programmatic)就会让两条入口分叉(2026-10-06 审计 P3)
+      ctx.collectEditChanges();
       ctx.saveAll();
     }
     // Ctrl+K 聚焦搜索(比浏览器默认的「搜索 with 引擎」在这里有用得多)

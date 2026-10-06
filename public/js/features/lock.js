@@ -35,6 +35,14 @@ let pendingLockMsg = null;
 export function showLock(ctx, mode) {
   const S = ctx.store;
   const $ = (id) => ctx.dom.byId(id);
+  /* ★ 必须先关掉共用 <dialog>(2026-10-06 审计 P1):它被 showModal() 放进
+   *   top layer,渲染层级在 #lock **之上**,而 #app 只是 hidden ——
+   *   于是「最近删除」的笔记标题/分类名、随机密码生成器已生成的密码、
+   *   「移动到其他分类」的分类清单会**浮在锁屏上方**直接可读。
+   *   dialog.close() 会让 modal() 的 Promise 落定 null(其 close 处理器已就位),
+   *   语义正确(用户没做任何选择)。 */
+  const dlg = $('modal');
+  if (dlg && dlg.open) dlg.close();
   $('app').hidden = true;
   $('lock').hidden = false;
   $('lockErr').hidden = true;
@@ -97,8 +105,7 @@ export function releaseSession(store, { api, session }) {
   // 刷新一下又自动进去了。想再次免密,解锁时勾着「记住本设备」即可。
   session.clearSession();
   store.patch({ activeCat: null, activeNoteId: null, editing: false });
-  store.get('dirty').clear();
-  store.get('dirtyGen').clear();
+  store.clearAllDirty(); // 走 store 的既有 API(直写容器会绕过它的维护逻辑)
   for (const url of store.get('objectUrls').values()) URL.revokeObjectURL(url);
   store.get('objectUrls').clear();
   // ★ 必须连自动保存定时器一起清。dirty.clear() 后挂起的 4 秒定时器到点仍会跑
@@ -109,6 +116,19 @@ export function releaseSession(store, { api, session }) {
   store.set('autoSaveTimer', null);
   clearTimeout(store.get('statusTimer'));
   store.set('statusTimer', null);
+  /* ★ 锁定 = 明文全部离开内存,DOM 也不例外(2026-10-06 审计 P1)。
+   *   lib.destroy() 只丢密钥与解密后的数据结构;可 #readBody(当前笔记全文)、
+   *   #editBody / #editTitle(未提交的编辑内容)、#searchPanel(搜索结果片段)、
+   *   #noteList(分类下全部标题)这些**明文节点仍留在页面里**,
+   *   而 #app 只是 hidden —— 谁都能在解锁前把它们读回来(截图、扩展、
+   *   DevTools 残留脚本)。与 lock.js 开头「锁定 = 丢弃 Library 实例(密钥与明文
+   *   一起释放)」的不变量对齐。 */
+  for (const id of ['readBody', 'readTitle', 'readMeta', 'editBody', 'editTitle',
+    'searchPanel', 'noteList', 'readAtts', 'editAtts']) {
+    // document 不存在(Node 侧的会话态测试)时跳过 —— 清理明文是浏览器侧的责任
+    const el = typeof document === 'undefined' ? null : document.getElementById(id);
+    if (el) el.textContent = '';
+  }
   return !!lib;
 }
 
@@ -121,7 +141,15 @@ export function releaseSession(store, { api, session }) {
 export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } = {}) {
   const S = ctx.store;
   if (S.get('dirty').size > 0) {
-    try { await ctx.saveAll(); } catch { /* 尽力保存 */ }
+    /* ★ 必须等**在途**保存真的跑完(2026-10-06 审计 P1 数据丢失):
+     *   此前这里 `await ctx.saveAll()`,而 saveAll 在 S.saving 为真时是
+     *   「置 resavePending 后立即 return」—— await 等到的是 undefined。
+     *   于是确认框一关就 releaseSession → lib.destroy()(keys 置 null),
+     *   在途的 saveCategory 读到 null 抛 TypeError,被 saveAll 的 catch 吞成
+     *   「保存失败」,而脏标记已被清空 ⇒ 未保存改动静默消失。
+     *   现在 await 的是 S.savePromise(同一轮保存的 promise):等它落地,
+     *   它自己会把「会话已销毁 → 不再写、不算失败」处理好。 */
+    try { await (S.get('savePromise') || ctx.saveAll()); } catch { /* 尽力保存 */ }
   }
   // ★ 锁定必毁全部明文,这是安全不变量;但「毁改动」必须经用户确认 ——
   //   冲突弹窗里刚选过「留待稍后」的分类,转身就在这里被静默清空,等于承诺作废。

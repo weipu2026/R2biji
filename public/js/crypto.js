@@ -73,7 +73,10 @@ export async function deriveKek(password, salt, iterations = PBKDF2_ITERATIONS_D
 /** 把任意外部传入的迭代次数收进 [1, MAX]:非法值回落默认,超大值截断到上限。 */
 export function clampIterations(iterations) {
   if (!Number.isFinite(iterations) || iterations <= 0) return PBKDF2_ITERATIONS_DEFAULT;
-  return Math.min(Math.floor(iterations), PBKDF2_ITERATIONS_MAX);
+  // ⚠️ 必须同时钳下界:Math.floor(0.5) === 0 会越过 [1, MAX] 的约定,
+  // deriveBits 抛 OperationError(被误分类成「文件结构损坏」而非「密码错」)
+  // (2026-10-06 审计 P2)
+  return Math.min(Math.max(1, Math.floor(iterations)), PBKDF2_ITERATIONS_MAX);
 }
 
 /** 派生 KEK 原始字节(32B)。云端架构下同一轮派生还要出鉴权钥匙,需要裸字节。 */
@@ -268,6 +271,8 @@ export async function openText(key, magic, fileBytes) {
 
 /* ---------- 测试辅助 ---------- */
 
+/** 定长字节比较。**仅供测试使用** —— 生产代码里没有调用点,
+ * 且它不是恒定时间,别拿它比密钥/令牌(服务端那条走 timingSafeEqual)。 */
 export function bytesEqual(a, b) {
   if (a === b) return true;
   if (!a || !b || a.length !== b.length) return false;

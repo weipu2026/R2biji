@@ -44,13 +44,15 @@ export function saveAccessKey(key) {
 /** 请求超时。取值要容得下最慢一档(50MB 附件上传在慢网络下可能要几十秒)。 */
 const REQUEST_TIMEOUT_MS = 120_000;
 
-async function req(path, { method = 'GET', body = null, headers = {} } = {}) {
+/** @param {{timeoutMs?:number}} [opt] 单次覆盖超时:启动探测用短超时(10s),
+ *  50MB 附件上传仍走默认 120s —— 断网时锁屏不该转两分钟圈(2026-10-06 审计 P3) */
+async function req(path, { method = 'GET', body = null, headers = {}, timeoutMs = 0 } = {}) {
   const h = { ...headers };
   if (token) h.Authorization = `Bearer ${token}`;
   if (accessKey) h['X-Access-Key'] = accessKey;
   let res;
   try {
-    res = await fetch(path, { method, headers: h, body, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    res = await fetch(path, { method, headers: h, body, signal: AbortSignal.timeout(timeoutMs || REQUEST_TIMEOUT_MS) });
   } catch (e) {
     throw new ApiError(`无法连接服务器:${e.message}`, 0, 'network');
   }
@@ -94,8 +96,10 @@ async function errFrom(res) {
 /* ---------------- 具体接口 ---------------- */
 
 /** 拉取 vault.json(免鉴权)。@returns {{status, json?, etag?}} */
-export async function fetchVault() {
-  const res = await req('/api/vault');
+/** @param {{timeoutMs?:number}} [opt] 单次覆盖请求超时:启动探测用短超时,
+ *  50MB 附件上传仍走默认的 120s(2026-10-06 审计 P3) */
+export async function fetchVault(opt = {}) {
+  const res = await req('/api/vault', { timeoutMs: opt.timeoutMs || 10_000 });
   if (res.status === 404) return { status: 404 };
   if (!res.ok) throw await errFrom(res);
   // W/ 前缀 = CF 边缘把压缩响应的强 etag 改写成了弱验证器,必须剥掉,否则 CAS 恒 412

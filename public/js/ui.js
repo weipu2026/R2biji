@@ -196,7 +196,6 @@ const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
  * 后者要「打开即用」。默认给后者,想要前者自己去侧栏选 —— 选了之后空闲到点会
  * 锁定并**忘掉本机会话**,语义一致:锁定 = 需要重新输主密码。
  * 取值来自 store 的 defaultState(单一出处,别在这里另写字面量)。 */
-const DEFAULT_AUTOLOCK_MIN = store.get('settings').autoLockMinutes;
 
 /* 会话态的定义已迁到 store.js 的 defaultState()(单一出处)。
  * 原先这里的 `const S = { lib, vaultJson, ... }` 是裸对象,现改为:
@@ -223,6 +222,13 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
   return new Promise((resolve) => {
     const dlg = $('modal');
     const body = $('modalBody');
+    /* ★ 已打开的弹窗必须先关掉(2026-10-06 审计 P2):
+     *   共享 <dialog> 上对已 open 的元素再 showModal() 会抛 InvalidStateError,
+     *   而这个异常发生在 Promise executor 里 → Promise reject →
+     *   自动锁屏那条 setTimeout 没有 .catch,于是**锁定一步都没执行**,
+     *   紧跟其后的 toast 却照样报「已自动锁屏」(密钥仍在内存里)。
+     *   先 close() 让旧弹窗走它自己的 close 路径落定 null(其监听已就位)。 */
+    if (dlg.open) dlg.close();
     body.textContent = '';
 
     // ★ Esc(以及一切非按钮的关闭路径)也必须落定 Promise,否则调用方 await 永久挂起:
@@ -461,6 +467,10 @@ function refreshSaveStatus() {
 
 /* ================= 保存流水线 ================= */
 
+/** 「登录已失效」只提示一次:他端改过主密码后,每次保存都会 401,
+ *  反复弹同一条只会盖住真正该做的事(锁定后重新解锁)。解锁时清零。 */
+let authLostNotified = false;
+
 function markDirty(catName) {
   S.markDirty(catName);
   // 用户又改了东西 = 进入新一轮保存周期,清掉上一轮残留的 error 粘性,
@@ -471,41 +481,86 @@ function markDirty(catName) {
   S.autoSaveTimer = setTimeout(() => { saveAll(); }, IDLE_SAVE_MS);
 }
 
-async function saveAll() {
-  if (!S.lib || S.dirty.size === 0) return;
-  if (S.saving) { S.resavePending = true; return; } // 保存进行中又来新改动:别丢,结束后补跑
+/**
+ * 保存流水线单例:所有调用方(含 lockNow)拿到的都是**同一个** promise。
+ *
+ * ★ 2026-10-06 审计 P1(数据丢失):此前 `if (S.saving) return;` 让「保存进行中」
+ *   的调用方拿到 undefined —— lockNow `await ctx.saveAll()` 等于什么都没等,
+ *   紧接着 releaseSession → lib.destroy()(keys 置 null)在途保存必然抛错,
+ *   而脏标记已被清空 ⇒ 未保存改动静默丢失、还误报「保存失败」。
+ *   现在把 promise 存进 S.savePromise:后来者等它,锁定流程也等它。
+ */
+function saveAll() {
+  if (!S.lib || S.dirty.size === 0) return Promise.resolve();
+  if (S.saving) { S.resavePending = true; return S.savePromise || Promise.resolve(); }
   S.saving = true;
   setStatus('保存中…', 'busy');
-  const names = [...S.dirty];
-  let failed = 0;
-  for (const name of names) {
-    // 记下发起保存时该分类的改动代数:await 期间用户若又编辑同一分类,
-    // 代数会变 → 结束时不清脏标记,新改动继续留在队列里等下一轮。
-    // (2026-09-27 审计 P1:此前无条件 delete,窗口期的新编辑会被静默抹掉)
-    const gen = S.dirtyGen.get(name);
-    try {
-      const res = await S.lib.saveCategory(name);
-      if (res.skipped) {
-        // 没有内存数据可存(saveCategory 如实上报),移出待保存队列
-        S.clearDirtyIfUnchanged(name, gen);
-      } else if (res.conflict) {
-        S.clearDirtyIfUnchanged(name, gen);
-        await handleConflict(name);
-      } else {
-        S.clearDirtyIfUnchanged(name, gen);
-        // 通知其他标签页:这个分类的云端版本变了,它们手里的是旧数据
-        S.tabs?.send({ type: 'cat-saved', name });
-        syncCatCount(name);
+  S.savePromise = (async () => {
+    const names = [...S.dirty];
+    let failed = 0;
+    const skippedGone = [];
+    const countPairs = [];
+    for (const name of names) {
+      // 会话可能已被结束(锁定/另一标签页退出):此时 lib 与它的 keys 都已销毁,
+      // 继续写必然抛 TypeError。停下并如实把这一轮记为「没保存成」,让 dirty 留着。
+      if (!S.lib) break;
+      // 记下发起保存时该分类的改动代数:await 期间用户若又编辑同一分类,
+      // 代数会变 → 结束时不清脏标记,新改动继续留在队列里等下一轮。
+      // (2026-09-27 审计 P1:此前无条件 delete,窗口期的新编辑会被静默抹掉)
+      const gen = S.dirtyGen.get(name);
+      try {
+        const res = await S.lib.saveCategory(name);
+        if (res.skipped) {
+          /* skipped 有两个成因,处置不同(2026-10-06 审计 P1):
+           *   ① cat.data 为空 —— 内存里没数据,移出队列(原有语义);
+           *   ② cat 不存在 —— **这个分类已被别的标签页/设备删掉**,
+           *      本机对它的未保存改动既上不去云、也不再有人管,
+           *      必须说一声,否则用户以为改动还在。 */
+          if (!S.lib.categoryInfo(name)) skippedGone.push(name);
+          S.clearDirtyIfUnchanged(name, gen);
+        } else if (res.conflict) {
+          S.clearDirtyIfUnchanged(name, gen);
+          await handleConflict(name);
+        } else {
+          S.clearDirtyIfUnchanged(name, gen);
+          // 通知其他标签页:这个分类的云端版本变了,它们手里的是旧数据
+          S.tabs?.send({ type: 'cat-saved', name });
+          countPairs.push([name, S.lib.categoryInfo(name)?.data?.notes.length ?? null]);
+        }
+      } catch (e) {
+        // 令牌失效(他端改过主密码)不该和断网/超时/413 混成一句「保存失败」:
+        // 提示一次「登录已失效,请锁定后重新解锁」,否则用户只看到反复失败、控制台一句 401。
+        if (e instanceof API.ApiError && e.status === 401 && !authLostNotified) {
+          authLostNotified = true;
+          toast('登录状态已失效(可能是在其他设备改过主密码),请锁定后重新解锁', 'error');
+        }
+        if (!S.lib) break; // 会话已销毁:不算「保存失败」,别在锁屏上弹红条
+        failed += 1;
+        console.error('保存失败', name, e);
       }
-    } catch (e) {
-      failed += 1;
-      console.error('保存失败', name, e);
     }
-  }
-  S.saving = false;
-  if (S.resavePending) { S.resavePending = false; setTimeout(() => { saveAll(); }, 300); return; }
-  if (failed > 0) { setStatus(`保存失败 ×${failed}`, 'error'); toast(`${failed} 个分类保存失败,详见控制台`, 'error'); }
-  else refreshSaveStatus();
+    S.saving = false;
+    S.savePromise = null;
+    /* 篇数元信息**攒起来一次写**:逐个写就是每个分类一次 vault.json 条件写
+     * (多分类保存时 N 次网络往返,而批量接口 setCatCounts 本来就有,2026-10-06 审计 P3) */
+    syncCatCounts(countPairs);
+    for (const name of skippedGone) {
+      toast(`「${name}」已被其他标签页删除,本机对它的未保存改动已丢弃`, 'warn');
+    }
+    if (skippedGone.length) { S.resavePending = false; refreshSaveStatus(); return; }
+    if (S.resavePending) {
+      S.resavePending = false;
+      // ★ 必须刷状态栏:走这条分支时主循环已把 dirty 清空,300ms 后的 saveAll
+      //   会因 dirty.size===0 直接返回、谁也不碰状态栏 → 永久卡「保存中…」
+      //   (2026-10-06 审计 P1:靠真实「保存中又按 Ctrl+S」复现)
+      refreshSaveStatus();
+      setTimeout(() => { saveAll(); }, 300);
+      return;
+    }
+    if (failed > 0) { setStatus(`保存失败 ×${failed}`, 'error'); toast(`${failed} 个分类保存失败,详见控制台`, 'error'); }
+    else refreshSaveStatus();
+  })();
+  return S.savePromise;
 }
 
 /**
@@ -514,13 +569,22 @@ async function saveAll() {
  * 有意不 await:徽章晚一拍亮没关系,不能让元信息写的网络往返拖慢保存流水线;
  * 失败也静默 —— setCatCount 内部已挡「没变化就不写」,真失败就等下次保存再对齐。
  */
-function syncCatCount(name) {
-  const cat = S.lib?.categoryInfo(name);
-  if (!cat?.data) return;
-  const n = cat.data.notes.length;
-  if (S.lib.catCount(name) === n) return;
-  S.lib.setCatCount(name, n).then(() => {
-    if (S.lib.catCount(name) === n) renderCategoryList(ctx);
+function syncCatCounts(pairs) {
+  if (!S.lib || !Array.isArray(pairs) || !pairs.length) return;
+  // 只把「篇数真的变了」的分类攒进这一次条件写:逐个写就是每个分类一次
+  // PUT /api/vault(多分类保存时 N 次网络往返),批量接口 setCatCounts 本来就有
+  // (跨分类移动在用),这里统一走它(2026-10-06 审计 P3)。
+  const todo = {};
+  for (const [name, n] of pairs) {
+    const cat = S.lib.categoryInfo(name);
+    if (!cat?.data || !Number.isInteger(n)) continue;
+    if (S.lib.catCount(name) === n) continue;
+    todo[name] = n;
+  }
+  if (!Object.keys(todo).length) return;
+  // 有意不 await:徽章晚一拍亮没关系,不能让元信息写的往返拖慢保存流水线
+  Promise.resolve(S.lib.setCatCounts(todo)).then((changed) => {
+    if (changed && S.lib) renderCategoryList(ctx);
   }).catch(() => { /* 元信息失败不影响正文,下次保存会再试 */ });
 }
 
@@ -578,7 +642,9 @@ async function handleConflict(name) {
  */
 function onTabMessage(msg) {
   // 退出登录是共享的(localStorage 会话),别的标签页锁了,这里也得锁
-  if (msg.type === 'locked') { lockNow(ctx, { broadcast: false, confirmDiscard: false }); return; }
+  // 本标签页已经在锁屏时**不要**再走一遍 lockNow:showLock 会清空 pwInput 与
+  // lockErr —— 另一个标签页锁屏时,正在这里敲主密码的人会被清掉重打(2026-10-06 审计 P3)
+  if (msg.type === 'locked') { if (!S.lib) return; lockNow(ctx, { broadcast: false, confirmDiscard: false }); return; }
   if (!S.lib) return;
 
   if (msg.type === 'cats-changed') { rescanFromTabs(); return; }
@@ -609,11 +675,12 @@ function onTabMessage(msg) {
 /** 别的标签页增删/改名了分类 → 重新问服务器 */
 async function rescanFromTabs() {
   try {
-    await S.lib.rescan();
     // ★ 分类清单改了,vault.json 的元信息(置顶/篇数/手动顺序)也必须重拉 ——
     //   rescan() 只重建分类清单、不碰 vaultJson,只 rescan 会让本标签页继续按陈旧的
     //   catMeta 渲染顺序与置顶(2026-09-28 审计 P2)。
-    await S.lib.refreshVaultMeta();
+    // 两个端点、无数据依赖(一个只重建 categories,一个只整体替换 vaultJson/vaultEtag)
+    // → 并行省一半往返(2026-10-06 审计 P3)。
+    await Promise.all([S.lib.rescan(), S.lib.refreshVaultMeta()]);
   } catch {
     return; // 网络问题:不打扰用户,下次操作自然会重试
   }
@@ -750,6 +817,8 @@ export async function enterApp() {
    *   (lockMode 非空就整类 return)会让解锁一次之后 Ctrl+K / Ctrl+S / Ctrl+Enter /
    *   J/K / Alt+↑↓ **全部永久失效**。真机 S0【14】的 Ctrl+K / Alt+↓ 正对照当场抓到。 */
   S.lockMode = null;
+  /* 新会话开始:「登录已失效」的提示额度恢复(上一次是上一条会话的事) */
+  authLostNotified = false;
   /* 先复位:解锁有可能是「换了个库」,上一条会话的分类/笔记若留着,界面会显示成
    * 新库里某个同名分类的内容。复位之后再按**当前库**重新定位该读哪篇。 */
   S.activeCat = null;
@@ -878,18 +947,25 @@ function loadSettings() {
     const raw = localStorage.getItem('jmbiji.settings');
     if (raw) S.settings = { ...S.settings, ...JSON.parse(raw) };
   } catch { /* 忽略 */ }
-  $('autoLock').value = String(S.settings.autoLockMinutes);
+  /* 取值必须落在 <select> 的选项里(0/5/15/30):脏值(手改 localStorage、旧版本
+   * 遗留)会让界面显示空白但仍按脏值生效,更糟的是 "abc" → setTimeout(NaN)=0ms
+   * → 进应用一点就锁死(2026-10-06 审计 P3) */
+  const autoLockRaw = Number(S.settings.autoLockMinutes);
+  const autoLockMin = [0, 5, 15, 30].includes(autoLockRaw) ? autoLockRaw : 0;
+  if (autoLockMin !== autoLockRaw) S.settings = { ...S.settings, autoLockMinutes: autoLockMin };
+  $('autoLock').value = String(autoLockMin);
   $('rememberDevice').checked = S.settings.rememberDevice !== false;
 }
 function saveSettings() {
-  S.settings.autoLockMinutes = Number($('autoLock').value) || 0;
+  // 整体换新(store.js 的硬性要求:凡是有人 subscribe 的字段必须换新对象)
+  S.settings = { ...S.settings, autoLockMinutes: Number($('autoLock').value) || 0 };
   try { localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings)); } catch { /* 忽略 */ }
   startIdleTimer();
 }
 
 /** 勾选/取消「记住本设备」。取消时立刻把已存的会话删掉,不给「取消了其实还留着」留余地。 */
 function saveRememberPref() {
-  S.settings.rememberDevice = $('rememberDevice').checked;
+  S.settings = { ...S.settings, rememberDevice: $('rememberDevice').checked };
   try { localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings)); } catch { /* 忽略 */ }
   if (!S.settings.rememberDevice) clearSession();
 }
@@ -952,14 +1028,19 @@ async function exportFullBackup() {
           + '⚠️ 拿到这个包的人不受访问密钥门与限流保护,请放在不会外泄的位置。',
       }),
       onProgress: ({ done, total }) => {
-        setStatus(total ? `导出中 ${Math.round((done / total) * 100)}%` : '导出中…', 'busy');
+        // 上限 99%:导出期间对象可能被别的设备删掉,分母是计划值 → 不封顶会永远差一点
+        const pct = total ? Math.min(99, Math.round((done / total) * 100)) : 0;
+        setStatus(total ? `导出中 ${pct}%` : '导出中…', 'busy');
       },
     });
     downloadBytes(bytes, F.backupArchiveName());
-    S.settings.lastExportAt = Date.now();
+    S.settings = { ...S.settings, lastExportAt: Date.now() };
     saveSettings();
     $('btnExport').classList.remove('due');
-    setStatus('已导出', 'ok');
+    /* authoritative:true —— 上一句 onProgress 写过 rank=2 的 busy,
+     * 非权威的 'ok' 会被 statusAllowsOverride 拒掉 → 状态栏永久卡「导出中 100%」
+     * (与 importFromBackup 的 refreshSaveStatus 同一处置,2026-10-06 审计 P2) */
+    setStatus('已导出', 'ok', true);
     toast(`全库备份已下载:${counts.cats} 个分类 / ${counts.blobs} 张图片(约 ${fmtBytes(counts.bytes)})`);
   } catch (e) {
     refreshSaveStatus();
@@ -1049,4 +1130,7 @@ function closeDrawer() {
 /* 导出 handleConflict 仅为了可测:它「按 saveCategory 返回值分流」的判定写错了
  * 也不会有任何报错,只会静默失效(2026-09-29 审计 P2-9:覆盖失败仍弹绿字、
  * 改动静默脱离保存队列)。tests/dialog.test.mjs 钉住这条分流。 */
-export { ctx, handleConflict };
+/* saveAll / markDirty 仅为了可测:「锁定必须等到在途保存结束」「分类被别端删除
+ * 必须提示」这两条不变量跨 ui.js ↔ features/lock.js,离线测试要能直接驱动它们
+ * (与 handleConflict 同一理由:唯一验法是把真实接线跑起来)。 */
+export { ctx, handleConflict, saveAll, markDirty };

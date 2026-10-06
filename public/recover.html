@@ -842,7 +842,9 @@ const READER_TEMPLATE = `<!DOCTYPE html>
     color: var(--soft); font-size: 12px; font-variant-numeric: tabular-nums;
     border-bottom: 1px solid var(--hair); padding-bottom: 14px; margin-bottom: 20px;
   }
-  .md p { margin: 0 0 14px; }
+  /* pre-wrap:rdrMd 把连续行合成一个段落,HTML 默认会把其中的换行折叠成空格
+     —— 主站 style.css 早有这一条(纯文本笔记曾整段粘连),阅读站漏了(2026-10-06 审计) */
+  .md p { margin: 0 0 14px; white-space: pre-wrap; word-break: break-word; }
   .md h1, .md h2, .md h3 { font-family: Georgia, "Songti SC", SimSun, serif; line-height: 1.4; margin: 22px 0 10px; }
   .md h1 { font-size: 20px; } .md h2 { font-size: 17.5px; } .md h3 { font-size: 15.5px; }
   .md ul, .md ol { margin: 0 0 14px; padding-left: 24px; }
@@ -858,7 +860,9 @@ const READER_TEMPLATE = `<!DOCTYPE html>
   /* 星号遮罩(2026-09-27):真值仍在 DOM(.secret-raw),视觉用星号图层替代模糊 ——
      多处打码不再满屏糊块;点击显形/30 秒遮回交互不变 */
   .secret .secret-raw { display: inline; }
-  .secret .secret-stars { display: none; color: var(--muted); letter-spacing: 1px; }
+  /* 用 --soft(模板里定义的弱化色):--muted 在本模板里**根本没定义**,
+     var() 解析失败会回落到继承色 = 正文色 → 遮罩与真值同色,看不出藏了东西(2026-10-06 审计) */
+  .secret .secret-stars { display: none; color: var(--soft); letter-spacing: 1px; }
   .secret.masked { user-select: none; }
   .secret.masked .secret-raw { display: none; }
   .secret.masked .secret-stars { display: inline; }
@@ -1045,23 +1049,35 @@ function rdrInlineCore(text) {
   return out;
 }
 
+/** 敏感行 → 星号双图层遮罩(与主站 render.js 的 splitSecretLine 同构):
+ *  前缀也收进 raw 层,星号数只按值的去空白字符数算(≤24 截断)
+ *  ⚠️ 这里的正则必须写**双反斜杠**:本函数位于 READER_TEMPLATE 模板字面量之内,
+ *     单反斜杠会被模板转义吃掉变成 /s+/g —— 于是它在删字母 s 而不是空白,
+ *     「sk-leak-777」被算成 10 颗星(主站 11 颗)。2026-10-06 由主站/阅读站
+ *     交叉一致性用例抓出。
+ *  ⚠️ 本段落在模板字面量内,**注释里也不能出现反引号**(会提前终止模板字符串)。 */
+function rdrSecretSpan(m) {
+  var n = m[2].replace(/\\s+/g, '').length || 1;
+  if (n > 24) n = 24;
+  return '<span class="secret masked" title="点击显示 / 再点隐藏">'
+    + '<span class="secret-raw">' + rdrEsc(m[1] + m[2]) + '</span>'
+    + '<span class="secret-stars" aria-hidden="true">' + new Array(n + 1).join('\\u2022') + '</span>'
+    + '</span>';
+}
+
+/* ★ 必须**按行**判定(2026-10-06 审计 P0,与主站 render.js 的 renderInline 同构):
+ *   rdrMd 把连续行以换行符合成一个段落再交进来,而旧实现对**整段**一次 exec、
+ *   命中即 return 遮罩片段 —— 段内其余行(非敏感正文)会被整段吞掉,
+ *   离线阅读站等于「打码即删段」。主站 2026-09-27 已改成按行切分,这里曾一度漂移。 */
 function rdrInline(text, allowSecret) {
-  if (allowSecret) {
-    var m = RDR_SECRET_RE.exec(text);
-    if (m) {
-      // 双图层:前缀+真值(.secret-raw)+ 星号(.secret-stars),显隐由 .masked 控制。
-      // ★ 前缀(「密码:」)也收进 raw 层 —— 遮罩态整行只剩星号串,不再有突兀的
-      //   「密码:」字样;点击显形才连前缀一起出现(与主站 render.js 行为一致)。
-      // 星号数只按值的去空白字符数算(≤24 截断);前缀不参与。
-      var n = m[2].replace(/\s+/g, '').length || 1;
-      if (n > 24) n = 24;
-      return '<span class="secret masked" title="点击显示 / 再点隐藏">'
-        + '<span class="secret-raw">' + rdrEsc(m[1] + m[2]) + '</span>'
-        + '<span class="secret-stars" aria-hidden="true">' + new Array(n + 1).join('\\u2022') + '</span>'
-        + '</span>';
-    }
+  if (!allowSecret) return rdrInlineCore(text);
+  var lines = String(text).split('\\n'), out = [];
+  for (var i = 0; i < lines.length; i++) {
+    if (i > 0) out.push('\\n');
+    var m = RDR_SECRET_RE.exec(lines[i]);
+    out.push(m ? rdrSecretSpan(m) : rdrInlineCore(lines[i]));
   }
-  return rdrInlineCore(text);
+  return out.join('');
 }
 
 function rdrMd(content) {
@@ -1325,7 +1341,18 @@ if (typeof document !== 'undefined') {
 
   $('lbtn').addEventListener('click', unlock);
   $('lpwd').addEventListener('keydown', function (e) { if (e.key === 'Enter') unlock(); });
-  $('q').addEventListener('input', function () { if (st.unlocked) buildNav($('q').value.trim()); });
+  /* 防抖 + 竞态守卫(与主站 features/search.js 同款):原来每个 input 事件都
+     全量扫描全库并重建整棵导航 DOM —— 输入 6 个字就是 6 次全量扫 + 6 次重建,
+     长任务顶掉主线程(4000 篇实测单次扫描 10~13ms)(2026-10-06 审计 P2) */
+  var navTimer = null, navSeq = 0;
+  $('q').addEventListener('input', function () {
+    if (!st.unlocked) return;
+    var q = $('q').value.trim(), seq = ++navSeq;
+    clearTimeout(navTimer);
+    navTimer = setTimeout(function () {
+      if (seq === navSeq) buildNav(q);   // 期间又敲了 → 这次结果作废
+    }, 160);
+  });
   $('btnLockTop').addEventListener('click', lock);
   /* 点击显形 / 遮回。
    * ★ 判据必须用 closest,不能直接判 e.target 的类名:遮罩态点击落在 .secret-stars

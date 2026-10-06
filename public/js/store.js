@@ -40,8 +40,12 @@ export function defaultState() {
     tabs: null,            // TabSync:同浏览器多标签页通知(可能不可用)
     objectUrls: new Map(), // blobName → objectURL(图片展示缓存)
     // ② 流程控制(不驱动 UI,但经代理读写故一并声明)
-    settings: { autoLockMinutes: 0, rememberDevice: true },
+    settings: { autoLockMinutes: 0, rememberDevice: true, lastExportAt: 0 },
     saving: false,         // saveAll 是否正在跑(防重入)
+    savePromise: null,     // saveAll 本轮的 promise:让 lockNow 等到「真的存完了」
+                           // (2026-10-06 审计 P1:此前 S.saving 时直接 return,
+                           //  lockNow await 的是 undefined → 在途保存被 destroy 打断,
+                           //  未保存改动静默丢失)
     resavePending: false,  // saveAll 期间又来新改动:本轮结束后补跑
     autoSaveTimer: null,   // 空闲自动保存的 setTimeout 句柄
     statusTimer: null,     // 状态栏防抖刷新的 setTimeout 句柄

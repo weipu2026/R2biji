@@ -72,7 +72,11 @@ function navFallback(url) {
 self.addEventListener('fetch', (e) => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
-  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) return;
+  // 只管自己域名的资源:跨域请求交给浏览器原生处理(本应用零第三方依赖,
+  // 但将来引了 CDN/字体时,跨域 GET 走进这条管道会在离线时以 undefined 响应
+  // 并把原生网络错误换成 SW 异常)(2026-10-06 审计 P2)
+  if (url.origin !== self.location.origin) return;
+  if (url.pathname.startsWith('/api/')) return;
   e.respondWith(
     fetch(e.request)
       .then((res) => {
