@@ -28,3 +28,31 @@
   Cache-Control: no-cache
 /index.html
   Cache-Control: no-cache
+
+# ---- 静态资源缓存(2026-10-06 速度专项) ----
+#
+# CF 给静态资源的**默认头**是 `Cache-Control: public, max-age=0, must-revalidate` + ETag:
+# 允许缓存,但每次使用前都要回源验证一次。首屏 20 个模块(gzip≈139KB / brotli≈116KB)
+# 于是每次访问都要付 20 次条件请求的网络往返,而每个往返至少一个 RTT。
+#
+# 为什么**不能**用 `immutable` + 一年期:那要求文件名带内容 hash(改内容即改文件名),
+# 本项目是零构建、无打包器,文件名固定为 /js/main.js —— 一年 immutable 等于
+# 部署后用户一年内拿不到新版。这里改用「短 TTL + 长 SWR」:
+#   max-age=3600            1 小时内直接走本地缓存,零往返
+#   stale-while-revalidate=86400  过了一小时也**先给缓存**(不阻塞渲染),
+#                              同时后台悄悄更新,下次访问就是新版
+# 最坏情况的代价是「部署后第一小时可能拿到旧资源」,换来的是其余时间零往返。
+# 换来的收益远大于代价:这些资源本来就是零依赖的原生 ESM,新旧混用不会崩。
+#
+# ⚠️ CF 的 _headers **只支持前缀通配,不支持正则分组**:写成 `/(js|css)/*`
+#    会静默失效(不报错、不告警、只是永远匹配不上)。所以只能逐个路径写。
+# ⚠️ 一条请求命中多条规则时**继承全部**规则的头 —— /js/main.js 同时命中 `/*`
+#    与 `/js/*`,安全头不会因此丢失(由 tests/deploy.test.mjs 钉住)。
+/js/*
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/css/*
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/icon.svg
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400
+/manifest.webmanifest
+  Cache-Control: public, max-age=3600, stale-while-revalidate=86400

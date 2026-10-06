@@ -1,8 +1,14 @@
 /* JMbiji Service Worker:仅缓存应用自身(外壳),不碰任何库数据与 /api/*
  *
- * 缓存策略(2026-09-25 起):**全量 network-first**
- *   所有同源静态资源(含页面 HTML)都先走网络,拿到新版直接用,同时顺手刷新缓存;
- *   断网/网络失败才回退缓存 —— 离线可用性不丢,在线时永远是最新的。
+ * 缓存策略(2026-10-06 起,分两类):
+ *   · **导航请求**(mode==='navigate',即「打开/刷新页面」)→ 纯 network-first:
+ *     先走网络,拿到就是最新版,失败才回缓存。这是「部署了但界面没变」的最后
+ *     一道保险。
+ *   · **静态资源**(js/css/图标/manifest)→ stale-while-revalidate:
+ *     命中缓存就立刻返回(零网络往返),同时后台悄悄更新,下次访问即新版。
+ *   ⚠️ 此前对所有请求一律 network-first,把 _headers 给 js/css 加的长缓存
+ *      完全抵消掉了 —— 浏览器缓存根本轮不到生效。首屏 20 个模块(gzip≈139KB)
+ *      因此每次访问都要付 20 次串行往返(模块图 5 层深)。
  *
  * ✅ 因此**不再需要「改完资源把版本号 +1」**:任何 css/js 改动,用户普通刷新即可拿到,
  *    不再出现「部署了但界面没变」。CACHE 版本号只在**清理历史旧缓存**时才需要动。
@@ -77,19 +83,53 @@ self.addEventListener('fetch', (e) => {
   // 并把原生网络错误换成 SW 异常)(2026-10-06 审计 P2)
   if (url.origin !== self.location.origin) return;
   if (url.pathname.startsWith('/api/')) return;
+
+  /* 导航请求(打开页面)保持**纯network-first**:先走网络,拿到就是最新版,
+     失败才回缓存。这一条是「部署了但界面没变」的最后一道保险,不动。 */
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      fetch(e.request)
+        .then((res) => {
+          if (res && res.ok && res.type === 'basic') {
+            e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, res.clone())).catch(() => {}));
+          }
+          return res;
+        })
+        .catch(() =>
+          caches.match(e.request, { ignoreSearch: true })
+            .then((hit) => hit || caches.match(navFallback(e.request.url))),
+        ),
+    );
+    return;
+  }
+
+  /* 静态资源(js/css/图标/manifest)改 stale-while-revalidate(2026-10-06 速度专项):
+   * 此前对所有请求一律 network-first,于是 `_headers` 里给 js/css 加的长缓存
+   * (max-age=3600 + stale-while-revalidate=86400)**完全被抵消** —— 浏览器缓存
+   * 命中与否根本轮不到生效,SW 每次都强制回源。首屏 20 个模块 = 20 次串行往返。
+   *
+   * 现在:命中缓存就**立刻**返回(零往返,首屏不再等网络),同时后台悄悄更新,
+   * 下次访问就是新版。零依赖的原生 ESM 新旧混用不会崩,且 sw.js 自身仍 no-cache,
+   * 它的 skipWaiting + clients.claim 会把整页刷新到一致状态。
+   *
+   * 硬护栏不变:/api/* 一律不经过缓存(上面已 return)—— 密文与 vault.json 只要被
+   * Cache Storage 留过一份,锁屏就形同虚设。 */
   e.respondWith(
-    fetch(e.request)
-      .then((res) => {
-        // 网络成功:返回新版,并顺手刷新缓存(下次断网时的兜底也是新的)
-        if (res && res.ok && res.type === 'basic') {
-          e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, res.clone())).catch(() => {}));
-        }
-        return res;
-      })
-      .catch(() =>
-        // 网络失败(离线):回退缓存;导航请求再兜一层 SPA 外壳
-        caches.match(e.request, { ignoreSearch: true })
-          .then((hit) => hit || (e.request.mode === 'navigate' ? caches.match(navFallback(e.request.url)) : undefined)),
-      ),
+    caches.match(e.request, { ignoreSearch: false }).then((cached) => {
+      const fresh = fetch(e.request)
+        .then((res) => {
+          if (res && res.ok && res.type === 'basic') {
+            e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, res.clone())).catch(() => {}));
+          }
+          return res;
+        })
+        .catch(() => null);
+      if (cached) {
+        // 有缓存就用它,后台那次 fetch 只为「下次访问是新的」;失败也无所谓(已有缓存可用)
+        e.waitUntil(fresh);
+        return cached;
+      }
+      return fresh.then((res) => res || Response.error());
+    }),
   );
 });
