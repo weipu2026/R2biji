@@ -812,6 +812,43 @@ const MUTANTS = [
     to: '// MUTANT:快照引用不参与清点',
     expect: '全生命周期:建库',
   },
+  /* ---- 2026-10-06 速度专项:静态资源缓存(头 + SW 策略) ---- */
+  {
+    label: 'js/css 退回 no-cache(每次访问都回源,首屏 20 次往返)',
+    file: 'public/_headers',
+    from: '/js/*\n  Cache-Control: public, max-age=3600, stale-while-revalidate=86400',
+    to: '/js/*\n  Cache-Control: no-cache',
+    expect: 'js/css 必须有非 no-cache 的 Cache-Control',
+  },
+  {
+    label: '静态资源改用 immutable(零构建项目文件名无 hash → 部署后长期停在旧版)',
+    file: 'public/_headers',
+    from: '/css/*\n  Cache-Control: public, max-age=3600, stale-while-revalidate=86400',
+    to: '/css/*\n  Cache-Control: public, max-age=31536000, immutable',
+    expect: '不许用 immutable',
+  },
+  {
+    label: 'SW 静态资源退回「先等网络再决定」(SWR 失效,首屏照旧每次回源)',
+    file: 'public/sw.js',
+    from: '      if (cached) {',
+    to: '      if (false) { // MUTANT:不再用缓存优先',
+    expect: 'SWR:命中缓存时',
+  },
+  {
+    label: 'SW 导航请求也改走缓存优先(部署后界面停在旧外壳)',
+    file: 'public/sw.js',
+    from: "  if (e.request.mode === 'navigate') {",
+    to: "  if (false) { // MUTANT:导航不再走 network-first",
+    expect: '导航请求保持 network-first',
+  },
+  {
+    label: '/api/* 硬护栏被摘掉(密文可被 Cache Storage 离线读出)',
+    file: 'public/sw.js',
+    from: "  if (url.pathname.startsWith('/api/')) return;",
+    to: "  // MUTANT:/api/* 也进缓存管道",
+    expect: '/api/* 一律不经 SW',
+  },
+
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

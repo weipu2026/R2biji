@@ -223,3 +223,136 @@ test('部署守卫:npm run deploy 必须先注入配置再部署生成物', () =
     'deploy 没有用生成的配置(用模板部署会丢掉注入的域名/桶名)',
   );
 });
+
+/* ============================================================
+ * 静态资源缓存策略门禁(2026-10-06 速度专项)
+ *
+ * 背景:CF 给静态资源的默认头是 `public, max-age=0, must-revalidate` ——
+ * 允许缓存但每次使用前都要回源验证。首屏 20 个模块(gzip≈139KB)于是每次
+ * 访问都要付 20 次串行往返。_headers 里的长缓存 + sw.js 的 SWR 一起才能
+ * 真正把这 20 次往返吃掉。
+ *
+ * 这两条一旦被改回去(比如「顺手清理一下没用的头」),速度立刻退化回原样
+ * 且没有任何报错 —— 本组用例就是那道护栏。
+ * ============================================================ */
+
+/** 解析 _headers:返回 [{ pattern, headers: {名称: 值} }] */
+function parseHeaders(text) {
+  const lines = text.replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let cur = null;
+  for (const line of lines) {
+    if (!line.trim() || line.trim().startsWith('#')) continue;
+    if (!/^\s/.test(line)) {
+      // 顶层路径行:CF 允许带尾随的绝对 URL,这里只取路径部分
+      cur = { pattern: line.trim().split(/\s+/)[0], headers: {} };
+      blocks.push(cur);
+    } else if (cur) {
+      const m = /^\s+([A-Za-z0-9-]+)\s*:\s*(.+)$/.exec(line);
+      if (m) cur.headers[m[1].toLowerCase()] = m[2].trim();
+    }
+  }
+  return blocks;
+}
+
+const headerBlocks = parseHeaders(read('public/_headers'));
+
+/** 找出能匹配某请求路径的规则(CF 语义:前缀通配,命中多条则**继承全部**)。 */
+function matchHeaders(pathname) {
+  const hits = [];
+  for (const b of headerBlocks) {
+    if (b.pattern === pathname) { hits.push(b); continue; }
+    if (b.pattern.endsWith('*') && pathname.startsWith(b.pattern.slice(0, -1))) hits.push(b);
+  }
+  return hits;
+}
+
+/** 取某路径最终生效的 Cache-Control(多条规则里最后一个生效)。 */
+function effectiveCacheControl(pathname) {
+  const hits = matchHeaders(pathname);
+  return hits.length ? (hits[hits.length - 1].headers['cache-control'] ?? null) : null;
+}
+
+test('缓存守卫:js/css 必须有非 no-cache 的 Cache-Control(否则每次访问都回源)', () => {
+  /* 首屏必拉的资源。清单与 sw.js 的 ASSETS 对齐,少一个都会真实漏掉。 */
+  const critical = [
+    '/js/main.js', '/js/ui.js', '/js/lib.js', '/js/render.js', '/js/api.js',
+    '/js/crypto.js', '/js/format.js', '/js/vaultlib.js', '/js/search.js',
+    '/js/store.js', '/js/session.js', '/js/tabsync.js', '/js/zip.js',
+    '/js/features/shell.js', '/js/features/note.js', '/js/features/sidebar.js',
+    '/js/features/lock.js', '/js/features/data.js', '/js/features/search.js',
+    '/js/features/theme.js',
+    '/css/style.css',
+  ];
+  for (const p of critical) {
+    const cc = effectiveCacheControl(p);
+    assert.ok(cc, `${p} 没有生效的 Cache-Control —— CF 默认 max-age=0,每次访问都回源`);
+    assert.ok(
+      !/no-cache|no-store/.test(cc),
+      `${p} 的 Cache-Control 是「${cc}」:no-cache/no-store 等于每次回源,速度收益为零`,
+    );
+    assert.match(cc, /max-age=(\d+)/, `${p} 的 Cache-Control 缺 max-age:「${cc}」`);
+    const maxAge = Number(/max-age=(\d+)/.exec(cc)[1]);
+    assert.ok(maxAge > 0, `${p} 的 max-age=0:允许缓存但每次都要重验证,正是要治的病`);
+  }
+});
+
+test('缓存守卫:静态资源不许用 immutable(文件名没有内容 hash,改了内容同名不变)', () => {
+  /* 本项目零构建、无打包器 —— 文件名恒为 /js/main.js 这种固定路径。
+   * `immutable` 的前提是「内容变了文件名一定变」,不满足时它会让用户在
+   * 部署后最长一年内拿不到新版,属静默故障(不报错,只是界面停在旧版)。 */
+  for (const p of ['/js/main.js', '/css/style.css', '/icon.svg', '/manifest.webmanifest']) {
+    const cc = effectiveCacheControl(p) || '';
+    assert.ok(
+      !/immutable/.test(cc),
+      `${p} 用了 immutable:零构建项目文件名不带 hash,部署后用户会长期停留在旧版本(「${cc}」)`,
+    );
+  }
+});
+
+test('缓存守卫:入口页与 sw.js 必须保持 no-cache(刷新即最新版这条语义不能丢)', () => {
+  for (const p of ['/', '/index.html', '/sw.js']) {
+    assert.match(
+      effectiveCacheControl(p) || '',
+      /no-cache/,
+      `${p} 必须保持 no-cache:入口页被缓存住会让部署后仍是旧外壳,sw.js 被缓存住则永远装不上新版`,
+    );
+  }
+});
+
+test('缓存守卫:_headers 不得出现正则分组(CF 不支持,会静默失效)', () => {
+  /* CF 的 _headers 只支持 `*` 后缀通配与精确路径。写成 /(js|css)/* 或
+   /*.css 这类正则**不报错、不告警、只是永远匹配不上** —— 缓存头看着写了,
+   * 实际一行都没生效。踩过这个坑的人才会知道它静默。 */
+  const raw = read('public/_headers');
+  const bad = raw.replace(/\r\n/g, '\n').split('\n')
+    .filter((l) => /^\/\S+\s*$/.test(l) && /[(){}[\]|?+]|\\\./.test(l));
+  assert.deepEqual(bad, [],
+    `这些路径规则含正则元字符,CF 不支持且静默失效:\n${bad.join('\n')}`);
+});
+
+test('缓存守卫:一条命中多条规则时安全头不得丢失(CF 是「继承全部」而非「就近覆盖」)', () => {
+  /* /js/main.js 同时命中 `/*` 与 `/js/*` 两条。若把 Cache-Control 写进 `/*`,
+   * 入口页与 sw.js 会被一起命中 —— 所以缓存头必须放在精确/前缀规则里,
+   * 且这两条的存在**不得**挤掉 CSP 等安全头。 */
+  const hits = matchHeaders('/js/main.js');
+  assert.ok(hits.length >= 2, '/js/main.js 应同时命中 /* 与 /js/* 两条规则');
+  const merged = Object.assign({}, ...hits.map((b) => b.headers));
+  assert.match(
+    merged['content-security-policy'] || '',
+    /default-src 'none'/,
+    '/js/main.js 丢掉了 CSP:加了 /js/* 规则后安全头必须仍在',
+  );
+  assert.ok(merged['x-frame-options'], '/js/main.js 丢掉了 X-Frame-Options');
+  assert.ok(merged['strict-transport-security'], '/js/main.js 丢掉了 HSTS');
+});
+
+test('缓存守卫:_headers 只管静态资源,不得出现 /api/* 规则', () => {
+  /* /api/* 的响应由 Worker 代码生成,硬化头在 worker/worker.js 的 SEC_HEADERS
+   * 里独立设置。在 _headers 里给 /api/* 写规则不会生效(平台明确不套用),
+   * 写上去只会让人误以为那道门在这儿,实际是空配置。 */
+  const apiBlocks = headerBlocks.filter((b) => b.pattern.startsWith('/api'));
+  assert.deepEqual(apiBlocks.map((b) => b.pattern), [],
+    `_headers 不该有 /api/* 规则(不生效,且会误导对硬化头的判断):${apiBlocks.map((b) => b.pattern).join(', ')}`);
+  assert.match(workerSrc, /SEC_HEADERS/, 'Worker 侧必须有独立的 SEC_HEADERS');
+});
