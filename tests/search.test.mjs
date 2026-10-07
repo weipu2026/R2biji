@@ -91,3 +91,30 @@ test('renderSearchResult:标题命中走 <mark>、标题未命中不高亮', asy
     assert.equal(title.textContent, 'CF 中转配置');
   });
 });
+
+
+/* ---------- 结果表头文案(2026-10-07 定稿复盘) ---------- */
+
+test('搜索结果表头:不超过上限时只报真实总数', async () => {
+  const { resultHeadline } = await import('../public/js/features/search.js');
+  assert.equal(resultHeadline(0), '0 条匹配');
+  assert.equal(resultHeadline(1), '1 条匹配');
+  assert.equal(resultHeadline(50), '50 条匹配');
+  assert.ok(!resultHeadline(50).includes('/'), '未超上限时不该出现「N / M」那种分栏写法');
+});
+
+test('★ 搜索结果表头:超过上限必须同时说出「显示数 / 总数」', async () => {
+  const { resultHeadline } = await import('../public/js/features/search.js');
+  const h = resultHeadline(128);
+  assert.ok(h.includes('50') && h.includes('128'),
+    `超上限时表头必须同时给出显示条数与真实总数,实际「${h}」`);
+  assert.ok(/前\s*50|只显示/.test(h), `表头必须明说这是截断,实际「${h}」`);
+  /* 这条是本护栏的核心:界面上只渲染前 50 条却不提示时,
+   * 用户看到「128 条匹配」会合理推断「库里就这么多」—— 而这不是事实。 */
+});
+
+test('搜索结果表头:上限之差 1 就该提示(判据不能是宽松的近似)', async () => {
+  const { resultHeadline } = await import('../public/js/features/search.js');
+  assert.equal(resultHeadline(50), '50 条匹配');
+  assert.ok(resultHeadline(51).includes('51'), '51 条就必须提示,不能等到很悬殊才提示');
+});

@@ -17,6 +17,23 @@ import { findMatches, renderSearchResult } from '../search.js';
  *  模块级持有即可 —— 它只服务于本模块的竞态控制,无需进 store。 */
 let searchSeq = 0;
 
+/** 结果面板一次最多渲染多少条。
+ *  超出部分**必须在表头明说**(见 resultHeadline),否则用户会把「显示上限」误当成「库里就这么多」。 */
+const SEARCH_RESULT_LIMIT = 50;
+
+/** 结果表头文案(纯函数,抽出来是为了能离线单测)。
+ *  ★ 匹配数与显示数必须分开说(2026-10-07 定稿复盘):
+ *   此前表头恒写 `${results.length} 条匹配`、列表却只渲染前 50 条 ——
+ *   用户看到「128 条匹配」却只翻得到 50 条,界面上**没有任何提示**,
+ *   合理推断是「我的库就这么大」,而这不是事实。
+ * @param {number} total  findMatches 返回的**真实**总数
+ * @param {number} limit  实际渲染条数上限
+ */
+export function resultHeadline(total, limit = SEARCH_RESULT_LIMIT) {
+  if (total > limit) return `${limit} / ${total} 条匹配(只显示前 ${limit} 条,请细化关键词)`;
+  return `${total} 条匹配`;
+}
+
 /** 跑一次搜索并把结果渲染进 #searchPanel。
  *  空查询 → 收起面板;期间用户又输入 → 本轮结果作废(seq 守卫)。 */
 export async function runSearch(ctx) {
@@ -37,7 +54,7 @@ export async function runSearch(ctx) {
   panel.textContent = '';
   const head = document.createElement('div');
   head.className = 'search-head';
-  head.textContent = `${results.length} 条匹配`;
+  head.textContent = resultHeadline(results.length);
   panel.appendChild(head);
   const ul = document.createElement('ul');
   ul.className = 'search-list';
@@ -45,7 +62,7 @@ export async function runSearch(ctx) {
    * 读屏器拿到一串「选项」却不知道它们属于哪个列表、也不知道共几条。 */
   ul.setAttribute('role', 'listbox');
   ul.setAttribute('aria-label', '搜索结果');
-  for (const r of results.slice(0, 50)) {
+  for (const r of results.slice(0, SEARCH_RESULT_LIMIT)) {
     const li = renderSearchResult(r, q);
     ctx.clickable(li, () => {
       ctx.store.set('activeCat', r.cat);

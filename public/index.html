@@ -173,7 +173,9 @@
       </main>
     </div>
 
-    <div id="searchPanel" class="search-panel" hidden></div>
+    <!-- aria-live=polite:搜索结果条数是「用户输入后才出现」的信息,读屏器需要它播报。
+         #toasts 有、这里原先漏了 —— 键盘/读屏用户按 Ctrl+K 后听不到「N 条匹配」。 -->
+    <div id="searchPanel" class="search-panel" aria-live="polite" aria-atomic="true" hidden></div>
   </div>
 
   <dialog id="modal" class="modal"><div id="modalBody"></div></dialog>
