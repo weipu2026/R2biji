@@ -16,7 +16,19 @@
   --border: #e6e1d4;        /* 发丝线 */
   --border-strong: #d8d2c4;
   --text: #26251f;          /* 暖墨 */
-  --muted: #8d8778;
+  /* 次要文字色 = 同一个值身兼两职:① 正文级文字(H3 标题/提示/计数/空态)
+   * ② 图标色(.icon-btn)。两者的对比度门槛不同 —— 图标(非文本元素)只要 3:1,
+   * 正文要 4.5:1(WCAG AA SC 1.4.3)。#8d8778 此前是 3.58:1:图标够、正文不够,
+   * 破绽就藏在这里(20+ 处文字用它)。
+   *
+   * ⚠️ 这个值要同时对**三种背景**达标,不是两种:panel #ffffff(纸面)、
+   *    side #f7f5ef(侧栏)、bg #faf8f2(页面底)。#7a7466 只过了前两种
+   *    (4.65 / 4.26 / 4.38),侧栏与页面底都差一点 —— 第一版就栽在这里。
+   * 现取 #757060:4.95 / 4.54 / 4.66,三种全过线;与正文 #26251f 的层次差
+   * 仍有 3.10:1(比达标所需只多让出 0.21),「次要」的分层感基本没损失。
+   * 再深(#6f6a5b)虽然更保险,但层次差掉到 2.84,次要色会开始跟正文抢。
+   * 暗色主题 #8b919b 实测 4.77:1,已达标,未动。 */
+  --muted: #757060;
   --accent: #2f5a92;        /* 黛蓝:主按钮/选中条/光标/链接 */
   --accent-hover: #25487a;
   --accent-weak: #e8edf5;   /* 黛蓝淡底(聚焦圈/强调钮悬停) */
@@ -906,6 +918,15 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   line-height: 1.9;
   font-family: var(--mono);
   font-size: 14px;
+  /* 正文框聚焦反馈。写作时焦点必然落在正文上(标题只在开头点一下),
+   * 此前这里既无 :focus 也无 :focus-within,点进去与没点进去**完全一样**
+   * ——而标题框是会亮下划线的,两处不一致反而让人以为没聚焦。
+   * 用极轻的暖纸底而非焦点圈:写作区占满整屏,一圈扩散式高亮太吵。 */
+  transition: background .15s, box-shadow .15s;
+}
+.edit-body:focus, .edit-body:focus-within {
+  background: color-mix(in srgb, var(--hover) 55%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-weak);
 }
 .edit-foot {
   display: flex; align-items: center; gap: 12px;
