@@ -21,7 +21,7 @@ const UI = join(ROOT, 'public', 'js', 'ui.js');
 /** ctx 里当前提供的字段(与 ui.js 里 `const ctx = {...}` 同步)。
  *  ★ 加新注入项时,**必须**同时更新这里 —— 否则下面的「feature 只用已注入字段」
  *    用例会红,提前拦住「feature 引用了不存在的 ctx 字段」。 */
-const CTX_KEYS = ['dom', 'icons', 'toast', 'modal', 'store', 'markDirty', 'copyText', 'downloadBytes',
+const CTX_KEYS = ['dom', 'icons', 'toast', 'modal', 'store', 'markDirty', 'copyText', 'downloadBytes', 'downloadUrl',
   'saveAll', 'resetStatusPriority', 'stopIdleTimer', 'enterApp', 'api', 'session', 'vault', 'Library',
   'fmtTime', 'showEmpty', 'closeDrawer', 'renderMarkdown',
   // 本文件私有、但 shell.js 需要的基础设施

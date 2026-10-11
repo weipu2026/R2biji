@@ -993,9 +993,9 @@ const MUTANTS = [
   {
     label: 'isImageName 恒真(所有附件都当图片去贴)',
     file: 'public/js/features/note.js',
-    from: `  return IMAGE_EXT.has((String(name).split('.').pop() || '').toLowerCase());`,
+    from: `  return guessMime(String(name)).startsWith('image/');`,
     to: `  return true; // MUTANT`,
-    expect: 'isImageName 只看扩展名',
+    expect: 'isImageName 以 guessMime 为单一来源',
   },
   {
     label: 'guessMime 丢掉非图类型(下载得到 octet-stream)',
@@ -1010,6 +1010,121 @@ const MUTANTS = [
     from: `<input id="attInput" type="file" multiple hidden>`,
     to: `<input id="attInput" type="file" accept="image/*" multiple hidden>`,
     expect: '附件入口放开类型限制',
+  },
+
+  /* ---------- 2026-10-11 审计修复(无障碍 / 并发 / 顺序 / 冗余) ---------- */
+  {
+    label: '.blk-copy 聚焦时不再置 opacity:1(元素连同焦点圈一起隐形)',
+    file: 'public/css/style.css',
+    from: `.blk-copy:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }`,
+    to: `.blk-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }`,
+    expect: 'A1:.blk-copy 聚焦时必须可见',
+  },
+  {
+    label: '.blk-copy 整条焦点规则被删(反向扫描必须抓到,列举式的旧断言抓不到)',
+    file: 'public/css/style.css',
+    from: `
+.blk-copy:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }`,
+    to: ``,
+    expect: 'A1(反向扫描)',
+  },
+  {
+    label: '.edit-body 聚焦反馈退回几乎不可见的 tint(实测浅 1.06 / 暗 1.01)',
+    file: 'public/css/style.css',
+    from: `.edit-body:focus {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}`,
+    to: `.edit-body:focus {
+  background: color-mix(in srgb, var(--hover) 55%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent-weak);
+}`,
+    expect: 'A9:.edit-body 聚焦反馈必须达标',
+  },
+  {
+    label: '悬停/置顶底上的 .cat-count 不再提亮(掉回 4.42 / 4.21)',
+    file: 'public/css/style.css',
+    from: `.cat-item:hover .cat-count,
+.cat-item.pinned:not(.active) .cat-count { color: var(--text); }`,
+    to: ``,
+    expect: 'P3:--muted 落在深底上的次要文字',
+  },
+  {
+    label: '搜索结果摘要悬停底上不再提亮(掉回 4.42)',
+    file: 'public/css/style.css',
+    from: `.search-item:hover .search-item-snippet { color: var(--text); }`,
+    to: ``,
+    expect: 'P3:--muted 落在深底上的次要文字',
+  },
+  {
+    label: '编辑态附件删除按钮丢掉统一焦点圈',
+    file: 'public/css/style.css',
+    from: `
+.att-del:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }`,
+    to: ``,
+    expect: 'P3:编辑态附件删除按钮纳入统一焦点圈',
+  },
+  {
+    label: '触屏笔记列图钉退回 8px(两列差 2px,图钉不在同一条竖线)',
+    file: 'public/css/style.css',
+    from: `  .note-item .pin-slot { margin-right: 10px; }`,
+    to: `  .note-item .pin-slot { margin-right: 8px; }`,
+    expect: 'P3:触屏两列图钉保留 2px 补偿',
+  },
+  {
+    label: 'downloadAttachment 去掉并发守卫(双击重复解密 + objectURL 泄漏)',
+    file: 'public/js/features/note.js',
+    from: `  if (attLoading.has(att.file)) return;
+  attLoading.add(att.file);
+  try {
+    let url = map.get(att.file);`,
+    to: `  try {
+    let url = map.get(att.file);`,
+    expect: 'P2:downloadAttachment 必须有并发守卫',
+  },
+  {
+    label: 'note.js 下载退回内联建锚点(不再复用 ctx.downloadUrl)',
+    file: 'public/js/features/note.js',
+    from: `    ctx.downloadUrl(url, att.name);`,
+    to: `    const a = document.createElement('a');
+    a.href = url;
+    a.download = att.name;
+    a.click();`,
+    expect: 'P3:下载统一走 ctx.downloadUrl',
+  },
+  {
+    label: 'isImageName 改回自带的扩展名表(同一语义又变两处实现)',
+    file: 'public/js/features/note.js',
+    from: `  return guessMime(String(name)).startsWith('image/');`,
+    to: `  const IMAGE_EXT = new Set(['png']); // MUTANT:又另存一份
+  return IMAGE_EXT.has(String(name));`,
+    expect: 'B4:isImageName 以 guessMime 为单一来源',
+  },
+  {
+    label: '远端锁定不再消费回传的 dropped(本端未保存改动被静默丢弃)',
+    file: 'public/js/ui.js',
+    from: `    Promise.resolve(lockNow(ctx, { broadcast: false, confirmDiscard: false }))
+      .then((n) => n > 0 && toast(\`已在别处锁定 · \${n} 个分类的改动没能存上\`, 'warn'))
+      .catch(() => {});`,
+    to: `    lockNow(ctx, { broadcast: false, confirmDiscard: false });`,
+    expect: 'P3:远端锁定也要消费回传的 dropped',
+  },
+  {
+    label: '老板键挪回 dialog[open] 守卫之后(弹窗开着时失效)',
+    file: 'public/js/features/shell.js',
+    from: `    if (ctx.store.get('lockMode')) return;
+    /* Ctrl/⌘ + Shift + L = 立即锁定(「老板键」)。`,
+    to: `    if (ctx.store.get('lockMode')) return;
+    if (document.querySelector('dialog[open]')) return;
+    /* Ctrl/⌘ + Shift + L = 立即锁定(「老板键」)。`,
+    expect: 'B1:老板键必须排在',
+  },
+  {
+    label: '老板键的 promise 链丢掉 .catch(会冒泡成 unhandledrejection)',
+    file: 'public/js/features/shell.js',
+    from: `        .catch(() => { /* 锁定异常不该冒泡成 unhandledrejection(审计 P3) */ });
+`,
+    to: ``,
+    expect: 'B1:Ctrl/⌘+Shift+L 锁定',
   },
 
 ];

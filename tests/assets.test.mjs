@@ -175,3 +175,29 @@ test('P3:两列图钉必须落在同一条竖线上(外距要补偿 padding-righ
   assert.equal(catPad + catSlot, notePad + noteSlot,
     `两列的图钉竖线必须一致:分类 ${catPad}+${catSlot} vs 笔记 ${notePad}+${noteSlot}`);
 });
+
+test('P3:触屏两列图钉也要落在同一条竖线(padding 没变,补偿必须保留)', () => {
+  /* ★ 2026-10-11 审计 P3:上一条只覆盖桌面 —— 触屏那条规则此前把两列 margin-right 一律写成
+   *   8px,而行的 padding-right 并没有跟着变(仍是 cat 10 / note 8),于是笔记列图钉偏右 2px,
+   *   且**没有任何断言覆盖**(正则撞不到合并选择器)。现两列分别写值,这里补上等式。 */
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  const mq = /@media \(hover: none\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(mq, '必须存在 (hover:none) 媒体查询');
+  const body = mq[1];
+  const globalN = (re, label) => {
+    const m = re.exec(css);
+    assert.ok(m, `解析不出 ${label}`);
+    return Number(m[1]);
+  };
+  const inBody = (re, label) => {
+    const m = re.exec(body);
+    assert.ok(m, `(hover:none) 里解析不出 ${label}`);
+    return Number(m[1]);
+  };
+  const catPad = globalN(/\.cat-item\s*\{[^}]*padding:\s*7px\s+(\d+)px/, '分类行 padding-right');
+  const notePad = globalN(/\.note-item\s*\{[^}]*padding:\s*7px\s+(\d+)px\s+7px/, '笔记行 padding-right');
+  const catSlot = inBody(/\.cat-item\s*\.pin-slot\s*\{\s*margin-right:\s*(\d+)px/, '触屏分类列 .pin-slot');
+  const noteSlot = inBody(/\.note-item\s*\.pin-slot\s*\{\s*margin-right:\s*(\d+)px/, '触屏笔记列 .pin-slot');
+  assert.equal(catPad + catSlot, notePad + noteSlot,
+    `触屏两列图钉也必须同线:分类 ${catPad}+${catSlot} vs 笔记 ${notePad}+${noteSlot}`);
+});

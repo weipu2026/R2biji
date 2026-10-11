@@ -146,6 +146,19 @@ test('B1:Ctrl/⌘+Shift+L 锁定:要求 shiftKey、confirmDiscard:false、锁完
     '老板键必须传 confirmDiscard:false,否则会被确认框拦住');
   assert.match(seg, /n\s*>\s*0\s*&&\s*ctx\.toast\(/,
     '有未保存改动时(n > 0)锁完必须**如实告知**被放弃的改动,不能静默丢数据');
+  // ★ 2026-10-11 审计 P3:promise 链必须有 .catch,否则 lockNow 抛错会冒泡成 unhandledrejection
+  assert.match(seg, /\.catch\(/, '老板键的 promise 链必须有 .catch(不能裸 .then)');
+});
+
+test('B1:老板键必须排在「有弹窗打开就 return」的全局守卫之前(紧急时刻也能锁)', () => {
+  /* ★ 2026-10-11 审计 P2:老板键的核心场景是「有人走过来」的紧急时刻,而那一刻屏幕上
+   *   完全可能正开着弹窗(回收站/版本历史/密码生成器)。此前它排在 dialog[open] 守卫
+   *   之后 → 被静默拦掉,等于最需要它的时候失效。showLock 内部本就会 dlg.close()。 */
+  const iBoss = shellJs.indexOf("e.shiftKey && e.key.toLowerCase() === 'l'");
+  const iGuard = shellJs.indexOf("document.querySelector('dialog[open]')");
+  assert.ok(iBoss > -1, '必须能定位老板键判定');
+  assert.ok(iGuard > -1, '必须能定位 dialog[open] 全局守卫');
+  assert.ok(iBoss < iGuard, '老板键必须在 dialog[open] 守卫**之前** —— 否则弹窗开着时它不生效');
 });
 
 test('B1:ui.js 的 lockNow 包装器必须透传选项(否则 confirmDiscard 被静默吞掉)', () => {
@@ -182,11 +195,15 @@ test('B1:lockNow 回传被放弃的未保存分类数(真跑一遍,并验证取�
 
 /* ---------- B4 非图片附件 ---------- */
 
-test('B4:isImageName 只看扩展名,大小写无关,无扩展名不崩', () => {
-  const extSrc = /const IMAGE_EXT = new Set\(\[[^\]]*\]\);/.exec(noteJs);
+test('B4:isImageName 以 guessMime 为单一来源(不再另存扩展名表)', () => {
+  /* ★ 2026-10-11 审计 P3:此前 isImageName 自带 IMAGE_EXT 集合,与 guessMime 的图片段是
+   *   「同一语义两处实现」——改一处忘另一处就会错配。现收敛:凡 MIME 以 image/ 开头即图片。 */
   const fnSrc = /function isImageName\(name\)\s*\{[\s\S]*?\n\}/.exec(noteJs);
-  assert.ok(extSrc && fnSrc, '必须能取出 IMAGE_EXT 与 isImageName');
-  const isImageName = new Function(`${extSrc[0]}\n${fnSrc[0]}\n; return isImageName;`)();
+  const mimeSrc = /function guessMime\(name\)\s*\{[\s\S]*?\n\}/.exec(noteJs);
+  assert.ok(fnSrc && mimeSrc, '必须能取出 isImageName 与 guessMime');
+  assert.doesNotMatch(noteJs, /const IMAGE_EXT/, '不得再另存 IMAGE_EXT —— 同一语义两处实现');
+  assert.match(fnSrc[0], /guessMime\(/, 'isImageName 必须基于 guessMime 判定');
+  const isImageName = new Function(`${mimeSrc[0]}\n${fnSrc[0]}\n; return isImageName;`)();
   assert.equal(isImageName('a.PNG'), true, '大写扩展名也要认');
   assert.equal(isImageName('照片.jpeg'), true);
   assert.equal(isImageName('data.pdf'), false, 'PDF 不是图片');
@@ -210,4 +227,89 @@ test('B4:附件入口放开类型限制,chip 按类型分流', () => {
     '图片走预览、其余走下载');
   assert.match(uiJs, /file: '<svg/, '图标表必须有 file 图标');
   assert.match(shellJs, /f\.type\.startsWith\('image\/'\)/, '粘贴仍只接图片(剪贴板里本来也只有图片文件)');
+});
+
+/* ==================== 2026-10-11 审计修复的护栏 ==================== */
+
+test('A1(反向扫描):凡 <button> 的自定义类都必须有焦点圈', () => {
+  /* ★ 审计 P3:此前 A1 是**硬编码列举** 5 个类 —— 于是 .blk-copy 这种「是 <button>、
+   *   class 不含 .btn」的漏网永远扫不到(它确实漏了)。改反向扫描:从源码里抠出所有
+   *   「createElement('button') 之后紧跟的 className」,逐个要求 CSS 里有焦点规则。 */
+  const classes = new Set();
+  const re = /createElement\('button'\)[\s\S]{0,240}?className\s*=\s*'([^']+)'/g;
+  for (const f of ['js/features/note.js', 'js/features/sidebar.js', 'js/features/shell.js', 'js/ui.js']) {
+    const src = read(f);
+    let m;
+    while ((m = re.exec(src))) classes.add(m[1].split(/\s+/)[0]);
+  }
+  assert.ok(classes.size >= 2, `反向扫描应至少扫到 2 个按钮类(实际 ${classes.size})—— 正则失效会静默漏检`);
+  for (const cls of classes) {
+    if (cls === 'btn') continue;   // .btn 系列已由 style.css 的通用焦点规则覆盖
+    const safe = cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');   // 拼进 RegExp 必须转义
+    assert.match(css, new RegExp(`\\.${safe}:focus`),
+      `按钮类 .${cls} 没有焦点规则 —— Tab 到它身上看不到焦点`);
+  }
+});
+
+test('A1:.blk-copy 聚焦时必须可见(否则 opacity:0 连焦点圈一起隐形)', () => {
+  const blk = /\.blk-copy:focus-visible\s*\{([^}]*)\}/.exec(css);
+  assert.ok(blk, '.blk-copy 必须有 :focus-visible 规则');
+  assert.match(blk[1], /opacity:\s*1/, '聚焦时必须把 opacity 提到 1 —— opacity 作用于整个渲染层,含 outline');
+  assert.match(blk[1], /outline:/, '同时要给出可见的焦点圈');
+});
+
+test('A9:.edit-body 聚焦反馈必须达标(整圈 2px 黛蓝内框,不再用几乎不可见的 tint)', () => {
+  /* ★ 审计 P2 实测:旧写法 tint 合成后浅色 1.06:1、暗色 1.01:1(--hover 与 --panel 几乎同色),
+   *   左内线 1.18/1.28 —— 全都够不到 WCAG 非文本 3:1。新写法整圈 2px --accent:对白 7.00 / 对暗 6.07。 */
+  const f = /\.edit-body:focus\s*\{([^}]*)\}/.exec(css);
+  assert.ok(f, '必须有 .edit-body:focus 规则');
+  assert.match(f[1], /box-shadow:\s*inset 0 0 0 2px var\(--accent\)/,
+    '必须用整圈 2px 黛蓝内框(inset 不占布局、不外扩,且两种主题都达标)');
+  // ⚠️ 判据必须落在**属性声明**上,不能落在「文件里出现过 color-mix」——实现里那条
+  //    新注释就提到了这个词,裸 /color-mix\(/ 会被自己的注释喂成假红(2026-10-11 实测)。
+  assert.doesNotMatch(css, /background(-color)?:\s*color-mix/, '不得再用 color-mix 做 tint(实测不达标,且全仓唯一一处无 @supports 兜底)');
+  assert.doesNotMatch(css, /\.edit-body:focus-within/, 'textarea 无子元素,:focus-within 恒等价于 :focus(冗余)');
+});
+
+test('P3:--muted 落在深底上的次要文字提到 --text(纸面底之外仍要可读)', () => {
+  const catCount = /\.cat-item:hover \.cat-count,\n\.cat-item\.pinned:not\(\.active\) \.cat-count\s*\{([^}]*)\}/.exec(css);
+  assert.ok(catCount, '.cat-count 的悬停/置顶态必须有单独规则');
+  assert.match(catCount[1], /color:\s*var\(--text\)/, '悬停(4.42)/置顶(4.21)底上都不到 4.5,必须提到 --text');
+  assert.match(css, /\.search-item:hover \.search-item-snippet\s*\{[^}]*var\(--text\)/,
+    '搜索结果摘要悬停时底变 --hover,必须提到 --text');
+});
+
+test('P3:编辑态附件删除按钮纳入统一焦点圈', () => {
+  assert.match(css, /\.att-del:focus-visible\s*\{[^}]*outline:\s*2px/, '.att-del 必须有焦点圈(别只剩 UA 默认圈)');
+});
+
+test('P3:触屏两列图钉保留 2px 补偿', () => {
+  const mq = /@media \(hover: none\)\s*\{([\s\S]*?)\n\}/.exec(css);
+  assert.ok(mq, '必须存在 (hover:none) 媒体查询');
+  const cat = /\.cat-item \.pin-slot\s*\{\s*margin-right:\s*(\d+)px/.exec(mq[1]);
+  const note = /\.note-item \.pin-slot\s*\{\s*margin-right:\s*(\d+)px/.exec(mq[1]);
+  assert.ok(cat && note, '(hover:none) 里必须能解析出两列 .pin-slot');
+  assert.ok(Number(note[1]) > Number(cat[1]),
+    `笔记列必须比分类列多补偿(margin-right),实际 cat=${cat[1]} note=${note[1]}`);
+});
+
+test('P2:downloadAttachment 必须有并发守卫(否则双击重复解密 + objectURL 泄漏)', () => {
+  const src = /async function downloadAttachment\(ctx, att\)\s*\{[\s\S]*?\n\}/.exec(noteJs);
+  assert.ok(src, '必须能取出 downloadAttachment');
+  const body = src[0];
+  assert.match(body, /if \(attLoading\.has\(att\.file\)\) return;/, '必须先查 attLoading 守卫');
+  assert.match(body, /attLoading\.add\(att\.file\)/, '必须登记在途');
+  assert.match(body, /finally\s*\{[\s\S]*attLoading\.delete\(att\.file\)/, '必须 finally 释放,异常也不能卡住');
+});
+
+test('P3:下载统一走 ctx.downloadUrl(消掉内联锚点重复)', () => {
+  assert.match(uiJs, /function downloadUrl\(url, fileName\)\s*\{/, 'ui.js 必须有 downloadUrl');
+  assert.match(uiJs, /^\s*downloadUrl,/m, 'ctx 必须挂上 downloadUrl');
+  assert.match(noteJs, /ctx\.downloadUrl\(url, att\.name\)/, 'note.js 必须复用它(不再内联建锚点)');
+});
+
+test('P3:远端锁定也要消费回传的 dropped(别静默丢本端改动)', () => {
+  const seg = /if \(msg\.type === 'locked'\)\s*\{([\s\S]*?)\n  \}/.exec(uiJs);
+  assert.ok(seg, '必须能取出 onTabMessage 的 locked 分支');
+  assert.match(seg[1], /\.then\(\(n\) => n > 0 && toast\(/, '必须消费 lockNow 的返回值并提示');
 });
