@@ -266,12 +266,13 @@ async function openLightbox(ctx, att, url) {
   });
 }
 
-/** 常见图片扩展名。附件是不是图片**只看扩展名**(零内容解析)—— 由它决定
- *  「点开是预览还是下载」以及 chip 用哪枚图标。 */
-const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'ico']);
-
+/** 附件是不是图片**只看扩展名**(零内容解析)—— 由它决定「点开是预览还是下载」与 chip 图标。
+ *  ★ 2026-10-11 审计 P3:此前这里另存一份 IMAGE_EXT 集合,与 guessMime 的图片段构成
+ *    「同一语义两处实现」(当时两份一致,但改一处忘另一处就会错配:判成图片却拿到
+ *    octet-stream 去贴 <img>,或判成非图片却带 image/* 去下载)。现收敛为**单一来源**:
+ *    以 guessMime 的 EXT→MIME 表为准,凡 MIME 以 image/ 开头即为图片。 */
 function isImageName(name) {
-  return IMAGE_EXT.has((String(name).split('.').pop() || '').toLowerCase());
+  return guessMime(String(name)).startsWith('image/');
 }
 
 /** 非图片附件:解密后直接下载。
@@ -280,6 +281,13 @@ function isImageName(name) {
 async function downloadAttachment(ctx, att) {
   const S = ctx.store;
   const map = S.get('objectUrls');
+  /* ★ 2026-10-11 审计 P2:此前无并发守卫 —— 解密大附件有延迟、下载路径又没有任何忙态
+   *   反馈,用户「点了没反应再点一次」就会:两次 map.get 都是 undefined → 两次
+   *   readAttachment + 两次 createObjectURL;而第二次 map.set 覆盖第一次,于是**第一个
+   *   url 不在 map 里了**,releaseSession 的 revoke(遍历 map)扫不到它 → 泄漏到页面卸载。
+   *   复用与 toggleAttachmentImage **同一个** attLoading 集合,把同一附件的两条路径串行化。 */
+  if (attLoading.has(att.file)) return;
+  attLoading.add(att.file);
   try {
     let url = map.get(att.file);
     if (!url) {
@@ -287,21 +295,13 @@ async function downloadAttachment(ctx, att) {
       url = URL.createObjectURL(new Blob([bytes], { type: guessMime(att.name) }));
       map.set(att.file, url);
     }
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = att.name;
-    // 部分浏览器要求锚点在文档里才认 download;测试替身没有 body 时直接点
-    if (document.body && typeof document.body.appendChild === 'function') {
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-    } else {
-      a.click();
-    }
+    ctx.downloadUrl(url, att.name);
     ctx.toast(`已下载「${att.name}」`);
   } catch (e) {
     // 附件是永久类错误(密文坏了 / 被外部改过),重试无用 —— 如实说是解密失败
     ctx.toast(`附件解密失败:${e.message}`, 'error');
+  } finally {
+    attLoading.delete(att.file);
   }
 }
 

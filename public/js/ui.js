@@ -126,6 +126,7 @@ const ctx = {
   markDirty,
   copyText,
   downloadBytes,
+  downloadUrl,
   saveAll,
   resetStatusPriority,
   stopIdleTimer,
@@ -653,7 +654,15 @@ function onTabMessage(msg) {
   // 退出登录是共享的(localStorage 会话),别的标签页锁了,这里也得锁
   // 本标签页已经在锁屏时**不要**再走一遍 lockNow:showLock 会清空 pwInput 与
   // lockErr —— 另一个标签页锁屏时,正在这里敲主密码的人会被清掉重打(2026-10-06 审计 P3)
-  if (msg.type === 'locked') { if (!S.lib) return; lockNow(ctx, { broadcast: false, confirmDiscard: false }); return; }
+  if (msg.type === 'locked') {
+    if (!S.lib) return;
+    // 别的标签页锁了 → 本端也锁。lockNow 会先尽力保存一次,并回传确实没存上的分类数
+    // (★ 2026-10-11 审计 P3:此前不看返回值 —— 本端未保存的改动被静默丢弃、用户毫不知情)
+    Promise.resolve(lockNow(ctx, { broadcast: false, confirmDiscard: false }))
+      .then((n) => n > 0 && toast(`已在别处锁定 · ${n} 个分类的改动没能存上`, 'warn'))
+      .catch(() => {});
+    return;
+  }
   if (!S.lib) return;
 
   if (msg.type === 'cats-changed') { rescanFromTabs(); return; }
@@ -1022,6 +1031,23 @@ function fmtBytes(n) {
   let i = 0;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
   return `${i === 0 || v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/** 用已有 URL(通常是 objectURL)触发一次下载。
+ *  ★ 2026-10-11 审计 P3:这段「建锚点 → append → click → remove」此前在 note.js 里内联
+ *    写着。统一到这里:部分浏览器要求锚点在文档里才认 download,所以先 append 再点;
+ *    测试替身没有 body 时退化为直接 click。**URL 生命周期由调用方管**(本函数不 revoke)。 */
+function downloadUrl(url, fileName) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  if (document.body && typeof document.body.appendChild === 'function') {
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } else {
+    a.click();
+  }
 }
 
 function downloadBytes(bytes, fileName, mime = 'application/zip') {

@@ -322,6 +322,26 @@ function bindEvents(ctx) {
      *     (模态框自己的 Enter/Esc 走 dialog 的原生行为,不受这里影响)。
      *   放在最前面整类放行,而不是逐个分支各自判 —— 后面新增快捷键不会再漏。 */
     if (ctx.store.get('lockMode')) return;
+    /* Ctrl/⌘ + Shift + L = 立即锁定(「老板键」)。
+     * ★ 2026-10-11:私密笔记最常撞上的场景是「有人走过来」—— 而此前锁屏只有一个入口
+     *   (右上角那枚按钮),伸手去点太慢、动作也太显眼。给一条纯键盘的退路。
+     * ★ confirmDiscard:false 是**必需**的,不是图省事:lockNow 默认在有未保存改动时弹
+     *   确认框,而那个框唯一的「取消」分支就是**不锁定** —— 在「有人走过来」的当口把
+     *   正文继续留在屏幕上,恰恰废掉了老板键的全部意义。这里不给这个选择。
+     *   改动仍会先尽力保存一次(lockNow 内部已 await);确实没存上的,锁完如实说
+     *   ——「快」但不「瞒」。
+     * ★ 2026-10-11 审计 P2:本分支必须排在下面那条 dialog[open] 全局守卫**之前** ——
+     *   老板键的核心场景恰是紧急时刻,而那一刻屏幕上完全可能正开着弹窗(回收站 /
+     *   版本历史 / 移动到分类 / 密码生成器)。排在守卫之后会被静默拦掉,等于在最需要
+     *   它的时候失效。showLock 内部本就会 dlg.close() 关掉弹窗,技术上毫无障碍。
+     *   lockMode 守卫仍留在更前面(锁屏态本来就没什么可锁的)。 */
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+      e.preventDefault();
+      Promise.resolve(ctx.lockNow({ confirmDiscard: false }))
+        .then((n) => n > 0 && ctx.toast(`已锁定 · ${n} 个分类的改动没能存上,已放弃(服务器上的是完整版本)`, 'warn'))
+        .catch(() => { /* 锁定异常不该冒泡成 unhandledrejection(审计 P3) */ });
+      return;   // 已接管:不再往下走,免得还去命中别的分支
+    }
     if (document.querySelector('dialog[open]')) return;
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
       e.preventDefault();
@@ -336,22 +356,7 @@ function bindEvents(ctx) {
       e.preventDefault();
       $('searchBox').focus();
       $('searchBox').select();
-    }
-    /* Ctrl/⌘ + Shift + L = 立即锁定(「老板键」)。
-     * ★ 2026-10-11:私密笔记最常撞上的场景是「有人走过来」—— 而此前锁屏只有一个入口
-     *   (右上角那枚按钮),伸手去点太慢、动作也太显眼。给一条纯键盘的退路。
-     *   位置在 lockMode 守卫之后:锁屏态本就直接 return(没什么可锁的),不重复接管。
-     * ★ confirmDiscard:false 是**必需**的,不是图省事:lockNow 默认在有未保存改动时弹
-     *   确认框,而那个框唯一的「取消」分支就是**不锁定** —— 在「有人走过来」的当口把
-     *   正文继续留在屏幕上,恰恰废掉了老板键的全部意义。这里不给这个选择。
-     *   改动仍会先尽力保存一次(lockNow 内部已 await);确实没存上的,锁完如实说
-     *   ——「快」但不「瞒」。 */
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
-      e.preventDefault();
-      Promise.resolve(ctx.lockNow({ confirmDiscard: false }))
-        .then((n) => n > 0 && ctx.toast(`已锁定 · ${n} 个分类的改动没能存上,已放弃(服务器上的是完整版本)`, 'warn'));
-    }
-    // Escape 收起搜索面板(顺带清空输入)。模态框未开时面板才可能可见,
+    }    // Escape 收起搜索面板(顺带清空输入)。模态框未开时面板才可能可见,
     // 二者不会同时在前台,不需要 stopPropagation 去拦别的处理器
     if (e.key === 'Escape' && !$('searchPanel').hidden) {
       ctx.closeSearch();
