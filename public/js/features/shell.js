@@ -337,6 +337,20 @@ function bindEvents(ctx) {
       $('searchBox').focus();
       $('searchBox').select();
     }
+    /* Ctrl/⌘ + Shift + L = 立即锁定(「老板键」)。
+     * ★ 2026-10-11:私密笔记最常撞上的场景是「有人走过来」—— 而此前锁屏只有一个入口
+     *   (右上角那枚按钮),伸手去点太慢、动作也太显眼。给一条纯键盘的退路。
+     *   位置在 lockMode 守卫之后:锁屏态本就直接 return(没什么可锁的),不重复接管。
+     * ★ confirmDiscard:false 是**必需**的,不是图省事:lockNow 默认在有未保存改动时弹
+     *   确认框,而那个框唯一的「取消」分支就是**不锁定** —— 在「有人走过来」的当口把
+     *   正文继续留在屏幕上,恰恰废掉了老板键的全部意义。这里不给这个选择。
+     *   改动仍会先尽力保存一次(lockNow 内部已 await);确实没存上的,锁完如实说
+     *   ——「快」但不「瞒」。 */
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
+      e.preventDefault();
+      Promise.resolve(ctx.lockNow({ confirmDiscard: false }))
+        .then((n) => n > 0 && ctx.toast(`已锁定 · ${n} 个分类的改动没能存上,已放弃(服务器上的是完整版本)`, 'warn'));
+    }
     // Escape 收起搜索面板(顺带清空输入)。模态框未开时面板才可能可见,
     // 二者不会同时在前台,不需要 stopPropagation 去拦别的处理器
     if (e.key === 'Escape' && !$('searchPanel').hidden) {

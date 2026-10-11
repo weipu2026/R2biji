@@ -136,7 +136,10 @@ export function releaseSession(store, { api, session }) {
  * 锁定 = 退出登录。
  * @param {{broadcast?:boolean, confirmDiscard?:boolean}} [opt]
  *   broadcast:false      = 收到别的标签页的「锁定」通知,不再回声;
- *   confirmDiscard:false = 远端锁定(另一端已结束会话),不弹确认直接锁。
+ *   confirmDiscard:false = 远端锁定(另一端已结束会话)不弹确认直接锁;
+ *                          老板键同样传 false —— 确认框的「取消」分支会把它废掉。
+ * @returns {Promise<number|undefined>} 锁定后**被放弃**的未保存分类数(0 = 全都存上了);
+ *   用户在确认框里选了「暂不锁定」时返回 undefined(什么都没发生)。调用方可据此如实提示。
  */
 export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } = {}) {
   const S = ctx.store;
@@ -163,12 +166,17 @@ export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } =
     });
     if (!yes) return;
   }
+  /* ★ 走到这里,还没存上的改动会被下面的 releaseSession → clearAllDirty 丢掉。
+   *   把数量**回传给调用方**:没有确认框的入口(老板键 / 远端锁定)也得能如实告知,
+   *   否则就是「静默丢数据」—— 恰是本项目反复修过的 P1 那一类(2026-10-11 加)。 */
+  const dropped = S.get('dirty').size;
   // 先通知再清:锁定会清掉共享的 localStorage 会话,不通知的话
   // 另一个标签页还开着就等于「锁定」没生效(它的内存里还留着令牌与明文)
   if (broadcast) S.get('tabs')?.send({ type: 'locked' });
   releaseSession(S, { api: ctx.api, session: ctx.session });
   ctx.stopIdleTimer();
   showLock(ctx, S.get('vaultJson') ? 'unlock' : 'setup');
+  return dropped;
 }
 
 /**
