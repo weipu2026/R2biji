@@ -252,6 +252,7 @@ export async function openCategory(ctx, name) {
   ctx.dom.byId('activeCatName').textContent = name;
   renderCategoryList(ctx);
   renderNoteList(ctx);
+  scrollActiveNoteIntoView(ctx); // 打开分类会选中第一篇 —— 列表若停在别处,把它带回来
   ctx.closeDrawer(); // 移动端:选完分类收起抽屉,把屏幕还给内容
   if (openId) {
     ctx.renderReadView();
@@ -345,7 +346,7 @@ export async function deleteCategory(ctx) {
     renderCategoryList(ctx);
     renderNoteList(ctx);
     ctx.dom.byId('activeCatName').textContent = '未选择分类';
-    ctx.showEmpty('从左侧选择一个分类');
+    ctx.showEmpty('从左侧选择一个分类', null, 'sparkle', '点左上角的菜单按钮打开分类列表');
     ctx.toast('分类已删除(旧版本已自动备份到服务器)');
   } catch (e) {
     ctx.toast(e.message, 'error');
@@ -467,6 +468,18 @@ export function renderNoteList(ctx) {
   restoreFocusKey(ul, keepFocus);
 }
 
+/** 把当前选中的笔记行滚进视野。
+ *  ★ 2026-10-11:此前只有 J/K 翻篇会滚(见 moveNoteSelection),而「新建笔记 / 搜索跳转 /
+ *    点侧栏」都不滚 —— 新建笔记的 order 恒为「末位 +1000」(format.js 升序),于是它落在
+ *    列表最底,而侧栏停在原处:用户写完一篇,侧栏里根本看不见刚建的那条(高亮在屏幕外)。
+ *    凡改变 activeNoteId 的入口都该滚一次,统一收在这里。 */
+function scrollActiveNoteIntoView(ctx) {
+  const ul = ctx.dom.byId('noteList');
+  if (!ul || typeof ul.querySelector !== 'function') return;
+  const li = ul.querySelector('.note-item.active');
+  if (li && typeof li.scrollIntoView === 'function') li.scrollIntoView({ block: 'nearest' });
+}
+
 export function openNote(ctx, noteId) {
   const S = ctx.store;
   ctx.closeDrawer(); // 移动端:选完笔记收起抽屉
@@ -476,6 +489,7 @@ export function openNote(ctx, noteId) {
   if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }
   S.patch({ activeNoteId: noteId, editing: false });
   renderNoteList(ctx);
+  scrollActiveNoteIntoView(ctx);
   ctx.renderReadView();
 }
 
@@ -508,8 +522,6 @@ export function moveNoteSelection(ctx, delta) {
   if (next < 0 || next >= notes.length) return false;
   if (next === cur) return false;
   openNote(ctx, notes[next].id);
-  // 键盘走得比眼快,把新选中的那条滚进视野(侧栏可能很长)
-  const li = ctx.dom.byId('noteList').querySelector('.note-item.active');
-  li?.scrollIntoView({ block: 'nearest' });
+  // 键盘走得比眼快 —— 滚动已由 openNote 里的 scrollActiveNoteIntoView 统一负责,不再重复
   return true;
 }

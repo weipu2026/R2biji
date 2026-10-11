@@ -146,6 +146,19 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   outline: none;
   box-shadow: var(--ring);
 }
+/* 上面这条只覆盖「本来就是按钮」的 6 类。下面这几类**同样可聚焦**,却一个焦点提示都没有:
+ *   .cat-item / .note-item / .search-item —— clickable() 装的 role=option + tabIndex=0
+ *   .att-chip —— 是 <button>,但 class 不含 .btn,所以上面那条漏掉它
+ *   .secret —— tabindex=0 + role=button(render.js 给行内打码 span 加的)
+ * 键盘用户按 Tab 能走到它们身上,屏幕上却看不出焦点在哪(2026-10-11 盘点)。
+ * 刻意用 outline 而非 box-shadow:列表行的选中态自己就用了 box-shadow
+ * (inset 3px 0 0 var(--accent)),再叠一条 ring 会把它整个覆盖掉(左侧黛蓝条消失)。
+ * outline 不占布局、不参与 box-shadow 层叠,两者可以共存。 */
+.cat-item:focus-visible, .note-item:focus-visible,
+.search-item:focus-visible, .att-chip:focus-visible, .secret:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;   /* 画在内侧:相邻两行不会互相压住对方的圈 */
+}
 
 /* ---------- 通用按钮:主/次/幽灵/危险 四态成对 ---------- */
 
@@ -702,6 +715,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   line-height: 1;
 }
 .empty-deco svg { display: block; }
+/* 窄屏空状态的方位补充说明(由 ui.js 的 showEmpty 在 mobileHint 提供时追加) */
+.empty-sub { margin: 0; font-size: 12.5px; color: var(--muted); }
 
 /* 写作/阅读面板:通栏铺满内容区的「纸」,内部超出时纸面自滚 */
 #readView, #editView {
@@ -887,9 +902,13 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding: 10px;
   background: var(--panel);
 }
-.att-img img { max-width: 100%; max-height: 420px; display: block; border-radius: 3px; }
+.att-img img { max-width: 100%; max-height: 420px; display: block; border-radius: 3px; cursor: zoom-in; }
 .att-dl { display: inline-block; margin-top: 8px; color: var(--accent); text-decoration: none; font-size: 13px; }
 .att-dl:hover { text-decoration: underline; }
+
+/* 附件图片灯箱:在 <dialog> 里按可视区上限展示原图(见 note.js openLightbox) */
+.lightbox { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.lightbox img { max-width: 100%; max-height: 70vh; border-radius: var(--radius); display: block; }
 
 /* ---------- 编辑视图:分段式工具栏(一个描边容器,内嵌无框小签) ---------- */
 
@@ -930,6 +949,9 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .edit-foot {
   display: flex; align-items: center; gap: 12px;
+  /* 窄屏必换行:这一排有 等宽/添加图片/字数/长提示/保存/完成 六个元素,
+   * 手机(约 340px 可用宽)一行放不下,不换行就整排溢出纸面(2026-10-11)。 */
+  flex-wrap: wrap;
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
@@ -1170,6 +1192,9 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   #readTitle { font-size: 22px; }
   .read-actions { flex-wrap: wrap; }
   .edit-body { min-height: 220px; }
+  /* 手机没有 Ctrl+S / Ctrl+V 这套键盘操作,这行提示在窄屏是纯噪音 —— 直接收起,
+   * 把宽度还给按钮。桌面仍显示(那里它有用)。 */
+  .edit-hint { display: none; }
   .lock-card { margin: 16px; padding: 22px 18px; }
   .toast { left: 12px; right: 12px; transform: none; }
 }
@@ -1185,6 +1210,14 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     -webkit-backdrop-filter: none;
   }
   .blk-copy { opacity: .55; }
+  /* 触屏放大小目标:桌面 28px 的图标钮、26px 的编辑器小签,在手指下极易误触
+   * (尤其 4 枚悬浮钮挤在同一条胶囊里)。只放大触屏,桌面维持紧凑。
+   * 触屏下 .cat-btns/.note-btns 已改 static 常显,不再依赖浮层宽度,
+   * 所以放大不影响「两列图钉对齐」的净空等式(那条只约束桌面浮层)。 */
+  .icon-btn { width: 34px; height: 34px; }
+  .foot-icon { height: 38px; }
+  .ed-btn { height: 32px; min-width: 38px; }
+  .top-theme { width: 34px; height: 34px; }
   /* 触屏:按钮常显,没有浮层要躲 → 槽位的 34px 净空失去意义,收回 8px,
    * 把宽度还给分类名/笔记标题(窄屏上这 26px 很值) */
   .cat-item .pin-slot, .note-item .pin-slot { margin-right: 8px; }

@@ -121,7 +121,7 @@
       </aside>
 
       <main class="content">
-        <div id="emptyState" class="empty">从左侧选择一个分类</div>
+        <div id="emptyState" class="empty">正在载入…</div>
 
         <article id="readView" hidden>
           <div class="read-head">
@@ -161,8 +161,8 @@
             placeholder="正文…&#10;Markdown:# 标题 · **加粗** · *斜体* · ~~删除线~~ · ==高亮== · `代码` · - 列表"></textarea>
           <div class="edit-foot">
             <button id="btnMono" class="btn ghost small" aria-pressed="false" title="编辑器切换等宽字体(记住偏好)">等宽</button>
-            <button id="btnAddAtt" class="btn ghost small" title="也可以直接把图片粘贴到正文区(Ctrl+V)">添加图片</button>
-            <input id="attInput" type="file" accept="image/*" multiple hidden>
+            <button id="btnAddAtt" class="btn ghost small" title="可选任意文件;图片也可以直接 Ctrl+V 粘贴到正文区">添加附件</button>
+            <input id="attInput" type="file" multiple hidden>
             <span id="editCount" class="edit-count" title="正文字数(不含空白)"></span>
             <span class="edit-hint">Ctrl+S 保存(停笔 4 秒也会自动存);图片可直接 Ctrl+V 粘贴</span>
             <button id="btnSaveNow" class="btn primary small">保存</button>

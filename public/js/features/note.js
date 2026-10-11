@@ -137,7 +137,7 @@ export function bindReadSwipe(ctx) {
 export function renderReadView(ctx) {
   const $ = (id) => ctx.dom.byId(id);
   const note = ctx.activeNoteData();
-  if (!note) { ctx.showEmpty('从左侧选择一条笔记'); lastReadNoteId = null; return; }
+  if (!note) { ctx.showEmpty('从左侧选择一条笔记', null, 'sparkle', '点左上角的菜单按钮打开笔记列表'); lastReadNoteId = null; return; }
   $('emptyState').hidden = true;
   $('editView').hidden = true;
   const view = $('readView');
@@ -188,12 +188,16 @@ function renderReadAttachments(ctx, note) {
   head.textContent = '附件';
   box.appendChild(head);
   for (const att of note.attachments) {
+    const isImg = isImageName(att.name);
     const chip = document.createElement('button');
     chip.className = 'att-chip';
-    chip.innerHTML = ctx.icons.image + '<span class="att-name"></span>';
+    chip.innerHTML = (isImg ? ctx.icons.image : ctx.icons.file) + '<span class="att-name"></span>';
     chip.querySelector('.att-name').textContent = att.name;
-    chip.title = '点击解密并显示';
-    chip.addEventListener('click', () => toggleAttachmentImage(ctx, att, chip));
+    chip.title = isImg ? '点击解密并显示(可放大)' : '点击解密并下载';
+    chip.addEventListener('click', () => {
+      if (isImg) toggleAttachmentImage(ctx, att, chip);
+      else downloadAttachment(ctx, att);
+    });
     box.appendChild(chip);
   }
 }
@@ -220,6 +224,9 @@ async function toggleAttachmentImage(ctx, att, chip) {
     const img = document.createElement('img');
     img.src = url;
     img.alt = att.name;
+    // 点图进灯箱:原位那张被 max-height:420px 压着,放大才能看清细节
+    img.title = '点击放大查看原图';
+    img.addEventListener('click', () => openLightbox(ctx, att, url));
     wrap.appendChild(img);
     const dl = document.createElement('a');
     dl.href = url; dl.download = att.name; dl.textContent = '下载';
@@ -233,9 +240,79 @@ async function toggleAttachmentImage(ctx, att, chip) {
   }
 }
 
+/** 附件图片灯箱:点图放大看原尺寸。
+ *  ★ 2026-10-11:此前点 chip 只在原位插一张 max-height:420px 的图 —— 长图 / 证件 / 截图
+ *    会被压成一条,细节根本看不清,也没有任何放大手段(只能缩整页)。复用全应用共用的
+ *    <dialog>,大图落在 top layer 里,占满可视区。
+ *  用 custom 弹窗(只带一个「关闭」按钮):不借 confirm/prompt 的语义,免得 Esc 与按钮
+ *  落定值互相干扰。 */
+async function openLightbox(ctx, att, url) {
+  await ctx.modal({
+    type: 'custom',
+    title: att.name,
+    build: (body) => {
+      const wrap = document.createElement('div');
+      wrap.className = 'lightbox';
+      const img = document.createElement('img');
+      img.src = url;
+      img.alt = att.name;
+      wrap.appendChild(img);
+      const dl = document.createElement('a');
+      dl.href = url; dl.download = att.name; dl.textContent = '下载原图';
+      dl.className = 'att-dl';
+      wrap.appendChild(dl);
+      body.appendChild(wrap);
+    },
+  });
+}
+
+/** 常见图片扩展名。附件是不是图片**只看扩展名**(零内容解析)—— 由它决定
+ *  「点开是预览还是下载」以及 chip 用哪枚图标。 */
+const IMAGE_EXT = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'ico']);
+
+function isImageName(name) {
+  return IMAGE_EXT.has((String(name).split('.').pop() || '').toLowerCase());
+}
+
+/** 非图片附件:解密后直接下载。
+ *  ★ 2026-10-11 起附件不再限图片(见 index.html 的 #attInput)—— PDF / 压缩包 / 文本
+ *    这类浏览器没有内建渲染的,贴出来只会是坏图,所以走下载。复用 #objectUrls 缓存,不重复解密。 */
+async function downloadAttachment(ctx, att) {
+  const S = ctx.store;
+  const map = S.get('objectUrls');
+  try {
+    let url = map.get(att.file);
+    if (!url) {
+      const bytes = await S.get('lib').readAttachment(att.file);
+      url = URL.createObjectURL(new Blob([bytes], { type: guessMime(att.name) }));
+      map.set(att.file, url);
+    }
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = att.name;
+    // 部分浏览器要求锚点在文档里才认 download;测试替身没有 body 时直接点
+    if (document.body && typeof document.body.appendChild === 'function') {
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    } else {
+      a.click();
+    }
+    ctx.toast(`已下载「${att.name}」`);
+  } catch (e) {
+    // 附件是永久类错误(密文坏了 / 被外部改过),重试无用 —— 如实说是解密失败
+    ctx.toast(`附件解密失败:${e.message}`, 'error');
+  }
+}
+
 function guessMime(name) {
   const ext = (name.split('.').pop() || '').toLowerCase();
-  return { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp' }[ext] || 'application/octet-stream';
+  return {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', avif: 'image/avif', ico: 'image/x-icon',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',
+    json: 'application/json', zip: 'application/zip',
+  }[ext] || 'application/octet-stream';
 }
 
 export async function copyWholeNote(ctx) {
@@ -306,12 +383,12 @@ export function renderEditAttachments(ctx, note) {
   for (const [i, att] of note.attachments.entries()) {
     const chip = document.createElement('span');
     chip.className = 'att-chip editable';
-    chip.innerHTML = ctx.icons.image + '<span class="att-name"></span>';
+    chip.innerHTML = (isImageName(att.name) ? ctx.icons.image : ctx.icons.file) + '<span class="att-name"></span>';
     chip.querySelector('.att-name').textContent = att.name;
     const del = document.createElement('button');
     del.className = 'att-del';
     del.textContent = '×';
-    del.title = '从本笔记移除(图片文件保留,可稍后清理)';
+    del.title = '从本笔记移除(文件保留,可稍后清理)';
     del.addEventListener('click', () => {
       note.attachments.splice(i, 1);
       note.updatedAt = Date.now();
@@ -356,7 +433,7 @@ export async function addAttachments(ctx, files) {
       return;
     }
   }
-  ctx.toast('图片已入库,但该分类刚被其他标签页更新;重新打开分类后再查看', 'warn');
+  ctx.toast('附件已入库,但该分类刚被其他标签页更新;重新打开分类后再查看', 'warn');
 }
 
 /* ================= 笔记增删排序 ================= */

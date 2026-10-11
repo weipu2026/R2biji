@@ -59,6 +59,7 @@ const ICON = {
   menu: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 6h16"/><path d="M4 12h16"/><path d="M4 18h16"/></svg>',
   eye: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>',
   image: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="18" x="3" y="3" rx="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/></svg>',
+  file: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>',
   warn: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
   blocked: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><path d="m4.9 4.9 14.2 14.2"/></svg>',
   lock: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>',
@@ -163,7 +164,10 @@ const ctx = {
   pickCategoryForNote: (id) => pickCategoryForNote(ctx, id),
   // —— 以下为 shell.js 的入口绑定(一律不带 ctx,由这里接线)——
   showLock: (mode) => showLock(ctx, mode),
-  lockNow: () => lockNow(ctx),
+  /* ⚠️ 必须把选项**透传**下去:写成 `() => lockNow(ctx)` 时调用方传的
+   *   { confirmDiscard:false } 会被静默吞掉 —— 老板键看着「生效了」,其实照样弹确认框
+   *   (2026-10-11 老板键落地时踩到,靠 ui-polish 的透传用例钉住)。 */
+  lockNow: (opt) => lockNow(ctx, opt),
   doUnlock: (pw) => doUnlock(ctx, pw),
   doCreateLibrary: (pw, pw2) => doCreateLibrary(ctx, pw, pw2),
   resumeSession: () => resumeSession(ctx),
@@ -332,6 +336,11 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
     dlg.showModal();
     if (input) { input.focus(); input.select(); }
   });
+}
+
+/** 是否处于「窄屏(抽屉式侧栏)」布局。与 style.css 的 @media (max-width:760px) 同档。 */
+function isNarrowViewport() {
+  try { return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches); } catch { return false; }
 }
 
 function fmtTime(ts) {
@@ -849,7 +858,7 @@ export async function enterApp() {
         fn: async () => {
           if (!await restoreReading(ctx)) ctx.toast('仍然打不开:网络不通,或该分类已不存在', 'error');
         },
-      });
+      }, 'sparkle', '点左上角的菜单按钮打开分类列表');
     } else {
       showEmpty('还没有分类,先建一个', { label: '新建分类', fn: () => addCategory(ctx) });
     }
@@ -872,7 +881,7 @@ export async function enterApp() {
  * @param {{label:string, fn:Function}|null} [action] 引导按钮(没有就只显示文案)
  * @param {string} [iconKey] ICON 内的键名,默认 sparkle
  */
-function showEmpty(text, action, iconKey = 'sparkle') {
+function showEmpty(text, action, iconKey = 'sparkle', mobileHint = null) {
   const box = $('emptyState');
   box.hidden = false;
   $('readView').hidden = true;
@@ -885,6 +894,16 @@ function showEmpty(text, action, iconKey = 'sparkle') {
   const p = document.createElement('p');
   p.textContent = text;
   box.appendChild(p);
+  /* ★ 窄屏补一句方位引导(2026-10-11):文案里的「从左侧选择」在手机上指向一个**不存在**
+   *   的位置 —— ≤760px 时侧栏是抽屉、默认 translateX(-104%) 藏在屏幕外,用户既看不到
+   *   「左侧」也找不到入口。宽屏不追加(那里「左侧」是有效指引)。
+   *   判据走 matchMedia;老环境/离线测试替身没有它时静默不追加 —— 增强项不能反伤主流程。 */
+  if (mobileHint && isNarrowViewport()) {
+    const sub = document.createElement('p');
+    sub.className = 'empty-sub';
+    sub.textContent = mobileHint;
+    box.appendChild(sub);
+  }
   if (action) {
     const b = document.createElement('button');
     b.className = 'btn primary';
