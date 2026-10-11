@@ -842,11 +842,174 @@ const MUTANTS = [
     expect: '导航请求保持 network-first',
   },
   {
-    label: '/api/* 硬护栏被摘掉(密文可被 Cache Storage 离线读出)',
+    label: '离线白名单放宽到全部 /api/*(附件与写请求也进缓存管道)',
     file: 'public/sw.js',
-    from: "  if (url.pathname.startsWith('/api/')) return;",
-    to: "  // MUTANT:/api/* 也进缓存管道",
-    expect: '/api/* 一律不经 SW',
+    from: "    if (OFFLINE_API_GET.test(url.pathname)) {",
+    to: "    if (true) { // MUTANT:什么 API 都想缓存",
+    expect: '白名单外的 /api/* 一律不经 SW',
+  },
+  {
+    label: '离线回退被摘掉(断网时 API 不再回退本地副本)',
+    file: 'public/sw.js',
+    from: "          .catch(() => caches.match(e.request).then((hit) => hit || Response.error())),",
+    to: "          .catch(() => Response.error()), // MUTANT:不回退本地副本",
+    expect: '离线时回退上次的副本',
+  },
+  {
+    label: '在线响应不再写入缓存副本(下次离线无货可回退)',
+    file: 'public/sw.js',
+    from: "            if (res && res.ok && res.type === 'basic') {\n              e.waitUntil(caches.open(CACHE).then((c) => c.put(e.request, res.clone())).catch(() => {}));\n            }\n            return res;",
+    to: "            return res; // MUTANT:不写入缓存",
+    expect: '在线取网络版并顺手更新本地副本',
+  },
+  {
+    label: '焦点圈退回只覆盖按钮(列表行/附件/敏感行又摸黑)',
+    file: 'public/css/style.css',
+    from: `.cat-item:focus-visible, .note-item:focus-visible,
+.search-item:focus-visible, .att-chip:focus-visible, .secret:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;   /* 画在内侧:相邻两行不会互相压住对方的圈 */
+}`,
+    to: `/* MUTANT:焦点圈只剩按钮那 6 类 */`,
+    expect: '可聚焦的非按钮元素都必须有焦点圈',
+  },
+  {
+    label: '焦点圈改用 box-shadow(吃掉列表行选中态的左侧内条)',
+    file: 'public/css/style.css',
+    from: `  outline: 2px solid var(--accent);
+  outline-offset: -2px;   /* 画在内侧:相邻两行不会互相压住对方的圈 */
+}`,
+    to: `  outline: none;
+  box-shadow: var(--ring);
+}`,
+    expect: '焦点圈不得用 box-shadow',
+  },
+  {
+    label: '窄屏判定恒为 false(手机上不再补方位提示)',
+    file: 'public/js/ui.js',
+    from: `  try { return !!(window.matchMedia && window.matchMedia('(max-width: 760px)').matches); } catch { return false; }`,
+    to: `  return false; // MUTANT:窄屏永不成立`,
+    expect: '窄屏判定是纯函数',
+  },
+  {
+    label: '列出状态退回「从左侧选择」(手机上指向不存在的位置)',
+    file: 'public/js/features/sidebar.js',
+    from: `    ctx.showEmpty('从左侧选择一个分类', null, 'sparkle', '点左上角的菜单按钮打开分类列表');`,
+    to: `    ctx.showEmpty('从左侧选择一个分类'); // MUTANT`,
+    expect: '三处指向「左侧」的空态都补了窄屏提示',
+  },
+  {
+    label: '编辑底栏不再换行(窄屏整排溢出)',
+    file: 'public/css/style.css',
+    from: `  flex-wrap: wrap;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}`,
+    to: `  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}`,
+    expect: '编辑底栏可换行',
+  },
+  {
+    label: '窄屏不再收起 PC 专属编辑提示',
+    file: 'public/css/style.css',
+    from: `  .edit-hint { display: none; }`,
+    to: `  /* MUTANT:窄屏仍显示 Ctrl+S/Ctrl+V 提示 */`,
+    expect: '编辑底栏可换行',
+  },
+  {
+    label: '触屏图标按钮尺寸退回紧凑(手指易误触)',
+    file: 'public/css/style.css',
+    from: `  .icon-btn { width: 34px; height: 34px; }`,
+    to: `  .icon-btn { width: 28px; height: 28px; } /* MUTANT */`,
+    expect: '触屏下的图标按钮被放大',
+  },
+  {
+    label: '滚动定位退回 center(不再用 nearest)',
+    file: 'public/js/features/sidebar.js',
+    from: `li.scrollIntoView({ block: 'nearest' })`,
+    to: `li.scrollIntoView({ block: 'center' }) // MUTANT`,
+    expect: 'scrollActiveNoteIntoView 真的把选中项滚进视野',
+  },
+  {
+    label: 'openNote 不再滚动到选中项(新建的笔记看不见)',
+    file: 'public/js/features/sidebar.js',
+    from: `  renderNoteList(ctx);
+  scrollActiveNoteIntoView(ctx);
+  ctx.renderReadView();`,
+    to: `  renderNoteList(ctx);
+  ctx.renderReadView(); // MUTANT:不滚`,
+    expect: 'openNote 与 openCategory 都接上了滚动',
+  },
+  {
+    label: '图片不再绑灯箱点击',
+    file: 'public/js/features/note.js',
+    from: `    img.addEventListener('click', () => openLightbox(ctx, att, url));`,
+    to: `    // MUTANT:不再绑灯箱`,
+    expect: '图片附件可点开放大',
+  },
+  {
+    label: 'Ctrl+Shift+L 不再要求 shiftKey(会抢 Ctrl+L)',
+    file: 'public/js/features/shell.js',
+    from: `(e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === 'l'`,
+    to: `(e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'l' // MUTANT`,
+    expect: 'Ctrl/⌘+Shift+L 锁定',
+  },
+  {
+    label: '快速隐藏分支不再调用 lockNow',
+    file: 'public/js/features/shell.js',
+    from: `      Promise.resolve(ctx.lockNow({ confirmDiscard: false }))`,
+    to: `      Promise.resolve(null) // MUTANT:锁定被摘掉`,
+    expect: 'Ctrl/⌘+Shift+L 锁定',
+  },
+  {
+    label: '老板键又被确认框拦住(有未保存改动时停在原界面 = 老板键失效)',
+    file: 'public/js/features/shell.js',
+    from: `ctx.lockNow({ confirmDiscard: false })`,
+    to: `ctx.lockNow() /* MUTANT:落回默认 confirmDiscard:true */`,
+    expect: 'confirmDiscard:false',
+  },
+  {
+    label: '老板键锁完不再如实告知被放弃的改动(静默丢数据)',
+    file: 'public/js/features/shell.js',
+    from: `        .then((n) => n > 0 && ctx.toast(`,
+    to: `        .then((n) => false && ctx.toast(`,
+    expect: '如实告知',
+  },
+  {
+    label: 'ui.js 的 lockNow 包装器吞掉选项(老板键的 confirmDiscard 传不进去)',
+    file: 'public/js/ui.js',
+    from: `  lockNow: (opt) => lockNow(ctx, opt),`,
+    to: `  lockNow: () => lockNow(ctx), // MUTANT:选项被吞`,
+    expect: '透传选项',
+  },
+  {
+    label: 'lockNow 不再回传被放弃的改动数(无确认框入口无从如实提示)',
+    file: 'public/js/features/lock.js',
+    from: `  const dropped = S.get('dirty').size;`,
+    to: `  const dropped = 0; // MUTANT:恒为 0`,
+    expect: '回传被放弃',
+  },
+  {
+    label: 'isImageName 恒真(所有附件都当图片去贴)',
+    file: 'public/js/features/note.js',
+    from: `  return IMAGE_EXT.has((String(name).split('.').pop() || '').toLowerCase());`,
+    to: `  return true; // MUTANT`,
+    expect: 'isImageName 只看扩展名',
+  },
+  {
+    label: 'guessMime 丢掉非图类型(下载得到 octet-stream)',
+    file: 'public/js/features/note.js',
+    from: `    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv',`,
+    to: `    // MUTANT:非图类型全丢`,
+    expect: 'guessMime 认得常见非图类型',
+  },
+  {
+    label: '附件入口退回只收图片',
+    file: 'public/index.html',
+    from: `<input id="attInput" type="file" multiple hidden>`,
+    to: `<input id="attInput" type="file" accept="image/*" multiple hidden>`,
+    expect: '附件入口放开类型限制',
   },
 
 ];
