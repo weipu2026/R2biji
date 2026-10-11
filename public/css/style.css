@@ -23,7 +23,10 @@
    *
    * ⚠️ 这个值要同时对**三种背景**达标,不是两种:panel #ffffff(纸面)、
    *    side #f7f5ef(侧栏)、bg #faf8f2(页面底)。#7a7466 只过了前两种
-   *    (4.65 / 4.26 / 4.38),侧栏与页面底都差一点 —— 第一版就栽在这里。
+   *    (4.65 / 4.26 / 4.38),只有第一种过线 —— 第一版就栽在这里。
+   * ⚠️ 达标只对「三种纸面底」成立:**更深的底**(悬停行 --hover 4.42、置顶行
+   *    --accent-weak 4.21、选中行 --sel 3.90)仍不到 4.5 → 落在那些底上的次要文字
+   *   单独提到 --text(见 .cat-count / .search-item-snippet 的悬停·置顶规则)。
    * 现取 #757060:4.95 / 4.54 / 4.66,三种全过线;与正文 #26251f 的层次差
    * 仍有 3.10:1(比达标所需只多让出 0.21),「次要」的分层感基本没损失。
    * 再深(#6f6a5b)虽然更保险,但层次差掉到 2.84,次要色会开始跟正文抢。
@@ -148,7 +151,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 /* 上面这条只覆盖「本来就是按钮」的 6 类。下面这几类**同样可聚焦**,却一个焦点提示都没有:
  *   .cat-item / .note-item / .search-item —— clickable() 装的 role=option + tabIndex=0
- *   .att-chip —— 是 <button>,但 class 不含 .btn,所以上面那条漏掉它
+ *   .att-chip —— **读态**是 <button>(class 不含 .btn,上面那条漏掉它);编辑态是
+ *     <span class="att-chip editable">(不可聚焦),故这条选择器只对读态生效
  *   .secret —— tabindex=0 + role=button(render.js 给行内打码 span 加的)
  * 键盘用户按 Tab 能走到它们身上,屏幕上却看不出焦点在哪(2026-10-11 盘点)。
  * 刻意用 outline 而非 box-shadow:列表行的选中态自己就用了 box-shadow
@@ -630,6 +634,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   letter-spacing: 0;
 }
 .cat-item.active .cat-count { color: var(--accent); }
+/* ★ 2026-10-11 审计 P3:徽章的 --muted 只在纸面底达标,落到悬停行(--hover 4.42)与
+ *   置顶非选中行(--accent-weak 4.21)都不够 → 这两态提到 --text(计数本就该看清)。 */
+.cat-item:hover .cat-count,
+.cat-item.pinned:not(.active) .cat-count { color: var(--text); }
 /* 两列的浮层按钮数相同(都是 4 个 ≈124px),槽位预留的净空定义在
  * .pin-slot 那条规则附近(见文件上方),此处不再重复 */
 
@@ -856,6 +864,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   transition: opacity .12s;
 }
 .blk:hover .blk-copy { opacity: 1; }
+/* ★ 2026-10-11 审计 P2:.blk-copy 是 <button>,天然在 Tab 序里(一篇长笔记有几十个),
+ *   但此前只有 .blk:hover / .copied 才置 opacity:1 —— 键盘聚焦时元素连同焦点圈一起
+ *   透明(opacity 作用于整个渲染层,outline 也逃不掉),Tab 一路过去看不到焦点落在哪。
+ *   是「A1 补焦点圈」的漏网:那批硬编码列举了 5 个类,没扫到它。 */
+.blk-copy:focus-visible { opacity: 1; outline: 2px solid var(--accent); outline-offset: -2px; }
 .blk-copy:hover { color: var(--accent); border-color: var(--accent); }
 .blk-copy.copied { color: var(--ok); border-color: var(--ok); opacity: 1; }
 /* 「已复制」反馈:靠颜色而非尺寸传达状态,因此能套在任意形态的按钮上 */
@@ -895,6 +908,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   padding: 0 0 0 4px;
 }
 .att-del:hover { color: var(--danger); }
+/* 编辑态附件 chip 里的 × 是 <button>(在 Tab 序里)→ 纳入统一焦点圈,别只剩 UA 默认圈 */
+.att-del:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .att-img {
   margin: 4px 0 12px;
   border: 1px solid var(--border);
@@ -940,12 +955,17 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   /* 正文框聚焦反馈。写作时焦点必然落在正文上(标题只在开头点一下),
    * 此前这里既无 :focus 也无 :focus-within,点进去与没点进去**完全一样**
    * ——而标题框是会亮下划线的,两处不一致反而让人以为没聚焦。
-   * 用极轻的暖纸底而非焦点圈:写作区占满整屏,一圈扩散式高亮太吵。 */
-  transition: background .15s, box-shadow .15s;
+   * ★ 2026-10-11 审计 P2 改法:上一版用「暖纸底 tint + 2px 淡蓝内线」,实测**远不达**
+   *   WCAG 非文本 3:1 —— 浅色 tint 合成 #faf8f3 vs #ffffff 仅 1.06:1;暗色因
+   *   --hover(#23272f) 与 --panel(#23262e) 几乎同色,合成后 1.01:1(等于没做);
+   *   内线也只有 1.18 / 1.28。现改「整圈 2px 黛蓝内框」:inset 不占布局、不外扩
+   *   (不是扩散式光晕),对白 7.00:1、对暗 paper 6.07:1,两种主题都达标。
+   *   用 box-shadow 而非 outline 是为保住 .15s 淡入(outline 的 none→solid 不支持过渡)。
+   *   顺带去掉 color-mix(全仓唯一一处,且无 @supports 兜底)。 */
+  transition: box-shadow .15s;
 }
-.edit-body:focus, .edit-body:focus-within {
-  background: color-mix(in srgb, var(--hover) 55%, transparent);
-  box-shadow: inset 2px 0 0 var(--accent-weak);
+.edit-body:focus {
+  box-shadow: inset 0 0 0 2px var(--accent);
 }
 .edit-foot {
   display: flex; align-items: center; gap: 12px;
@@ -1043,6 +1063,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   white-space: nowrap;
 }
 .search-item-cat { font-size: 11px; color: var(--accent); margin-top: 3px; }
+/* 悬停时整行底变 --hover,snippet 的 --muted 随之掉到 4.42 → 提到 --text(审计 P3) */
+.search-item:hover .search-item-snippet { color: var(--text); }
 mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 
 /* 最近删除 */
@@ -1220,7 +1242,10 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   .top-theme { width: 34px; height: 34px; }
   /* 触屏:按钮常显,没有浮层要躲 → 槽位的 34px 净空失去意义,收回 8px,
    * 把宽度还给分类名/笔记标题(窄屏上这 26px 很值) */
-  .cat-item .pin-slot, .note-item .pin-slot { margin-right: 8px; }
+  /* ⚠️ 触屏也要保留 2px 补偿:行的 padding-right 没变(cat 10px / note 8px),
+   * 两列都写 8px 会让笔记列图钉偏右 2px(桌面那条补偿在 .pin-slot 定义处,审计 P3)。 */
+  .cat-item .pin-slot { margin-right: 8px; }
+  .note-item .pin-slot { margin-right: 10px; }
 }
 
 /* 尊重系统减动效偏好 */
