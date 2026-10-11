@@ -62,8 +62,17 @@ test('SW 清单:css 与入口页也在(否则离线连样式和外壳都没有)'
   }
 });
 
-test('SW 护栏:/api/* 仍然永不经缓存(锁屏形同虚设的唯一防线)', () => {
-  assert.match(sw, /startsWith\('\/api\/'\)/, '必须保留 /api/* 的显式拒绝');
+test('SW 护栏:/api/* 仍走显式分支,且离线白名单只含三个只读密文接口', () => {
+  assert.match(sw, /startsWith\('\/api\/'\)/, '必须保留 /api/* 的显式分支(不能只靠 ASSETS 没登记)');
+  const m = /const OFFLINE_API_GET = (\/[^\n]+\/);/.exec(sw);
+  assert.ok(m, 'sw.js 必须显式声明 OFFLINE_API_GET 白名单');
+  const re = eval(m[1]);
+  for (const p of ['/api/vault', '/api/cats', '/api/cat']) {
+    assert.ok(re.test(p), p + ' 应在离线白名单里');
+  }
+  for (const p of ['/api/blobs', '/api/blob', '/api/catx', '/api/vault2', '/api/cats/../vault']) {
+    assert.equal(re.test(p), false, p + ' 不该进白名单 —— 白名单必须精确到路径,放宽成前缀会把写请求卷进来');
+  }
 });
 
 test('CACHE 版本号形如 jmbiji-vN(network-first 后仅为清理旧缓存而存在)', () => {

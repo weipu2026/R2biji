@@ -34,6 +34,11 @@ const start = sw.indexOf("self.addEventListener('fetch'");
 const end = sw.lastIndexOf('});') + 3;
 if (start < 0) throw new Error('sw.js 里找不到 fetch 监听器');
 const fetchSrc = sw.slice(start, end);
+/** OFFLINE_API_GET 定义在 fetch 监听器**之外** —— 沙箱只拼 fetchSrc + navSrc 是不够的,
+ *  handler 一引用它就 ReferenceError(2026-10-11 实测:5 条用例齐刷刷假红,看着像功能没做)。
+ *  把它的声明原样抠出来一起注入沙箱。 */
+const offlineDecl = /const OFFLINE_API_GET = [^\n]+;/.exec(sw);
+assert.ok(offlineDecl, 'sw.js 必须声明 OFFLINE_API_GET 白名单');
 const navSrc = sw.slice(sw.indexOf('function navFallback'), sw.indexOf("self.addEventListener('fetch'"));
 
 /** 在沙箱里搭一套最小 SW 运行时 */
@@ -45,6 +50,16 @@ function makeRuntime({ online = true, seed = {} } = {}) {
 
   const Response_ = class {
     constructor(body, init = {}) { this.body = body; this.status = init.status ?? 200; this.type = init.type ?? 'basic'; }
+    /* ★ 真实 Response 有 clone(),而且**必须有** —— sw.js 回写缓存用的就是 res.clone()
+     *  (响应体只能读一次)。替身漏掉它时,那次 `.catch(() => {})` 会把 TypeError 静默吞掉,
+     *  表现是「缓存永远写不进去」;只有断言了 Cache Storage 的用例才抓得到。
+     *  (2026-10-11 实际踩到:只断言响应体的老用例全绿放过。) */
+    clone() { return new Response_(this.body, { status: this.status, type: this.type }); }
+    /* ★ 真实 Response 的 ok 是「200 ≤ status < 300」的 getter,替身也必须有 ——
+     *  sw.js 回写缓存前判的是 `res && res.ok && res.type === 'basic'`,
+     *  替身漏掉 ok 时它就恒为 undefined,回写分支永不进入,
+     *  表现同样是「缓存永远写不进去」(与漏 clone 是同一类假绿,2026-10-11 连着踩到)。 */
+    get ok() { return this.status >= 200 && this.status < 300; }
     // 真实 Response 有这个静态方法:网络彻底失败时用它返回一个网络错误响应
     static error() { const r = new Response_(null, { status: 0, type: 'error' }); return r; }
   };
@@ -84,7 +99,7 @@ function makeRuntime({ online = true, seed = {} } = {}) {
   };
   const keys = Object.keys(scope);
   const vals = keys.map((k) => scope[k]);
-  const fn = new Function(...keys, 'CACHE', fetchSrc + '\n' + navSrc);
+  const fn = new Function(...keys, 'CACHE', offlineDecl[0] + '\n' + fetchSrc + '\n' + navSrc);
   fn(...vals, CACHE_NAME);
   const L = scope.listeners;
 
@@ -176,12 +191,65 @@ test('导航请求保持 network-first(刷新即最新版这条语义不能丢)'
 
 /* ---------- 硬护栏:绕过 SW 的四条 ---------- */
 
-test('/api/* 一律不经 SW(锁屏安全硬护栏)', () => {
-  const rt = makeRuntime({ online: true, seed: { 'https://x.test/api/vault': { body: 'CIPHERTEXT', status: 200, type: 'basic' } } });
+/* ---------- 只读密文接口:离线可读的支点(2026-10-11 起) ----------
+ * 旧口径是「/api/* 一律不经 SW」,但它把两件事混为一谈:缓存里存的是**密文**
+ * (没有主密码解不开),而且同样一份密文本来就躺在 R2 上;真正会让锁屏失效的是**明文**副本。
+ * 现在放行三个只读密文接口换「断网也能打开笔记」。代价与威胁等级见 sw.js 顶部注释
+ * 与 SECURITY.md「缓存泄露」条 —— 锁定不清除这份副本。 */
+
+test('只读密文接口 GET 时由 SW 接管(离线才有得读)', () => {
+  const rt = makeRuntime({ online: true });
+  const urls = [
+    'https://x.test/api/vault',
+    'https://x.test/api/cats',
+    'https://x.test/api/cat?key=%E7%A7%98%E9%92%A5',
+  ];
+  for (const u of urls) {
+    const events = [];
+    rt.cache.fetch({ request: { url: u, method: 'GET', mode: 'cors' }, respondWith: (p) => events.push(p), waitUntil: () => {} });
+    assert.equal(events.length, 1, u + ' 必须由 SW 接管 —— 否则断网时 boot 第一步就卡死在锁屏');
+  }
+});
+
+test('只读密文接口:在线取网络版并顺手更新本地副本', async () => {
+  const rt = makeRuntime({ online: true });
+  const r = await rt.dispatch('https://x.test/api/vault');
+  assert.equal(r.res.body, 'network:https://x.test/api/vault', '在线必须给网络版,不能拿旧副本糊弄');
+  assert.ok(rt.store.has('https://x.test/api/vault'),
+    '成功响应必须写进缓存,供下次离线回退(实际缓存键:' + [...rt.store.keys()].join(' | ') + ')');
+});
+
+test('只读密文接口:离线时回退上次的副本(离线可读的核心)', async () => {
+  const rt = makeRuntime({ online: false, seed: { 'https://x.test/api/vault': { body: 'CACHED-CIPHERTEXT', status: 200, type: 'basic' } } });
+  const r = await rt.dispatch('https://x.test/api/vault');
+  assert.equal(r.res.body, 'CACHED-CIPHERTEXT', '离线必须回退缓存副本,否则私密笔记在飞机/地铁上等于废掉');
+});
+
+test('只读密文接口:离线且无副本时给网络错误响应(不得静默 undefined)', async () => {
+  const rt = makeRuntime({ online: false });
+  const r = await rt.dispatch('https://x.test/api/vault');
+  assert.ok(r.res && r.res.status === 0 && r.res.type === 'error', '离线无副本应给 Response.error()');
+});
+
+test('白名单外的 /api/* 一律不经 SW(附件、健康检查等不落缓存)', () => {
+  const rt = makeRuntime({ online: true });
+  const urls = [
+    'https://x.test/api/blobs',
+    'https://x.test/api/blob?key=x',
+    'https://x.test/api/catx',
+  ];
+  for (const u of urls) {
+    const events = [];
+    rt.cache.fetch({ request: { url: u, method: 'GET', mode: 'cors' }, respondWith: (p) => events.push(p), waitUntil: () => {} });
+    assert.equal(events.length, 0, u + ' 不在离线白名单里,不得由 SW 接管');
+  }
+});
+
+test('/api/* 的 POST 不经 SW(POST 是为拿令牌,绝不能落缓存)', () => {
+  const rt = makeRuntime({ online: true });
   const events = [];
-  rt.cache.fetch({ request: { url: 'https://x.test/api/vault', method: 'GET', mode: 'cors' }, respondWith: (p) => events.push(p), waitUntil: () => {} });
-  /* 密文与 vault.json 只要被 Cache Storage 留过一份,锁屏就形同虚设。 */
-  assert.equal(events.length, 0, '★ /api/* 被 SW 接管了 —— 密文可被离线读出');
+  rt.cache.fetch({ request: { url: 'https://x.test/api/vault', method: 'POST', mode: 'cors' }, respondWith: (p) => events.push(p), waitUntil: () => {} });
+  assert.equal(events.length, 0, '写/鉴权请求被 SW 接管了 —— 离线的旧副本可能被当成成功');
 });
 
 test('跨域 GET 不经 SW', () => {

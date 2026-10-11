@@ -27,7 +27,7 @@
 | 部署 | Cloudflare Worker(静态资产由 `[assets]` 分发,`/api/*` 进 Worker)+ R2 桶;免费套餐即可 |
 | 浏览器 | 任何现代浏览器(Chrome/Edge/Firefox/Safari/移动端);HTTPS 由平台提供 |
 | 本地体验 | `node dev-server.mjs`(同一套 Worker 代码 + 内存 R2,数据重启即清空,仅调 UI) |
-| PWA | manifest + Service Worker(只缓存应用外壳,绝不缓存 `/api/*` 数据) |
+| PWA | manifest + Service Worker(缓存应用外壳;`/api/*` **只放行只读密文接口**以支持离线阅读,写请求与其余接口一概不经缓存 —— 见 §9 第 21 条) |
 
 ## 3. 存储布局(R2 桶内)
 
