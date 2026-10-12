@@ -189,7 +189,18 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 }
 .btn.primary:active { transform: translateY(0); box-shadow: 0 1px 2px rgba(47, 90, 146, .3); }
 .btn.primary:disabled { background: #9db4d0; border-color: #9db4d0; cursor: not-allowed; }
-:root[data-theme="dark"] .btn.primary:disabled { background: #3a4456; border-color: #3a4456; }
+/* ★ 暗色主题必须换字色(2026-10-12 全站审计 P2):
+ *   暗色的 --accent 是**提亮**过的浅黛蓝 #7fa7d9 —— 白字压上去只有 2.49:1,
+ *   不到 WCAG AA 正文门槛(4.5:1)的一半,主按钮上的「确定 / 保存 / 登录」
+ *   糊在底里;而 hover 的 #93b7e2 更浅、更差。
+ *   改用深墨字:#1e2128 on #7fa7d9 = 6.27:1、on hover #93b7e2 = 7.52:1,双双达标。
+ *   (亮色不必改:白字 on #2f5a92 = 6.56:1 本就达标 —— 所以这是**暗色专属**的覆盖。)
+ *   由 tests/contrast.test.mjs「文字压在强调色底上」钉住。 */
+:root[data-theme="dark"] .btn.primary { color: #1e2128; }
+/* 禁用态底色 #3a4456 比 accent 深得多,上面那个深墨字会彻底看不见,这里单独给
+ * 浅字。(WCAG 1.4.3 豁免「非活动控件」,但看不清的按钮会被当成「坏了」,
+ *  给到 --muted 的 3.09:1:读得出「这里有个按不了的主按钮」。) */
+:root[data-theme="dark"] .btn.primary:disabled { background: #3a4456; border-color: #3a4456; color: var(--muted); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.ghost:hover { background: var(--hover-weak); }
 .btn.danger, .btn.ghost.danger {
@@ -1136,6 +1147,31 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   gap: 8px;
   z-index: 100;
   align-items: center;
+}
+/* ★ #toasts 会被 JS 挂上 popover="manual"(见 ui.js 的 toast()):
+ *   原生 <dialog>.showModal() 会把弹窗放进浏览器的 **top layer** —— 那里的层级
+ *   由「加入顺序」决定,z-index 一概不参与。z-index:100 的普通容器永远压在它下面,
+ *   于是弹窗开着时到达的 toast(另一个标签页保存/删除的广播提示、自动保存失败的
+ *   报错)**一条都看不见**。挂 popover 后 #toasts 自己也进 top layer(晚于弹窗加入
+ *   ⇒ 在其上),不靠 z-index。manual = 不响应 Esc / 点空白关闭,生命周期仍归我们。
+ *
+ *   popover 自带一套 UA 默认样式,不逐条归零的话宿主会被拉成全屏、并给提示套上
+ *   系统底色的边框:inset:0 + margin:auto(居中拉伸)、border、padding、
+ *   background:Canvas、color:CanvasText、width/height:fit-content、overflow:auto。
+ *   下面这条把它们全部还原成「一个透明的定位容器」。
+ *   不支持 popover 的浏览器上属性不会被挂上,这条规则也就不生效 —— 行为与从前一致。 */
+#toasts[popover] {
+  inset: auto auto calc(22px + env(safe-area-inset-bottom, 0px)) 50%;
+  margin: 0;
+  width: auto;
+  height: auto;
+  max-width: none;
+  max-height: none;
+  padding: 0;
+  border: 0;
+  overflow: visible;
+  background: transparent;
+  color: inherit;
 }
 .toast {
   /* 玻璃 toast:半透磨砂,轻但不飘;两主题各自的底/字对比维持原有结论 */

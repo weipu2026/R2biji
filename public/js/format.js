@@ -15,8 +15,15 @@ export const KEEP_BACKUPS_PER_CATEGORY = 10;
  *   HTML 元字符 < > " ' ` &,而这里以前少收了 ' ` & 三个 —— 于是「R&D」「O'Brien」
  *   能通过客户端校验、要在服务端跑一个来回才被 400 拒掉,用户只看到一句服务器错误。
  *   两侧口径:客户端**预先剔除**(与 / \ : 等既有处理同一条纪律),服务端保留拒绝
- *   作为兜底(它还要面对非本客户端的请求)。 */
-const ILLEGAL_CHARS = /[/\\:*?"<>|'&`\u0000-\u001f]/g;
+ *   作为兜底(它还要面对非本客户端的请求)。
+ * ★ 不可见格式字符同样必须在这里剔除(2026-10-12 全站审计):服务端早就拒
+ *   C0/C1、零宽与双向控制字符(它们会造成「看起来同名却不同」的诡异重名),
+ *   而客户端当时只收了 C0(\u0000-\u001f)—— 用户从别处粘一个零宽字符进来,
+ *   客户端放行、服务端 400,报错文案是「分类名不合法」,可**名字在屏幕上毫无异常**,
+ *   根本无从判断哪儿不合法。这里补齐成与服务端逐段一致:
+ *   DEL/C1(\u007f-\u009f)、零宽(\u200b-\u200f)、双向控制(\u202a-\u202e)、
+ *   词连接符与不可见运算符(\u2060-\u2064)、BOM(\ufeff)。 */
+const ILLEGAL_CHARS = /[/\\:*?"<>|'&`\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2064\ufeff]/g;
 
 /**
  * 清洗分类名:去掉非法字符、压平空白、限长 60。
@@ -217,6 +224,36 @@ export function catMovePatch(names, metaOf, name, dir) {
   const patch = {};
   ordered.forEach((n, i) => { patch[n] = values[i]; });
   return patch;
+}
+
+/* ---------- 列表预览(纯函数) ---------- */
+
+/**
+ * 笔记列表 tooltip 用的正文摘要:折叠连续空白后取前 n 个字符。
+ *
+ * ★ 有界扫描(2026-10-12 全站审计·性能):旧写法对**整段正文**跑 /\s+/g 再取前 60 字符,
+ *   而每次重画笔记列表都要对每一篇做一遍 —— 100 篇 × 20KB ≈ 2MB 的正则扫描,
+ *   切笔记、切分类、置顶、多标签页同步各付一次。
+ * ★ 结果必须与旧写法**逐字符相同**(不能变成「差不多」):
+ *   空白折叠是从左到右的局部操作,前 400 个字符折叠出来的结果,与整段折叠结果的前
+ *   400 字符相同 —— 所以只要折叠后有 n 个字符,直接截取即为原结果;只有「前 400 字符
+ *   几乎全是空白」这种极端内容才回退到整段计算(罕见,且回退时结果必然一致)。
+ *   等价性由 tests/format.test.mjs 对随机输入与朴素实现逐条对照钉住。
+ * @param {string} content
+ * @param {number} [n=60]
+ * @returns {string}
+ */
+export function notePreview(content, n = 60) {
+  const s = typeof content === 'string' ? content : '';
+  const WINDOW = 400;
+  // 前导空白先跳过 —— 等价于旧写法的 trim(),代价 O(前导空白长度),通常是 0
+  const start = s.search(/\S/);
+  if (start < 0) return ''; // 整段只有空白:折叠 + 去空白后为空
+  const rest = s.slice(start); // 首字符必非空白 → 折叠后不会有多余的前导空格
+  const folded = (rest.length <= WINDOW ? rest : rest.slice(0, WINDOW)).replace(/\s+/g, ' ');
+  if (folded.length >= n) return folded.slice(0, n);
+  if (rest.length <= WINDOW) return folded.trimEnd();
+  return rest.replace(/\s+/g, ' ').trimEnd().slice(0, n);
 }
 
 /* ---------- 相对时间 ---------- */

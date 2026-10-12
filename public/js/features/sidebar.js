@@ -404,7 +404,9 @@ export function renderNoteList(ctx) {
     title.className = 'note-title';
     title.textContent = note.title || '无标题';
     // 单行清单不展开内容,悬停用原生气泡兜底给出时间与正文概要
-    li.title = `${ctx.fmtTime(note.updatedAt)} · ${(note.content.trim().replace(/\s+/g, ' ').slice(0, 60)) || '(空)'}`;
+    // (摘要走 F.notePreview:同一份「折叠空白取前 60 字符」的语义,但有界扫描 ——
+    //  旧写法对每篇正文整段跑正则,100 篇 ×20KB 每次重画都要扫 2MB)
+    li.title = `${ctx.fmtTime(note.updatedAt)} · ${F.notePreview(note.content) || '(空)'}`;
     main.appendChild(title);
 
     /* 图钉在标题之后 + 定宽槽位:多条置顶的图标落在同一条竖线上,

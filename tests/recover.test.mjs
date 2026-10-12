@@ -53,7 +53,7 @@ const recover = await import(
   'data:text/javascript;charset=utf-8,'
   + encodeURIComponent(
     scriptMatch[1]
-    + '\nexport { readZipEntries, decryptBackupPackage, categoryToMd, buildExportEntries, sanitizeEntryName, zipWriteEntries };',
+    + '\nexport { readZipEntries, decryptBackupPackage, categoryToMd, buildExportEntries, sanitizeEntryName, zipWriteEntries, escHtml };',
   )
 );
 
@@ -232,11 +232,16 @@ test('★ recover.html:innerHTML 里的每个插值都必须转义(防包内字�
   const offenders = [];
   // 受信辅助函数:纯数值运算,不可能产出标签。加入前必须逐个人工核过实现。
   const TRUSTED = /^(fmtBytes|Number)\s*\(/;
+  /* 受信转义器:两个作用域各一份(阅读站模板内 rdrEsc / 本页 DOM 用 escHtml),
+   * 两份实现都由下面的「转义器实现必须真的转义」用例逐字符核过,不是凭名字放行。
+   * 与旧写法同样是**非锚定**匹配:三元表达式里只要有分支过了转义器即算安全
+   * (如 `typeof x === 'number' ? x.toLocaleString() : escHtml(String(x))`)。 */
+  const ESCAPERS = /(rdrEsc|escHtml)\s*\(/;
   for (const block of blocks) {
     for (const { 1: expr } of block.matchAll(/\$\{([^}]*)\}/g)) {
       const e = expr.trim();
-      // 允许:① 调用了 rdrEsc ② 纯数字字面量 ③ 受信格式化函数 ④ 数组长度
-      const safe = /rdrEsc\s*\(/.test(e)          // 转义过
+      // 允许:① 调用了转义器 ② 纯数字字面量 ③ 受信格式化函数 ④ 数组长度
+      const safe = ESCAPERS.test(e)                // 转义过
         || /^\d+$/.test(e)                        // 纯数字字面量
         || /\.length$/.test(e)                    // 数组长度,必为数字
         || TRUSTED.test(e);                       // 受信数值格式化
@@ -244,7 +249,44 @@ test('★ recover.html:innerHTML 里的每个插值都必须转义(防包内字�
     }
   }
   assert.deepEqual(offenders, [],
-    `以下插值未过 rdrEsc,存在 HTML 注入风险:\n${offenders.join('\n')}`);
+    `以下插值未过转义器,存在 HTML 注入风险:\n${offenders.join('\n')}`);
+});
+
+test('转义器实现必须真的转义(recover.html 外层 DOM 用的 escHtml)', () => {
+  // 白名单不能只凭函数名放行:实现错了,上面那条「都转义过了」就是假绿。
+  // escHtml 位于 RECOVER-SCRIPT 纯逻辑段(可被测试直接加载),因此这里逐字符核。
+  assert.equal(recover.escHtml('<img src=x onerror=alert(1)>'), '&lt;img src=x onerror=alert(1)&gt;');
+  assert.equal(recover.escHtml('a"b\'c&d'), 'a&quot;b&#39;c&amp;d');
+  assert.equal(recover.escHtml('正常文本 · 无特殊字符'), '正常文本 · 无特殊字符');
+  assert.equal(recover.escHtml(undefined), 'undefined', '非字符串输入也要能安全转义(不得抛)');
+});
+
+test('★ recover.html:READER_TEMPLATE 里的函数不得在模板外被调用(作用域自检)', () => {
+  /* 2026-10-12 全站审计 P0:外层 DOM 代码调用了 READER_TEMPLATE 模板字面量**内部**
+   *   定义的 rdrEsc —— 那个函数只存在于「生成出来的离线阅读站」自己的作用域里,
+   *   外层调用必然 ReferenceError:摘要表整块渲染不出来,含告警的包连结果面板一起消失
+   *   (而解密其实已经成功),用户只看到一句「rdrEsc is not defined」。
+   *   触发条件极隐蔽:纯逻辑测试只加载 RECOVER-SCRIPT 段、不跑 DOM 段,所以一路全绿。
+   *   这里做一次静态作用域自检:模板内定义、外层没定义、却在外层被调用的名字必须为空。 */
+  const at = html.indexOf('const READER_TEMPLATE = `');
+  assert.ok(at > 0, '必须能定位 READER_TEMPLATE 定义');
+  const open = html.indexOf('`', at);
+  const close = html.indexOf('`;', open + 1);
+  assert.ok(close > open, '必须能定位 READER_TEMPLATE 的结束反引号');
+
+  const tplBody = html.slice(open + 1, close);
+  const outerRegion = html.slice(close + 2);                       // 模板之后的 DOM 段
+  const noTpl = html.slice(0, open + 1) + html.slice(close + 2);   // 去掉模板的一切外层代码
+
+  const namesOf = (src) => new Set([...src.matchAll(/function\s+([A-Za-z_$][\w$]*)/g)].map((m) => m[1]));
+  const tplDefs = namesOf(tplBody);
+  const outerDefs = namesOf(noTpl);
+
+  const offenders = [...tplDefs].filter((n) => !outerDefs.has(n)
+    && new RegExp(`\\b${n}\\s*\\(`).test(outerRegion));
+
+  assert.deepEqual(offenders, [],
+    `以下函数定义在 READER_TEMPLATE 内部(只属于生成的阅读站),却被外层脚本调用 —— 运行时必然 ReferenceError:\n${offenders.join('\n')}`);
 });
 
 /* ---------- 辅助:标准 deflate zip 打包(测试专用) ---------- */

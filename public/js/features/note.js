@@ -363,7 +363,11 @@ export function collectEditChanges(ctx) {
     ctx.markDirty(S.get('activeCat'));
   }
   updateEditCount(ctx);
-  renderEditAttachments(ctx, note);
+  /* ⚠️ 这里**不再**重画附件区(2026-10-12 全站审计·性能):本函数挂在 input 上、
+   *   每一个按键都会跑一次,而它只改标题与正文 —— 附件列表在这条路径上不会变。
+   *   旧写法逐键清空并重建全部附件 chip(含重新绑监听),附件多时打字明显发涩。
+   *   附件真正变化的三处各自负责重画:enterEditMode(进编辑态)、
+   *   renderEditAttachments 内的删除按钮、addAttachments(入库成功)。 */
 }
 
 export function exitEditMode(ctx) {
@@ -483,7 +487,13 @@ export async function deleteNote(ctx) {
   // 先收集再入回收站(2026-09-29 审计;与移动分类同一处修复模式)。
   if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状删除 */ } }
   const activeCat = S.get('activeCat');
-  const cat = S.get('lib').categoryInfo(activeCat);
+  const cat = S.get('lib')?.categoryInfo(activeCat);
+  /* 与 moveNote 同一处竞态:分类刚被别的标签页刷新成未载入态时,cat.data 为 null。
+   * 删除是**写操作**,不能静默返回 —— 必须告诉用户「没删成」,否则他会以为已经删了。 */
+  if (!cat?.data) {
+    ctx.toast('该分类刚被其他标签页更新,未执行删除;请重新打开分类后再试', 'warn');
+    return;
+  }
   // 延期删除:先进本分类密文内的回收站,30 天内可恢复;真正清除由
   // normalizeNoteData 在读取时按 deletedAt 过期裁剪,与多端自然同步
   cat.data.trash = cat.data.trash || [];
@@ -509,7 +519,13 @@ export function toggleNotePin(ctx, noteId) {
 export function moveNote(ctx, noteId, dir) {
   const S = ctx.store;
   const activeCat = S.get('activeCat');
-  const cat = S.get('lib').categoryInfo(activeCat);
+  /* ★ 必须判 cat?.data(2026-10-12 全站审计):列表渲染之后,别的标签页说
+   *   「这个分类刚被保存」→ 本端会把 cat.data 置 null 等待重载(onTabMessage 的
+   *   cat-saved 分支),此时用户点「上移/下移」就会 TypeError —— 按钮回调没有
+   *   try,表现为点了完全没反应(控制台一条红字)。同文件的 toggleNotePin 一直是
+   *   这么判的,这里补齐,两处口径一致。 */
+  const cat = S.get('lib')?.categoryInfo(activeCat);
+  if (!cat?.data) return;
   const sorted = F.sortNotes(cat.data.notes);
   const idx = sorted.findIndex((n) => n.id === noteId);
   if (idx < 0) return;

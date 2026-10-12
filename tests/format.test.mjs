@@ -10,6 +10,7 @@ import {
   assessPassword, PASSWORD_MIN_LEN, relTime, genPassword,
   statusAllowsOverride, STATUS_RANK,
   pushSnap, normalizeSnaps, SNAP_KEEP, SNAP_WINDOW_MS,
+  notePreview,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -353,6 +354,48 @@ test('P3:清洗后的分类名不得残留服务端会拒的字符(客户端该�
   assert.equal(sanitizeCategoryName('秘钥'), '秘钥');
   // 边界:整串都是非法字符 → null(而不是空串,空串会静默建出一个无名分类)
   assert.equal(sanitizeCategoryName('&&&'), null);
+});
+
+/* ---------- 笔记列表 tooltip 摘要(2026-10-12 全站审计·性能)---------- */
+
+test('notePreview:必须与朴素实现(trim → 折叠空白 → 截断)逐字符一致', () => {
+  /* 旧写法对**整段正文**跑 /\s+/g 再取前 60 字符,而每次重画笔记列表都要对每一篇
+   * 做一遍(100 篇 × 20KB ≈ 2MB 正则扫描)。改成有界扫描后,结果**不许变** ——
+   * 「差不多」在这里就是可见的界面差异。 */
+  const naive = (content, n = 60) => String(content || '').trim().replace(/\s+/g, ' ').slice(0, n);
+  const cases = [
+    '', '   ', '\n\n\t ', 'abc', '   abc   ', 'abc   def',
+    'a'.repeat(5000), ('a'.repeat(399) + '\n' + 'b'.repeat(100)),
+    ('a'.repeat(400) + '\n' + 'b'.repeat(100)),           // 窗口边界正好落在 \n 前
+    ('a'.repeat(399) + '\n\n\n\n' + 'b'.repeat(99)),      // 窗口切在空白串里
+    (' '.repeat(500) + 'abc'),                             // 前导空白超过窗口
+    ('a'.repeat(200) + ' '.repeat(500) + 'b'.repeat(200)), // 中间一大段空白跨越窗口
+    'x'.repeat(60), 'x'.repeat(59), 'x'.repeat(61),
+    '  \u00a0 中文 \u3000 混合  空白 ', // 全角空格/不换行空格也属 \s
+  ];
+  for (const c of cases) {
+    for (const n of [1, 10, 59, 60, 61, 200, 1000]) {
+      assert.equal(notePreview(c, n), naive(c, n),
+        `notePreview(${JSON.stringify(c.slice(0, 20))}…, ${n}) 与朴素实现不一致`);
+    }
+  }
+  // 随机输入(含大量空白)也必须逐字符相同
+  let seed = 12345;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff;
+  for (let i = 0; i < 300; i += 1) {
+    let s = '';
+    const len = 1 + Math.floor(rnd() * 900);
+    for (let j = 0; j < len; j += 1) s += rnd() < 0.3 ? ' \n\t'[Math.floor(rnd() * 3)] : String.fromCharCode(97 + Math.floor(rnd() * 4));
+    assert.equal(notePreview(s), naive(s), `随机串第 ${i} 条不一致`);
+  }
+});
+
+test('notePreview:全空白 → 空串(不是原样吐出空白);默认截 60 字符', () => {
+  assert.equal(notePreview('   \n\t  '), '', '整段只有空白时必须给空串,否则 tooltip 是一行看不见的空白');
+  assert.equal(notePreview(null), '', '非字符串输入不得抛错(列表里可能有脏数据)');
+  assert.equal(notePreview(undefined), '');
+  assert.equal(notePreview('a'.repeat(100)), 'a'.repeat(60), '默认摘要长度 60');
+  assert.equal(notePreview('a   b', 10), 'a b');
 });
 
 /* ---------- 版本历史(快照)纯函数 ---------- */

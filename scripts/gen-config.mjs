@@ -139,6 +139,10 @@ if (allowNoKey) {
 
 /* ---------------- WORKER_DOMAIN(选填) ---------------- */
 
+/* 声明放在这里(而不是注入那一段):下面「未配域名」的分支就要用它判断
+ * 开关是否被忽略 —— 放晚了会踩 TDZ,而那是 ReferenceError,不是安静的错误。 */
+const hideDev = get('HIDE_WORKERS_DEV') === '1';
+
 const rawDomain = get('WORKER_DOMAIN');
 let domain;
 if (rawDomain) {
@@ -156,6 +160,16 @@ if (rawDomain) {
   }
 } else {
   console.log('  · WORKER_DOMAIN 未配置 → 不生成自定义域路由,站点走 <name>.<子域>.workers.dev');
+  /* ★ 开关被静默忽略是这里最容易踩的坑(2026-10-12 全站审计 P2):
+   *   workers_dev 的切换只在「有自定义域」时才做 —— 没有自定义域还把它关掉,
+   *   Worker 就**一个入口都不剩**(静态资源与 /api/* 全部不可达),这不是「更安全」,
+   *   而是「站点消失」。所以忽略是对的行为,但必须**说出来**:
+   *   否则设了 HIDE_WORKERS_DEV=1 的人会以为入口已关,而线上照旧开着,
+   *   于是拿它去做安全判断(「只有自定义域能访问」)—— 判断建立在错的事实上。 */
+  if (hideDev) {
+    warn('HIDE_WORKERS_DEV=1 被忽略:未配置 WORKER_DOMAIN 时关闭 workers_dev 会让 Worker 一个入口都不剩。');
+    warn('  想要单一入口 → 同时设置 WORKER_DOMAIN=<你的域名>;想保留双入口 → 去掉 HIDE_WORKERS_DEV。');
+  }
 }
 
 /* ---------------- BUCKET_NAME(选填) ---------------- */
@@ -213,7 +227,6 @@ out = withBucket;
 // 默认**双入口**:workers.dev 是首次绑自定义域、DNS 还没生效时的验收兜底
 // (deploy.yml Verify 会自动退回它;两个入口指向同一个 Worker,门完全一致)。
 // 真的只要自定义域一个入口 → 设 HIDE_WORKERS_DEV=1。
-const hideDev = get('HIDE_WORKERS_DEV') === '1';
 const routesBlock = domain
   ? [
       '# 由 scripts/gen-config.mjs 注入:自定义域名入口。',

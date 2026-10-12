@@ -41,6 +41,17 @@ export function saveAccessKey(key) {
 
 /* ---------------- 请求原语 ---------------- */
 
+/** 响应头里的 etag → 内部统一使用的**裸值**(去引号 + 去弱验证器前缀)。
+ *
+ * ★ 必须同时剥 `W/`(2026-10-12 全站审计):CF 边缘会把压缩过的响应里的强 etag
+ *   改写成弱验证器 `W/"…"`,原样存下来再拼进 `If-Match` 会让服务端归一对不上,
+ *   表现是「恒 412,重新打开、重新解锁都没用」。
+ *   此前这条知识只写在 fetchVault 一处注释里、也只有那一处剥了 —— 分类那条(读
+ *   二进制响应)漏着一半:现在只有这一个实现,盖不到的地方也看得见。 */
+function normEtag(raw) {
+  return String(raw || '').replace(/"/g, '').replace(/^W\//i, '');
+}
+
 /** 请求超时。取值要容得下最慢一档(50MB 附件上传在慢网络下可能要几十秒)。 */
 const REQUEST_TIMEOUT_MS = 120_000;
 
@@ -103,7 +114,7 @@ export async function fetchVault(opt = {}) {
   if (res.status === 404) return { status: 404 };
   if (!res.ok) throw await errFrom(res);
   // W/ 前缀 = CF 边缘把压缩响应的强 etag 改写成了弱验证器,必须剥掉,否则 CAS 恒 412
-  return { status: 200, json: await res.json(), etag: (res.headers.get('etag') || '').replace(/"/g, '').replace(/^W\//i, '') };
+  return { status: 200, json: await res.json(), etag: normEtag(res.headers.get('etag')) };
 }
 
 /** 建库(只允许创建)。返回 { status, etag };etag 供建库后的改密码 CAS 使用。 */
@@ -140,7 +151,7 @@ export async function getCat(name) {
   const res = await req(`/api/cat?key=${encodeURIComponent(name)}`);
   if (res.status === 404) return null;
   if (!res.ok) throw await errFrom(res);
-  return { bytes: new Uint8Array(await res.arrayBuffer()), etag: (res.headers.get('etag') || '').replace(/"/g, '') };
+  return { bytes: new Uint8Array(await res.arrayBuffer()), etag: normEtag(res.headers.get('etag')) };
 }
 
 /**

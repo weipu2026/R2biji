@@ -14,9 +14,18 @@
 
 # recover.html 是单文件应急页(内联 script/style,设计为「双击即用」,不能拆外部资源)。
 # 上面的严格 CSP 会把它拦成白屏(实测:全部内联脚本样式被禁、页面完全不可用)。
-# 这里对它单独放宽内联限制;该页不承载已解锁的会话数据(只处理用户主动拖入的
-# 备份包),且主应用与其余资源仍走严格 CSP。条目名渲染处已做 HTML 转义。
+#
+# ⚠️⚠️ 光「再写一条更宽松的 CSP」是**无效**的(2026-10-12 全站审计 P0):
+#   CF 官方语义是「命中多条规则时继承全部规则的头」,且
+#   「同一个头被应用两次时,值用**逗号**连接」(Workers 静态资源与 Pages 同款:
+#   developers.cloudflare.com/workers/static-assets/headers/ → Detach a header)。
+#   于是 /recover.html 实际收到的是 `严格策略, 宽松策略` 两条策略 ——
+#   浏览器对多条策略取**交集**,严格那条的 script-src 'self'(无 unsafe-inline)
+#   照样把内联脚本全拦掉:线上白屏,而本地 dev-server 是单独放宽的、看着正常。
+#   这就是「本地好、线上坏」的经典形态。
+#   正解是用官方给的 **! 前缀摘除**语法:先摘掉 `/*` 那条 CSP,再挂本页自己的。
 /recover.html
+  ! Content-Security-Policy
   Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
 
 # Service Worker 必须能被注册,且更新时不能被 HTTP 缓存吃掉

@@ -158,6 +158,21 @@ test('部署守卫:首次绑域不红 —— Verify 必须能回退 workers.dev,
   assert.doesNotMatch(genSrc, /KEEP_WORKERS_DEV/, 'gen-config 仍残留旧开关 KEEP_WORKERS_DEV');
 });
 
+test('P2:没配 WORKER_DOMAIN 时 HIDE_WORKERS_DEV 必须显式告警(静默忽略会让人误判「入口已关」)', () => {
+  /* workers_dev 的切换只在「有自定义域」时才做:没有域名还把 workers_dev 关掉,
+   * Worker 就一个入口都不剩(静态资源与 /api/* 全不可达)—— 那不是更安全,
+   * 是站点消失。所以忽略是对的;但**必须说出来**:
+   * 设了开关却照旧开着双入口,而人可能拿「只有自定义域能访问」去做安全判断,
+   * 那条判断就建立在错的事实上。 */
+  const noDomainBranch = /WORKER_DOMAIN 未配置[\s\S]{0,800}?HIDE_WORKERS_DEV[\s\S]{0,120}?被忽略/.exec(genSrc);
+  assert.ok(noDomainBranch, '未配 WORKER_DOMAIN 时,HIDE_WORKERS_DEV 被忽略必须打出显式告警');
+  // hideDev 必须在被使用之前就赋值 —— 放晚了是 TDZ → ReferenceError(崩,不是安静的错误)
+  const declAt = genSrc.indexOf('const hideDev =');
+  const useAt = genSrc.indexOf('if (hideDev) {');
+  assert.ok(declAt >= 0, 'gen-config 必须有 const hideDev = ...');
+  assert.ok(useAt > declAt, `hideDev 必须先声明再使用(声明位置 ${declAt} / 使用位置 ${useAt})`);
+});
+
 test('部署守卫:工作流里的赋值管道必须有兜底 —— set -e 下非零退出会中止整步', () => {
   // 规则:`X=$(A | B | C)` 这种赋值,在 `set -euo pipefail` 的步骤里,
   // 只要管道里有任何一个环节非零退出(典型:grep 没匹配到、curl 4xx/5xx),
@@ -236,7 +251,7 @@ test('部署守卫:npm run deploy 必须先注入配置再部署生成物', () =
  * 且没有任何报错 —— 本组用例就是那道护栏。
  * ============================================================ */
 
-/** 解析 _headers:返回 [{ pattern, headers: {名称: 值} }] */
+/** 解析 _headers:返回 [{ pattern, headers: {名称: 值}, detach: [名称] }] */
 function parseHeaders(text) {
   const lines = text.replace(/\r\n/g, '\n').split('\n');
   const blocks = [];
@@ -245,9 +260,12 @@ function parseHeaders(text) {
     if (!line.trim() || line.trim().startsWith('#')) continue;
     if (!/^\s/.test(line)) {
       // 顶层路径行:CF 允许带尾随的绝对 URL,这里只取路径部分
-      cur = { pattern: line.trim().split(/\s+/)[0], headers: {} };
+      cur = { pattern: line.trim().split(/\s+/)[0], headers: {}, detach: [] };
       blocks.push(cur);
     } else if (cur) {
+      // `! Header-Name` = 官方「摘除头」语法:把上层规则挂上的同名头去掉
+      const d = /^\s*!\s*([A-Za-z0-9-]+)\s*$/.exec(line);
+      if (d) { cur.detach.push(d[1].toLowerCase()); continue; }
       const m = /^\s+([A-Za-z0-9-]+)\s*:\s*(.+)$/.exec(line);
       if (m) cur.headers[m[1].toLowerCase()] = m[2].trim();
     }
@@ -271,6 +289,25 @@ function matchHeaders(pathname) {
 function effectiveCacheControl(pathname) {
   const hits = matchHeaders(pathname);
   return hits.length ? (hits[hits.length - 1].headers['cache-control'] ?? null) : null;
+}
+
+/**
+ * 按 **CF 官方语义**算出某路径实际收到的头集合:
+ *   1. 命中多条规则时「继承全部」(不是就近覆盖),按文件顺序叠加;
+ *   2. 同一个头被应用两次 → 值用**逗号**连接(不是后者覆盖前者);
+ *   3. `! Header-Name` 先把该头从已累积集合里**摘掉**,再挂本规则的值。
+ * 只做 object-merge(后者胜)会得出与线上完全不同的结论 —— 这正是
+ * /recover.html 的 CSP 曾「看着写对了、线上仍白屏」的原因。
+ */
+function mergeHeadersCf(pathname) {
+  const out = {};
+  for (const b of matchHeaders(pathname)) {
+    for (const name of b.detach) delete out[name];
+    for (const [name, value] of Object.entries(b.headers)) {
+      out[name] = Object.prototype.hasOwnProperty.call(out, name) ? `${out[name]}, ${value}` : value;
+    }
+  }
+  return out;
 }
 
 test('缓存守卫:js/css 必须有非 no-cache 的 Cache-Control(否则每次访问都回源)', () => {
@@ -345,6 +382,107 @@ test('缓存守卫:一条命中多条规则时安全头不得丢失(CF 是「继
   );
   assert.ok(merged['x-frame-options'], '/js/main.js 丢掉了 X-Frame-Options');
   assert.ok(merged['strict-transport-security'], '/js/main.js 丢掉了 HSTS');
+});
+
+test('CSP 守卫:recover.html 必须真的摘掉 /* 的严格 CSP(否则线上白屏、本地正常)', () => {
+  /* recover.html 是单文件应急页,脚本与样式全部内联(设计如此:双击即用,
+   * 不依赖任何外部资源)。而 `/*` 上的严格 CSP 没有 'unsafe-inline',
+   * 会把内联脚本样式全部拦掉。
+   *
+   * 关键在 **CF 的合并语义**:命中 `/*` 与 `/recover.html` 两条规则时
+   * 继承全部,同名头用逗号连接 —— 于是「再写一条更宽松的 CSP」得到的是
+   * `严格, 宽松`,浏览器对多条策略取**交集**,严格那条照样生效。
+   * 必须用官方的 `! Content-Security-Policy` 先把上层那条摘掉。
+   *
+   * 本用例按 CF 真实语义合并,因此把 `!` 行删掉就会红 —— 它就是这条语法的护栏。 */
+  const hits = matchHeaders('/recover.html');
+  assert.ok(hits.length >= 2, '/recover.html 应同时命中 /* 与 /recover.html 两条规则');
+
+  // 前提:严格那条确实没有 unsafe-inline,摘除才是必需的(不是冗余配置)
+  const strictCsp = hits[0].headers['content-security-policy'] || '';
+  assert.match(strictCsp, /script-src 'self'(;|$)/, '/* 的 CSP 应是严格版(script-src \'self\' 无 unsafe-inline)');
+  assert.doesNotMatch(strictCsp, /unsafe-inline/, '/* 的 CSP 不该有 unsafe-inline —— 有的话本用例的前提就不成立了');
+
+  const merged = mergeHeadersCf('/recover.html');
+  const csp = merged['content-security-policy'] || '';
+  assert.ok(csp, '/recover.html 丢失了 CSP —— 安全头不能在摘除严格版的同时被整体抹掉');
+  assert.ok(
+    !csp.includes(','),
+    `recover.html 的 CSP 是被**逗号连接**的两条策略(说明 ! Content-Security-Policy 摘除失效):${csp}`,
+  );
+  assert.equal(
+    (csp.match(/script-src/g) || []).length, 1,
+    `recover.html 的 CSP 里出现了多份 script-src(策略被叠加,浏览器取交集后内联脚本仍被拦):${csp}`,
+  );
+  assert.match(csp, /script-src 'self' 'unsafe-inline'/, `recover.html 的 CSP 必须允许内联脚本:${csp}`);
+  assert.match(csp, /style-src 'self' 'unsafe-inline'/, `recover.html 的 CSP 必须允许内联样式:${csp}`);
+  // 放宽只限内联脚本样式,其余底牌不许一起放松
+  assert.match(csp, /default-src 'none'/, 'recover.html 的 CSP 丢了 default-src \'none\' —— 别为了内联把底牌全掀了');
+  assert.match(csp, /frame-ancestors 'none'/, 'recover.html 的 CSP 丢了 frame-ancestors');
+  assert.ok(merged['x-frame-options'], '/recover.html 丢掉了 X-Frame-Options');
+});
+
+test('CSP 守卫:recover.html 确实全靠内联(放宽 CSP 的前提必须是事实)', () => {
+  /* 若哪天把 recover.html 的内联脚本抽成了外部文件,上面那条放宽就不再必要,
+   * 应当收紧回严格 CSP。本用例钉住这个前提,让「前提消失」可见。 */
+  const html = read('public/recover.html');
+  const inlineScripts = (html.match(/<script(?![^>]*\bsrc=)[^>]*>/gi) || []).length;
+  const inlineStyles = (html.match(/<style[^>]*>/gi) || []).length;
+  assert.ok(inlineScripts > 0 || inlineStyles > 0, 'recover.html 已无内联脚本样式,应把 CSP 收紧回 /* 的严格版');
+  assert.doesNotMatch(html, /<link[^>]+rel=["']?stylesheet/i, 'recover.html 引入了外部样式表,与「单文件应急页」定位冲突');
+  assert.doesNotMatch(html, /<script[^>]+\bsrc=/i, 'recover.html 引入了外部脚本,与「单文件应急页」定位冲突');
+});
+
+/* ---------------- 2026-10-12 全站审计 P2:应急页的无障碍 ----------------
+ * 这一页只在「Cloudflare 被封 / 账号出事」那天才被打开 —— 用户上一次用它
+ * 可能是一年前,界面不熟、心态着急。无障碍问题在这里的代价比主站更高。 */
+
+test('a11y 守卫:应急页的文件选择器必须键盘可达(#zipInput 是 display:none)', () => {
+  /* #zipInput 是 display:none —— 不进 tab 序、也拿不到焦点。于是只绑了 click 的
+   * <div id="drop"> 成了**唯一**入口:键盘用户在「出事那天」的第 1 步直接卡死,
+   * 而页面文字还在说「点击选择文件」。
+   * role=button + tabindex 让它进 tab 序,Enter/Space 的激活必须由脚本真的接上 ——
+   * 只加属性不加监听,等于把「点不动」换成「按不动」,一样是墙。 */
+  const html = read('public/recover.html');
+  const atInput = html.indexOf('id="zipInput"');
+  assert.ok(atInput > 0, 'recover.html 应当有 #zipInput');
+  const before = html.slice(0, atInput);
+  const drop = before.slice(before.lastIndexOf('<div id="drop"'));
+  assert.match(drop, /role="button"/, '#drop 必须有 role="button"(读屏器才知道它能点)');
+  assert.match(drop, /tabindex="0"/, '#drop 必须进 tab 序,否则键盘用户选不了文件');
+  assert.match(drop, /aria-label=/, '#drop 必须有可访问名(否则读屏器只念出这行说明文字)');
+  assert.match(html, /drop\.addEventListener\('keydown'[\s\S]{0,240}?zipInput\.click\(\)/,
+    '#drop 必须接上 Enter/Space 的键盘激活 —— 只有 role/tabindex 是「按不动」');
+  assert.match(html, /e\.key === ' '[\s\S]{0,140}?preventDefault/,
+    '空格必须 preventDefault:否则选中它时按空格会同时把页面滚下去');
+  assert.match(html, /#drop:focus-visible/, '进了 tab 序就必须看得见焦点(否则「不知道停在哪」)');
+});
+
+test('a11y 守卫:应急页的输入框与行内报错必须有可访问名 / 播报角色', () => {
+  /* placeholder **不算**可访问名(读屏器不播报它)—— 主站弹窗那一层已经栽过一次
+   * (tests/dialog.test.mjs「P3:弹窗必须把标题关联为可访问名」)。
+   * 而 #err 是解密失败唯一的反馈出口:不播报的话,读屏用户只感到「点了没反应」。 */
+  const html = read('public/recover.html');
+  assert.match(html, /id="pwd"[^>]*aria-label=/, '主密码输入框必须有 aria-label');
+  assert.match(html, /id="zipInput"[^>]*aria-label=/, '文件选择框必须有 aria-label');
+  assert.match(html, /id="err"[^>]*role="alert"/, '解密失败的行内提示必须能被播报(role="alert")');
+  // 生成的离线阅读站里那两个输入框与报错同样处理
+  assert.match(html, /id="lpwd"[^>]*aria-label=/, '阅读站解锁框必须有 aria-label');
+  assert.match(html, /id="q"[^>]*aria-label=/, '阅读站搜索框必须有 aria-label');
+  assert.match(html, /id="lerr"[^>]*role="alert"/, '阅读站的解锁报错也必须能被播报');
+});
+
+test('P2:阅读站解析完内嵌密文后必须释放 DOM 里的源文本(base64 会驻留两份)', () => {
+  /* @@BLOBS@@ 是 base64,预算上限 4MB → 源文本约 5.4MB;而
+   * <script type="application/json"> 的内容被 HTML 解析器当文本节点**一直**留在
+   * DOM 里,JSON.parse 之后 BLOBS 里又有一份 ⇒ 两份同时驻留(手机上白白多占 5MB)。
+   * 抹掉是安全的:解锁与锁定都只读内存里的 DATA / BLOBS,从不回读 DOM ——
+   * 下面第三条正是钉住这一点:一旦有人改回「直接从 DOM 读」,抹掉就会让解锁拿到空串。 */
+  const html = read('public/recover.html');
+  assert.match(html, /elData\.textContent = ''/, '解析后必须释放 reader-data 的源文本');
+  assert.match(html, /elBlobs\.textContent = ''/, '解析后必须释放 reader-blobs 的源文本');
+  assert.doesNotMatch(html, /\$\('reader-(data|blobs)'\)\.textContent/,
+    '不得再直接从 DOM 取数据 —— 抹掉源文本之后那样读取会静默拿到空串(两处判断必须一致)');
 });
 
 test('缓存守卫:_headers 只管静态资源,不得出现 /api/* 规则', () => {

@@ -201,3 +201,38 @@ test('P3:触屏两列图钉也要落在同一条竖线(padding 没变,补偿必�
   assert.equal(catPad + catSlot, notePad + noteSlot,
     `触屏两列图钉也必须同线:分类 ${catPad}+${catSlot} vs 笔记 ${notePad}+${noteSlot}`);
 });
+
+/* ---------------- 2026-10-12 全站审计 P2:提示宿主的 popover 默认样式 ----------------
+ * .modal 是原生 <dialog> + showModal() —— 它落在浏览器的 **top layer**,
+ * 那块区域的层级由「加入顺序」决定,z-index 一概不参与。z-index:100 的普通容器
+ * (原本的 #toasts)永远压在它下面 ⇒ 弹窗开着期间到达的提示一条都看不见。
+ * 修法是让 #toasts 自己也进 top layer(popover="manual",见 ui.js 的 toast())。
+ *
+ * 但 popover 自带一整套 UA 默认样式:inset:0 + margin:auto(把元素撑满并居中)、
+ * border、padding、background:Canvas、color:CanvasText、overflow:auto。
+ * 不逐条归零,#toasts 会变成一块盖住整屏的不透明面板 —— 而这类事故只在真机上
+ * 才看得见(单测与 dev-server 都不渲染)。这条用例就是那份「归零清单」。 */
+test('P2:提示宿主挂 popover 后必须把 UA 默认样式归零(否则会被撑成全屏不透明面板)', () => {
+  const css = readFileSync(join(PUBLIC, 'css', 'style.css'), 'utf8');
+  const base = /#toasts\s*\{([^}]*)\}/.exec(css);
+  assert.ok(base, 'style.css 里应当有 #toasts 基础规则');
+  const m = /#toasts\[popover\]\s*\{([^}]*)\}/.exec(css);
+  assert.ok(m, '必须有 #toasts[popover] 规则 —— 一旦挂上 popover 属性,UA 那套默认样式就会生效');
+  const rule = m[1];
+  const has = (prop) => new RegExp(`(?:^|[;{\\s])${prop}\\s*:`).test(rule);
+  for (const p of ['inset', 'margin', 'padding', 'border', 'background', 'color', 'width', 'height', 'max-height', 'overflow']) {
+    assert.ok(has(p), `#toasts[popover] 缺 ${p} —— popover 的 UA 默认值会直接露出来`);
+  }
+  assert.match(rule, /inset:\s*auto\s+auto\s[^;]*50%/,
+    'inset 必须写成「auto auto <bottom> 50%」才等价于 #toasts 原来的 fixed 定位(UA 默认是 inset:0)');
+  assert.match(rule, /margin:\s*0/, 'popover 默认 margin:auto 会把它居中拉伸');
+  assert.match(rule, /padding:\s*0/, 'popover 默认有 padding,会在提示周围多出一圈');
+  assert.match(rule, /border:\s*0/, 'popover 默认带边框');
+  assert.match(rule, /background:\s*transparent/, 'popover 默认 background:Canvas 会变成一块不透明面板');
+  assert.match(rule, /overflow:\s*visible/, 'popover 默认 overflow:auto 会给宿主加滚动条');
+  // 底部对齐量必须与基础规则**逐字相同**:否则挂上 popover 的瞬间提示会跳位(含 iOS 安全区)
+  const baseBottom = /(?:^|[;{\s])bottom\s*:\s*([^;]+)/.exec(base[1])[1].trim();
+  assert.ok(rule.includes(baseBottom),
+    `#toasts[popover] 的底部对齐量必须与 #toasts 一致(${baseBottom}),否则提示进 top layer 的那一刻会跳位`);
+});
+

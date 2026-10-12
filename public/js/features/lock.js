@@ -186,6 +186,42 @@ export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } =
 }
 
 /**
+ * 空闲自动锁屏(自动锁屏定时器到点触发)。
+ *
+ * ★ 必须 confirmDiscard:false(2026-10-12 全站审计 P1):
+ *   自动锁屏的全部价值就是「人不在场时也必须锁上」。而 lockNow 默认在有未保存
+ *   改动时弹确认框,那个框唯一的「取消」分支就是**不锁定** —— 人不在场 → 没人点 →
+ *   屏幕永远停在已解锁状态、明文还留在屏幕上,而调用方却在定时器里无条件报了
+ *   「已自动锁屏」:既没锁、又谎报锁了,是最坏的一种组合。
+ *   与老板键同一条纪律:lockNow 内部会先尽力保存在途改动(await savePromise),
+ *   确实没存上的在锁完之后**如实报数**,「快」但不「瞒」。
+ *
+ * 不抛异常:本函数是 setTimeout 回调的最后一道,抛出去只会变成
+ * unhandledrejection(没有任何调用方接着)。
+ * ★ 但「不抛」不等于「不响」(2026-10-12 全站审计 P1):锁定**失败**时会明确
+ *   报一条 error —— 会话没释放、明文还在屏幕上,这时沉默就是最坏的结果。
+ * @returns {Promise<void>}
+ */
+export async function autoLock(ctx) {
+  let dropped = 0;
+  try {
+    dropped = (await ctx.lockNow({ confirmDiscard: false })) || 0;
+  } catch (e) {
+    /* ★ 锁定**失败**时必须说出来(2026-10-12 全站审计 P1):
+     *   这个函数的全部意义就是「不谎报已锁」——静默 return 的话,
+     *   会话根本没释放、明文还留在屏幕上,而触发它的场景恰恰是「人已经走开了」。
+     *   所以给 error 档(留 8 秒)并直接告诉用户手动锁。 */
+    ctx.toast(`自动锁屏失败(${e?.message || e}),明文仍在屏幕上 —— 请手动锁定`, 'error');
+    return;
+  }
+  if (dropped > 0) {
+    ctx.toast(`已自动锁屏 · ${dropped} 个分类的改动没能存上,已放弃(服务器上的是完整版本)`, 'warn');
+  } else {
+    ctx.toast('已自动锁屏', 'warn');
+  }
+}
+
+/**
  * 解锁/建库成功后,按用户意愿把会话落盘(勾选了才存)。
  * 与 lockNow 里的 clearSession 是一对:存 → 免密进入,清 → 需要重新输主密码。
  * ★ 导出供 ui.js 的 changePassword 复用:改密码换了鉴权令牌(DEK 不变),
@@ -200,14 +236,17 @@ export function rememberNow(ctx, dek, authKeyHex) {
   }
 }
 
-/** vault.json 备份:浏览器下载一份到本地(建库后 / 改密码后自动触发) */
-export function downloadVaultBackup(json) {
-  const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'vault.json';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+/** vault.json 备份:浏览器下载一份到本地(建库后 / 改密码后自动触发)。
+ *  ⚠️ 走 ctx.downloadBytes,不在这里内联建锚点(2026-10-12 全站审计):
+ *    此前 ui.js / 本文件 / note.js 各有一份锚点实现,行为不一致(有的 append、有的不),
+ *    「部分浏览器要求锚点在文档里才认 download」这条知识只在其中一份里写着。
+ *    与 note.js 收敛到 ctx.downloadUrl 是同一条纪律:一处实现,一处修。 */
+export function downloadVaultBackup(ctx, json) {
+  ctx.downloadBytes(
+    new TextEncoder().encode(JSON.stringify(json, null, 2)),
+    'vault.json',
+    'application/json',
+  );
 }
 
 export async function doUnlock(ctx, password) {
@@ -259,6 +298,12 @@ export async function doUnlock(ctx, password) {
     rememberNow(ctx, res.dek, res.authKeyHex);
     await ctx.enterApp();
   } catch (e) {
+    /* ★ 到这里失败(典型:rescan 时网络不通)时,上面已经把 Library 实例塞进了
+     *   store —— 它手里握着三把子密钥与 DEK。视图停在锁屏,却没人再引用它,
+     *   要等 GC 才释放;期间任何残留回调/DevTools 都能读到明文(2026-10-12 全站审计)。
+     *   与 resumeSession 的失败分支同一条处置:销毁 + 摘掉引用 + 清令牌。 */
+    const cur = S.get('lib');
+    if (cur) { cur.destroy(); S.set('lib', null); }
     err.textContent = `打开失败:${e.message}`;
     err.hidden = false;
   }
@@ -304,7 +349,7 @@ export async function doCreateLibrary(ctx, password, password2) {
     S.set('vaultJson', json);
     await lib.rescan();
     rememberNow(ctx, dek, authKeyHex);
-    downloadVaultBackup(json);
+    downloadVaultBackup(ctx, json);
     ctx.toast('笔记库已创建。vault.json 备份已开始下载,请妥善保存(全库钥匙的唯一载体)');
     await ctx.enterApp();
   } catch (e) {

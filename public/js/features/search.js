@@ -26,12 +26,21 @@ const SEARCH_RESULT_LIMIT = 50;
  *   此前表头恒写 `${results.length} 条匹配`、列表却只渲染前 50 条 ——
  *   用户看到「128 条匹配」却只翻得到 50 条,界面上**没有任何提示**,
  *   合理推断是「我的库就这么大」,而这不是事实。
+ *  ★ 第三个参数是「没读到几个分类」(2026-10-12 全站审计·假阴性):
+ *   某分类解密/拉取失败时它的笔记根本不在候选集里,结果却是干干净净的
+ *   「0 条匹配」—— 用户会得出「我没有这条笔记」,而事实是「这次没读到」。
+ *   搜索是**找不到就白找**的动作,这种假阴性比多一行提示危险得多,必须说清。
  * @param {number} total  findMatches 返回的**真实**总数
  * @param {number} limit  实际渲染条数上限
+ * @param {number} [unreadable=0] 本轮没能读取的分类数(0 = 全部读到)
  */
-export function resultHeadline(total, limit = SEARCH_RESULT_LIMIT) {
-  if (total > limit) return `${limit} / ${total} 条匹配(只显示前 ${limit} 条,请细化关键词)`;
-  return `${total} 条匹配`;
+export function resultHeadline(total, limit = SEARCH_RESULT_LIMIT, unreadable = 0) {
+  const base = total > limit
+    ? `${limit} / ${total} 条匹配(只显示前 ${limit} 条,请细化关键词)`
+    : `${total} 条匹配`;
+  return unreadable > 0
+    ? `${base} · 有 ${unreadable} 个分类这次没读到,结果可能不全`
+    : base;
 }
 
 /** 跑一次搜索并把结果渲染进 #searchPanel。
@@ -46,15 +55,20 @@ export async function runSearch(ctx) {
   await lib.loadAllCategories();
   if (seq !== searchSeq) return; // 期间用户又输入了:这轮结果作废
   const notesByCat = new Map();
+  let unreadable = 0;
   for (const name of lib.listCategories()) {
     const cat = lib.categoryInfo(name);
+    /* ★ 读不到 ≠ 没有匹配(2026-10-12 全站审计):没解开的分类以前被静默跳过,
+     *   它的笔记根本不在候选集里,结果却是一句干净的「0 条匹配」—— 属于假阴性,
+     *   而搜索正是「找不到就等于白找」的动作。记下数量,交给表头如实说明。 */
     if (cat.data) notesByCat.set(name, cat.data.notes);
+    else unreadable += 1;
   }
   const results = findMatches(notesByCat, q);
   panel.textContent = '';
   const head = document.createElement('div');
   head.className = 'search-head';
-  head.textContent = resultHeadline(results.length);
+  head.textContent = resultHeadline(results.length, SEARCH_RESULT_LIMIT, unreadable);
   panel.appendChild(head);
   const ul = document.createElement('ul');
   ul.className = 'search-list';

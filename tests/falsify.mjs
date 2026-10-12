@@ -43,7 +43,7 @@ const MUTANTS = [
   {
     label: '列表退回单页(不翻游标)',
     file: 'worker/worker.js',
-    from: 'for (let page = 0; page < 50; page++) {',
+    from: 'for (let page = 0; page < MAX_LIST_PAGES; page++) {',
     to: 'for (let page = 0; page < 1; page++) { // MUTANT',
     expect: '列表翻页',
   },
@@ -138,8 +138,8 @@ const MUTANTS = [
   {
     label: '孤儿清理退回 fail-open(读不出来的分类直接跳过)',
     file: 'public/js/lib.js',
-    from: '      if (!cat.data) { unreadable.push(name); continue; }',
-    to: '      if (!cat.data) { continue; } // MUTANT',
+    from: '    if (unreadable.size) {',
+    to: '    if (false) { // MUTANT:读不出来的分类直接跳过(fail-open)',
     expect: '分类读不出来时必须整次中止',
   },
   {
@@ -670,10 +670,17 @@ const MUTANTS = [
   {
     label: '跨分类移动:目标追加失败后不回滚内存(界面多出一篇云端并不存在的笔记)',
     file: 'public/js/lib.js',
-    from: '    if (!res?.ok) {\n      dst.data.notes.length = before;',
-    // 变异:把长度回滚整行注释掉(块体其余语句保留,语法仍合法)
-    to: '    if (!res?.ok) {\n      // MUTANT:不回滚长度',
+    from: '      const added = dst.data.notes[before];\n      dst.data.notes.length = before;',
+    // 变异:把长度回滚那行换成空操作(块体其余语句保留,语法仍合法)
+    to: '      const added = dst.data.notes[before];\n      void added; // MUTANT:不回滚长度',
     expect: '源一动不动且内存回滚',
+  },
+  {
+    label: '追加失败时先截断再读(「截掉多出来的 snap 引用」变成永不执行的死分支)',
+    file: 'public/js/lib.js',
+    from: '      const added = dst.data.notes[before];\n      dst.data.notes.length = before;',
+    to: '      dst.data.notes.length = before; // MUTANT:先截断再读\n      const added = dst.data.notes[before];',
+    expect: '失败时必须回滚内存与快照引用',
   },
   {
     label: 'vault 元信息写入不再比对内容(没变化也照写 —— 白烧一次条件写与请求数)',
@@ -743,8 +750,8 @@ const MUTANTS = [
   {
     label: '孤儿清理退回用缓存明文清点(删掉别端刚传的图)',
     file: 'public/js/lib.js',
-    from: 'await this.loadAllCategories({ force: true }); // ② 全部**重新**解密,清点面必须是当下的库',
-    to: 'await this.loadAllCategories(); // MUTANT',
+    from: '        try { await this.loadCategory(name, { force: true }); } catch { unreadable.add(name); }',
+    to: '        try { await this.loadCategory(name); } catch { unreadable.add(name); } // MUTANT:用缓存明文清点',
     expect: '必须用当下明文清点',
   },
   {
@@ -1175,6 +1182,141 @@ const MUTANTS = [
     from: '      res = await ctx.api.fetchVault(opt);',
     to: '      res = await ctx.api.fetchVault(); // MUTANT:忽略调用方给的超时',
     expect: '更宽松的超时',
+  },
+
+  /* ---- 2026-10-12 全站审计(第三轮):P0×2 / P1×4 / P2×若干 ---- */
+
+  {
+    label: '把上一级 CSP 的摘除语法写成注释(线上白屏:两条策略取交集)',
+    file: 'public/_headers',
+    from: '  ! Content-Security-Policy',
+    to: '  # MUTANT:摘除失效',
+    expect: 'CSP 守卫:recover.html 必须真的摘掉',
+  },
+  {
+    label: '外层转义器退回「原样返回」(摘要表/告警条变成可注入的 innerHTML)',
+    file: 'public/recover.html',
+    /* ★ 锚点必须覆盖到 `});`(2026-10-12):原锚点只到 `function (c) {` 为止,
+     *   替换掉它之后,紧随其后的 `return {...}[c];` 与 `});` 失去配对,
+     *   **整个脚本段变成语法错误** —— 而 recover.test.mjs 是用
+     *   `import('data:text/javascript,…')` 加载该段的,语法错误会让**模块加载失败**
+     *   (用例根本没注册),falsify 匹配不到 expect 用例名 → 误报成「守卫没判别力」。
+     *   教训:替换后必须保证**整段语法完整**,故这里把 `});` 一并纳入锚点。 */
+    from: `function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });`,
+    to: `function escHtml(s) {
+  return String(s); // MUTANT:不转义`,
+    expect: '转义器实现必须真的转义',
+  },
+  {
+    label: '外层又去调模板内的 rdrEsc(ReferenceError:结果面板整块渲染不出来)',
+    file: 'public/recover.html',
+    from: ': escHtml(String(iters))}',
+    to: ': rdrEsc(String(iters))}',
+    expect: 'READER_TEMPLATE 里的函数不得在模板外被调用',
+  },
+  {
+    label: '拖放区退回「只有 click」(键盘用户在出事那天选不了备份包)',
+    file: 'public/recover.html',
+    from: '    <div id="drop" role="button" tabindex="0"',
+    to: '    <div id="drop"',
+    expect: 'a11y 守卫:应急页的文件选择器必须键盘可达',
+  },
+  {
+    label: '键盘激活漏掉空格键(按空格变成滚动页面)',
+    file: 'public/recover.html',
+    from: "    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {",
+    to: "    if (e.key === 'Enter') { // MUTANT:漏掉空格",
+    expect: 'a11y 守卫:应急页的文件选择器必须键盘可达',
+  },
+  {
+    label: '阅读站解析完不释放 DOM 里的 base64 源文本(驻留两份,手机上多占 5MB)',
+    file: 'public/recover.html',
+    from: "    elData.textContent = '';",
+    to: '    void elData; // MUTANT:不释放',
+    expect: '必须释放 DOM 里的源文本',
+  },
+  {
+    label: '暗色主按钮字色退回硬编码 #fff(2.49:1,「确定」糊在底里)',
+    file: 'public/css/style.css',
+    from: ':root[data-theme="dark"] .btn.primary { color: #1e2128; }',
+    to: ':root[data-theme="dark"] .btn.primary { color: #fff; }',
+    expect: '主按钮文字压在强调色底上必须',
+  },
+  {
+    label: '提示宿主的 popover 默认样式漏归零一项(会被撑成全屏不透明面板)',
+    file: 'public/css/style.css',
+    from: `#toasts[popover] {
+  inset: auto auto calc(22px + env(safe-area-inset-bottom, 0px)) 50%;
+  margin: 0;`,
+    to: `#toasts[popover] {
+  inset: auto auto calc(22px + env(safe-area-inset-bottom, 0px)) 50%;`,
+    expect: '提示宿主挂 popover 后必须把 UA 默认样式归零',
+  },
+  {
+    label: '提示不再进 top layer(弹窗开着时到达的提示全部被盖住)',
+    file: 'public/js/ui.js',
+    from: '  enterTopLayer(host);',
+    to: '  void enterTopLayer; // MUTANT:不进 top layer',
+    expect: '弹窗开着时提示必须进 top layer',
+  },
+  {
+    label: '提示宿主重复 showPopover(已开时再调会抛 InvalidStateError)',
+    file: 'public/js/ui.js',
+    from: "    if (host.matches && host.matches(':popover-open')) return true; // 已在里面,重复调用会抛",
+    to: '    // MUTANT:不查已开',
+    expect: '连着来两条只 showPopover 一次',
+  },
+  {
+    label: 'HIDE_WORKERS_DEV 静默忽略(没配域名时不再出声,用户以为入口已经关了)',
+    file: 'scripts/gen-config.mjs',
+    from: 'HIDE_WORKERS_DEV=1 被忽略',
+    to: 'HIDE_WORKERS_DEV=1 未生效',
+    expect: '必须显式告警',
+  },
+  {
+    label: '分类 etag 只剥引号不剥 W/(该分类条件保存恒 412,表现是「点了没反应」)',
+    file: 'public/js/api.js',
+    from: "  return String(raw || '').replace(/\"/g, '').replace(/^W\\//i, '');",
+    to: "  return String(raw || '').replace(/\"/g, ''); // MUTANT:不剥 W/",
+    expect: '分类读取也必须剥掉弱验证器前缀',
+  },
+  {
+    label: '自动锁屏退回 lockNow 默认(弹确认框等人点 = 永不锁定 + 谎报已锁)',
+    file: 'public/js/features/lock.js',
+    from: '    dropped = (await ctx.lockNow({ confirmDiscard: false })) || 0;',
+    to: '    dropped = (await ctx.lockNow()) || 0; // MUTANT:走默认确认框',
+    expect: 'autoLock 必须 confirmDiscard:false',
+  },
+  {
+    label: '自动锁屏失败时静默(会话没释放、明文还在屏幕上,用户却什么都不知道)',
+    file: 'public/js/features/lock.js',
+    from: "    ctx.toast(`自动锁屏失败(${e?.message || e}),明文仍在屏幕上 —— 请手动锁定`, 'error');",
+    to: '    void e; // MUTANT:静默失败',
+    expect: '锁定失败必须报错',
+  },
+  {
+    label: '孤儿清理判据退回「内存里有没有明文」(有旧明文的分类会带着过时引用面去删图)',
+    file: 'public/js/lib.js',
+    from: '        try { await this.loadCategory(name, { force: true }); } catch { unreadable.add(name); }',
+    to: '        try { await this.loadCategory(name, { force: true }); } catch { /* MUTANT:不记名 */ }',
+    expect: '本轮重拉失败的分类必须记名并整次中止',
+  },
+  {
+    label: '列表截断判据退回「cursor 是否残留」(任何多页列表都误报被截断)',
+    file: 'worker/worker.js',
+    from: '  if (truncated) {',
+    to: '  if (cursor) { // MUTANT:用残留游标当判据',
+    expect: '正常翻页不得误报',
+  },
+  {
+    label: '笔记摘要多截几个字符(列表 tooltip 与旧行为漂移)',
+    file: 'public/js/format.js',
+    from: '  if (folded.length >= n) return folded.slice(0, n);',
+    to: '  if (folded.length >= n) return folded.slice(0, n + 3); // MUTANT',
+    expect: 'notePreview:必须与朴素实现',
   },
 
 ];

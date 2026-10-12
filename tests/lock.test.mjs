@@ -8,7 +8,7 @@
  * ============================================================ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { releaseSession } from '../public/js/features/lock.js';
+import { releaseSession, autoLock } from '../public/js/features/lock.js';
 import { Store } from '../public/js/store.js';
 
 /** 造一个最简 Library 替身:只关心 destroy 有没有被调用 */
@@ -123,4 +123,68 @@ test('releaseSession:lib 缺失或它没有 vaultJson 时,不得把会话态覆�
   releaseSession(store2, fakeDeps());
   assert.deepEqual(store2.get('vaultJson'), { keep: 2 },
     'lib 没有 vaultJson 时也不得覆盖成 undefined');
+});
+
+/* ============================================================
+ * 2026-10-12 全站审计 P1:空闲自动锁屏不得「谎报已锁」
+ *
+ * 真机表现:人走开 → 定时器到点 → 屏幕上明文还在,回来一看界面却写着
+ * 「已自动锁屏」。根因是走的是 lockNow 的默认 confirmDiscard:true ——
+ * 有未保存改动时弹出确认框,而**唯一的取消分支就是不锁定**;没人点 ⇒ 永不锁定,
+ * 而调用方在定时器里无条件报了成功。安全语义上这是最坏的一种组合。
+ * 现在走 autoLock(ctx):confirmDiscard:false + 如实报数。
+ * ============================================================ */
+
+/** 造一个最简 ctx:只关心 lockNow 收到的参数与 toast 说了什么 */
+function fakeLockCtx(lockNowImpl) {
+  const calls = { lockNow: [], toasts: [] };
+  return {
+    calls,
+    ctx: {
+      lockNow: async (opt) => { calls.lockNow.push(opt); return lockNowImpl ? lockNowImpl(opt) : 0; },
+      toast: (msg, kind) => { calls.toasts.push({ msg: String(msg), kind }); },
+    },
+  };
+}
+
+test('★ autoLock 必须 confirmDiscard:false(弹确认框等人点 = 永不锁定 + 谎报已锁)', async () => {
+  const { calls, ctx } = fakeLockCtx(() => 0);
+  await autoLock(ctx);
+
+  assert.equal(calls.lockNow.length, 1, '必须真的调用一次 lockNow');
+  assert.deepEqual(calls.lockNow[0], { confirmDiscard: false },
+    '★ 自动锁屏必须显式关掉确认框 —— 默认 true 会弹框等人点,而人不在场');
+  assert.equal(calls.toasts.length, 1, '锁完必须给一条提示');
+  assert.equal(calls.toasts[0].msg, '已自动锁屏');
+  assert.equal(calls.toasts[0].kind, 'warn');
+});
+
+test('autoLock:有改动没存上时必须如实报数,不得只说「已自动锁屏」', async () => {
+  const { calls, ctx } = fakeLockCtx(() => 2);
+  await autoLock(ctx);
+  const t = calls.toasts[0];
+  assert.match(t.msg, /已自动锁屏/, '仍要说明已经锁上了');
+  assert.match(t.msg, /2 个/, '★ 必须报出**具体数量** —— 静默丢改动是本项目反复修过的 P1');
+  assert.match(t.msg, /服务器上的是完整版本/, '要安抚住「云端是不是也没了」这个疑问');
+});
+
+test('★ autoLock:锁定失败必须报错,不许沉默(会话没释放、明文还在屏幕上)', async () => {
+  /* 这条路径存在的全部意义就是「不谎报已锁」。若失败时静默 return,
+   * 用户回来看到的是「什么都没发生」,而真正的状态是「明文留在屏幕上、会话没销毁」
+   * —— 触发它的场景恰恰是人已经走开。 */
+  const { calls, ctx } = fakeLockCtx(() => { throw new Error('tabs 通道炸了'); });
+  await autoLock(ctx);
+
+  assert.equal(calls.toasts.length, 1, '失败也必须给提示 —— 沉默 = 最坏结果');
+  const t = calls.toasts[0];
+  assert.equal(t.kind, 'error', '失败必须用 error 档(留 8 秒),不能是普通提示');
+  assert.match(t.msg, /失败/, '必须明说是失败');
+  assert.match(t.msg, /手动锁定/, '要给出下一步动作');
+  assert.doesNotMatch(t.msg, /^已自动锁屏$/, '★ 绝不能在没锁上的时候报「已自动锁屏」');
+});
+
+test('autoLock:lockNow 返回 undefined(异常路径)时不得当成「丢了改动」乱报数', async () => {
+  const { calls, ctx } = fakeLockCtx(() => undefined);
+  await autoLock(ctx);
+  assert.equal(calls.toasts[0].msg, '已自动锁屏', 'undefined 应退化成「没丢改动」的普通提示');
 });

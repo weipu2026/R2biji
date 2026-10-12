@@ -46,6 +46,9 @@
     text-align: center; color: var(--ink-soft); cursor: pointer; transition: border-color .15s;
   }
   #drop.over { border-color: var(--cinnabar); color: var(--cinnabar); }
+  /* ★ 它进了 tab 序(#drop 是键盘选文件的唯一入口),就必须看得见焦点在哪 ——
+     默认 outline 被这个圆角虚线框衬得几乎看不出,键盘用户会「不知道现在停在哪」。 */
+  #drop:focus-visible { outline: 2px solid var(--cinnabar); outline-offset: 3px; }
   #zipInput { display: none; }
   .pkg-summary { margin-top: 14px; font-size: 14px; display: none; }
   .pkg-summary table { border-collapse: collapse; width: 100%; }
@@ -94,18 +97,26 @@
 
   <div class="card">
     <p class="step-title"><span class="no">1</span>选择全库备份 zip</p>
-    <div id="drop">把备份包拖到这里，或点击选择文件</div>
-    <input type="file" id="zipInput" accept=".zip">
+    <!-- ★ 键盘可达(2026-10-12 全站审计 P2):#zipInput 是 display:none,
+         不进 tab 序、也拿不到焦点 —— 只绑 click 的 <div> 于是成了**唯一的入口**,
+         键盘用户在这一步直接卡死(这页偏偏是「出事那天」才用的)。
+         role=button + tabindex 让它进 tab 序,Enter/Space 的激活在脚本里接上。
+         aria-label 说明它是个按钮 —— 读屏器否则只会念出这行文字,听不出能点。 -->
+    <div id="drop" role="button" tabindex="0"
+         aria-label="选择全库备份 zip 文件（也可以把文件拖到这里）">把备份包拖到这里，或点击选择文件</div>
+    <input type="file" id="zipInput" accept=".zip" aria-label="全库备份 zip 文件">
     <div class="pkg-summary" id="pkgSummary"></div>
   </div>
 
   <div class="card">
     <p class="step-title"><span class="no">2</span>输入主密码</p>
-    <input type="password" id="pwd" placeholder="主密码（就是平时解锁笔记本用的那个）" autocomplete="off">
+    <input type="password" id="pwd" placeholder="主密码（就是平时解锁笔记本用的那个）" autocomplete="off" aria-label="主密码">
     <p class="hint" style="margin:8px 0 12px">密码只在本地内存里用于解密，不会离开这一页。</p>
     <div class="btn-row">
       <button class="btn primary" id="btnGo" disabled>解密全部</button>
-      <span id="err"></span>
+      <!-- role=alert:解密失败/包不对时这条文字才出现,读屏器不播报的话
+           用户只看到按钮「点了没反应」 -->
+      <span id="err" role="alert"></span>
     </div>
   </div>
 
@@ -512,6 +523,23 @@ function categoryToMd(name, data) {
   return lines.join('\n');
 }
 
+/**
+ * 外层作用域的 HTML 转义(本页 DOM 部分专用)。
+ *
+ * ⚠️ 不能调用 READER_TEMPLATE 里的 rdrEsc(2026-10-12 全站审计 P0):
+ *   那个函数**写在模板字符串内部**,只存在于「生成的离线阅读站」自己的
+ *   作用域里;外层脚本调用它必然 ReferenceError → 摘要表整块渲染不出来、
+ *   有告警时连结果面板一起消失(而解密其实已经成功),用户看到的是一句
+ *   「rdrEsc is not defined」,恰恰在抢救数据时最需要看清的时候。
+ *   两份实现是刻意的:阅读站是**另一个 HTML 文档**(它自己那份在 1023 行),
+ *   这里这份服务于本页 DOM。同源不同文档,无法互相引用。
+ */
+function escHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
 /** 附件导出名净化:去路径、去控制字符,保证能当 zip 条目名 */
 function sanitizeEntryName(name) {
   let s = String(name || '').split(/[\\/]/).pop() || '';
@@ -887,9 +915,9 @@ const READER_TEMPLATE = `<!DOCTYPE html>
     <h1>R2biji · 离线书斋</h1>
     <p class="desc">这是一个自包含的只读阅读站:文件里内嵌的是<b>全库密文</b>,不含任何明文。
     输入主密码后在本页解密阅读 —— 全程离线,不发出任何网络请求。</p>
-    <input type="password" id="lpwd" placeholder="主密码" autocomplete="off">
+    <input type="password" id="lpwd" placeholder="主密码" autocomplete="off" aria-label="主密码">
     <button id="lbtn" type="button">解锁阅读</button>
-    <div id="lerr"></div>
+    <div id="lerr" role="alert"></div>
   </div>
 </div>
 <div id="app" hidden>
@@ -907,7 +935,7 @@ const READER_TEMPLATE = `<!DOCTYPE html>
   </header>
   <div class="frame">
     <aside class="side">
-      <div class="search-box"><input id="q" placeholder="搜索标题或正文…"></div>
+      <div class="search-box"><input id="q" placeholder="搜索标题或正文…" aria-label="搜索标题或正文"></div>
       <nav id="nav"></nav>
     </aside>
     <main class="main"><article id="view"><div class="empty">解锁后,从左侧选择一篇笔记</div></article></main>
@@ -1137,9 +1165,20 @@ if (typeof document !== 'undefined') {
   var $ = function (id) { return document.getElementById(id); };
   var DATA = null, BLOBS = {};
   try {
-    DATA = JSON.parse($('reader-data').textContent);
-    var blobList = JSON.parse($('reader-blobs').textContent);
+    var elData = $('reader-data'), elBlobs = $('reader-blobs');
+    DATA = JSON.parse(elData.textContent);
+    var blobList = JSON.parse(elBlobs.textContent);
     for (var bi = 0; bi < blobList.length; bi++) BLOBS[blobList[bi].file] = blobList[bi].data;
+    /* ★ 解析完就把源文本从 DOM 里抹掉(2026-10-12 全站审计 P2):
+     *   内嵌附件是 base64,预算上限 READER_BLOB_LIMIT(4MB)→ 源文本约 5.4MB,
+     *   而 <script type="application/json"> 的内容被 HTML 解析器当作**文本节点**
+     *   一直留在 DOM 里。JSON.parse 之后 BLOBS 里已经有一份 ⇒ 两份同时驻留,
+     *   手机上就是白白多占的 5MB。
+     *   抹掉是安全的:DATA / BLOBS 是本次解析后独享的内存副本,解锁与锁定
+     *   (lock() → unlock())都只读它们,从不回读 DOM;数据块损坏时走 catch,
+     *   两个变量保持 null,后面解锁照常报错。 */
+    elData.textContent = '';
+    elBlobs.textContent = '';
   } catch (e) { /* 数据块损坏:解锁时会报错 */ }
 
   var st = { unlocked: null, maskTimers: [] };
@@ -1452,14 +1491,14 @@ if (typeof document !== 'undefined') {
         catch { return '?'; }
       })();
       summary.innerHTML = `<table>
-        <tr><td>备份包</td><td>${rdrEsc(sanitizeEntryName(file.name))} · ${fmtBytes(total)}</td></tr>
+        <tr><td>备份包</td><td>${escHtml(sanitizeEntryName(file.name))} · ${fmtBytes(total)}</td></tr>
         <tr><td>分类(密文)</td><td>${cats.length} 个</td></tr>
         <tr><td>附件(密文)</td><td>${blobs.length} 个</td></tr>
-        <tr><td>PBKDF2 迭代</td><td>${typeof iters === 'number' ? iters.toLocaleString() : rdrEsc(String(iters))}</td></tr>
+        <tr><td>PBKDF2 迭代</td><td>${typeof iters === 'number' ? iters.toLocaleString() : escHtml(String(iters))}</td></tr>
       </table>`;
       summary.style.display = 'block';
       if (warnings.length) {
-        warnList.innerHTML = warnings.map((w) => `<li>${rdrEsc(w)}</li>`).join('');
+        warnList.innerHTML = warnings.map((w) => `<li>${escHtml(w)}</li>`).join('');
       }
       pwd.focus();
     } catch (e) {
@@ -1508,16 +1547,23 @@ if (typeof document !== 'undefined') {
       catList.innerHTML = '<p class="hint">包里没有分类文件。</p>';
     }
     failList.innerHTML = r.failures.length
-      ? `<b style="font-size:13px">以下条目解密失败(其余不受影响):</b><ul class="warn-list">${r.failures.map((f) => `<li>${rdrEsc(f)}</li>`).join('')}</ul>`
+      ? `<b style="font-size:13px">以下条目解密失败(其余不受影响):</b><ul class="warn-list">${r.failures.map((f) => `<li>${escHtml(f)}</li>`).join('')}</ul>`
       : '';
     warnList.innerHTML = (r.warnings || []).length
-      ? r.warnings.map((w) => `<li>${rdrEsc(w)}</li>`).join('')
+      ? r.warnings.map((w) => `<li>${escHtml(w)}</li>`).join('')
       : '';
     doneTag.textContent = `共 ${nNotes} 篇笔记${nTrash ? `、回收站 ${nTrash} 篇` : ''}、${r.attachments.length} 个附件`;
     results.style.display = 'block';
   }
 
   drop.addEventListener('click', () => zipInput.click());
+  // ★ 键盘激活:role=button 的元素必须响应 Enter 与 Space(空格默认会滚动页面,要挡住)
+  drop.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ' || e.key === 'Spacebar') {
+      e.preventDefault();
+      zipInput.click();
+    }
+  });
   zipInput.addEventListener('change', () => loadZip(zipInput.files[0]));
   drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
   drop.addEventListener('dragleave', () => drop.classList.remove('over'));

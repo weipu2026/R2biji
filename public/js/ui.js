@@ -8,7 +8,6 @@ import * as F from './format.js';
 import * as API from './api.js';
 import { Library } from './lib.js';
 import { renderMarkdown } from './render.js';
-import { findMatches, renderSearchResult } from './search.js';
 import { saveSession, loadSession, clearSession } from './session.js';
 import { TabSync, planSavedCategoryAction } from './tabsync.js';
 // ★ 会话态统一收口到 store:下方 `S` 是指向 store 的代理,读写语法与原先完全一致,
@@ -19,7 +18,7 @@ import { initTheme, toggleTheme } from './features/theme.js';
 import { runSearch, closeSearch } from './features/search.js';
 import { scheduleClipboardWipe, refreshExportDue, openTrash, exportNoteMd, openPwGenerator } from './features/data.js';
 import {
-  showLock, lockNow, doUnlock, doCreateLibrary, resumeSession,
+  showLock, lockNow, autoLock, doUnlock, doCreateLibrary, resumeSession,
   rememberNow, downloadVaultBackup,
 } from './features/lock.js';
 import {
@@ -213,13 +212,56 @@ const SAVE_DEBOUNCE_MS = 800;            // 状态栏防抖刷新
 
 /* ================= 工具 ================= */
 
-function toast(msg, kind = 'info') {
+/**
+ * 把提示宿主送进浏览器 top layer —— 导出的原因与 modal 相同:这是唯一一处
+ * 「提示能不能被看见」的判据,写错了不报错、只是提示静默消失,必须可测。
+ *
+ * 背景:`#modal` 是原生 <dialog> + showModal(),它落在 **top layer**;
+ * 那块区域的层级由「加入顺序」决定,z-index 一概不参与。而 #toasts 原本只是
+ * z-index:100 的普通 fixed 容器 ⇒ 弹窗一开,这期间到达的提示全被盖住 ——
+ * 而提示恰恰常在弹窗开着时到达:另一个标签页保存/删除经 BroadcastChannel 推来的
+ * 通知、自动保存失败的报错,都是自己冒出来的。
+ * 用 `popover="manual"` 让 #toasts 自己也进 top layer(晚于弹窗加入 ⇒ 在其上);
+ * manual = 不响应 Esc / 点空白关闭,生命周期仍归 toast() 自己。
+ * 不支持 popover 的浏览器上 `showPopover` 不存在,这里静默跳过 —— 行为与从前一致。
+ */
+export function enterTopLayer(host) {
+  try {
+    if (!host || typeof host.showPopover !== 'function') return false;
+    if (!host.hasAttribute('popover')) host.setAttribute('popover', 'manual');
+    if (host.matches && host.matches(':popover-open')) return true; // 已在里面,重复调用会抛
+    host.showPopover();
+    return true;
+  } catch {
+    return false; // 宿主没连上文档 / 平台拒绝 —— 退回普通层级,不影响提示本身
+  }
+}
+
+/** 最后一条提示消失后退出 top layer,别让宿主一直占着顶层的点击面。 */
+export function leaveTopLayer(host) {
+  try {
+    if (!host || typeof host.hidePopover !== 'function') return;
+    if (host.matches && host.matches(':popover-open')) host.hidePopover();
+  } catch { /* 已不在 top layer:无需处理 */ }
+}
+
+const TOAST_MS = { error: 8000 };
+
+/** 导出仅为了可测(同 modal):「提示有没有进顶层」写错了不会报错,只会静默看不见。 */
+export function toast(msg, kind = 'info') {
   const box = document.createElement('div');
   box.className = `toast toast-${kind}`;
   box.textContent = msg;
-  $('toasts').appendChild(box);
+  const host = $('toasts');
+  host.appendChild(box);
+  enterTopLayer(host);
   // 错误提示留久一点:失败信息(尤其是「已中止」这类)通常比「已复制」更需要看清
-  setTimeout(() => box.remove(), kind === 'error' ? 8000 : 3000);
+  setTimeout(() => {
+    box.remove();
+    // 真实的 Element.remove() 会把它从父节点摘掉;摘空后就让宿主退出 top layer,
+    // 免得它一直占着顶层的点击面。
+    if (!host.childElementCount) leaveTopLayer(host);
+  }, TOAST_MS[kind] ?? 3000);
 }
 
 /**
@@ -955,7 +997,11 @@ const IDLE_EVENTS = ['pointerdown', 'keydown', 'wheel'];
 function resetIdleTimer() {
   if (S.settings.autoLockMinutes <= 0 || !S.lib) return;
   clearTimeout(S.idleTimer);
-  S.idleTimer = setTimeout(() => { lockNow(ctx); toast('已自动锁屏', 'warn'); }, S.settings.autoLockMinutes * 60 * 1000);
+  /* ★ 走 autoLock(ctx) 而不是裸 lockNow(ctx)(2026-10-12 全站审计 P1):
+   *   裸调用会走 lockNow 的默认 confirmDiscard:true —— 有未保存改动时弹确认框,
+   *   而人不在场时那个框永远没人点 ⇒ 屏幕一直不锁、明文留在屏幕上,
+   *   这里却已经报了「已自动锁屏」。autoLock 用 confirmDiscard:false 并如实报数。 */
+  S.idleTimer = setTimeout(() => { autoLock(ctx); }, S.settings.autoLockMinutes * 60 * 1000);
 }
 function startIdleTimer() {
   stopIdleTimer();
@@ -1019,7 +1065,7 @@ async function changePassword() {
     // 改密码换了鉴权令牌(DEK 不变)。本机记住的会话必须同步更新,
     // 否则下次打开会拿旧令牌去请求 → 401 → 被迫重输主密码(等于白记了)。
     rememberNow(ctx, S.lib.dek, API.getToken());
-    downloadVaultBackup(json);
+    downloadVaultBackup(ctx, json);
     toast('主密码已修改。新的 vault.json 备份已开始下载,请替换手头旧备份!', 'warn');
   } catch (e) {
     toast(`修改失败:${e.message}`, 'error');
@@ -1056,11 +1102,12 @@ function downloadUrl(url, fileName) {
 }
 
 function downloadBytes(bytes, fileName, mime = 'application/zip') {
+  /* ★ 与 downloadUrl 走同一条「建锚点 → 进文档 → click」路径(2026-10-12 全站审计):
+   *   此前本函数与 lock.js 的 vault.json 备份各写了一份内联锚点,行为还不一样
+   *   (downloadUrl 会 append 到文档、这两处不会)。note.js 早已收敛到 ctx.downloadUrl,
+   *   这里补齐,只剩一条实现。URL 生命周期仍由本函数管(大包必须给足读走的时间)。 */
   const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = fileName;
-  a.click();
+  downloadUrl(url, fileName);
   // 大包要给足时间让浏览器读走;提前 revoke 会得到一个空文件
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }

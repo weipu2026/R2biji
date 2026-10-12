@@ -218,6 +218,64 @@ test('孤儿清理:必须用当下明文清点(已解密分类也要强制重拉
   assert.deepEqual(await a.readAttachment(attB.file), imgB, '图片必须仍能读回原始字节');
 });
 
+/* ★ 2026-10-12 全站审计 P1:清点的判据必须是「**这一轮**重拉成了没有」,
+ * 而不是「内存里有没有明文」。
+ *   rescan() 有意保留已解密明文,而 loadCategory(force) 失败时**不会**清掉那份旧明文
+ *   ⇒ `!cat.data` 对「重拉失败、但有几小时前旧明文」的分类不成立:它会带着**过时的
+ *   引用面**进入清点,此后别的设备上传、当前确实被引用的图片会被判成孤儿删掉。
+ *   而 blobs 是全应用唯一**没有备份层**的东西 —— 删了不可恢复。
+ *   反向验证:把 cleanupOrphanBlobs 的判据改回 `!cat.data`,本用例必须变红(不再抛错)。 */
+test('孤儿清理:本轮重拉失败的分类必须记名并整次中止(有旧明文也不能照清)', async () => {
+  freshEnv();
+  API.clearToken();
+
+  const { json, dek, authKeyHex } = await V.createVault('清点判据密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('资料');
+  await a.createCategory('工作');
+
+  const imgA = new Uint8Array([137, 80, 78, 71, 1, 1, 1]);
+  const imgB = new Uint8Array([137, 80, 78, 71, 2, 2, 2]);
+  const attA = await a.addAttachment(imgA, 'a.png');
+  const attB = await a.addAttachment(imgB, 'b.png');
+  const catA = await a.loadCategory('资料');
+  catA.notes.push({ id: 'n1', title: 'A', content: 'x', order: 1000, createdAt: 1, updatedAt: 1, attachments: [{ file: attA.file, name: 'a.png' }] });
+  assert.deepEqual(await a.saveCategory('资料'), { ok: true });
+  const catB = await a.loadCategory('工作');
+  catB.notes.push({ id: 'n2', title: 'B', content: 'y', order: 1000, createdAt: 1, updatedAt: 1, attachments: [{ file: attB.file, name: 'b.png' }] });
+  assert.deepEqual(await a.saveCategory('工作'), { ok: true });
+
+  const before = (await API.listBlobs()).slice().sort();
+  assert.ok(before.length >= 2, '前提:桶里确实有 blob —— 有被误删的可能');
+  assert.ok(a.categoryInfo('资料').data, '前提:「资料」内存里有解密明文(旧判据正是被它骗过的)');
+
+  /* 只让「资料」的重拉失败(一次网络抖动),其余分类照常 */
+  const realFetch = globalThis.fetch;
+  const target = '/api/cat?key=' + encodeURIComponent('资料');
+  globalThis.fetch = (input, init) => {
+    const u = String(typeof input === 'string' ? input : input.url);
+    if (u.includes(target)) return Promise.reject(new TypeError('Failed to fetch'));
+    return realFetch(input, init);
+  };
+  let thrown = null;
+  try {
+    await a.cleanupOrphanBlobs();
+  } catch (e) {
+    thrown = e;
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.ok(thrown, '有分类重拉失败就必须中止清理 —— 静默继续等于拿旧引用面去删图片');
+  assert.equal(thrown.code, 'unreadable', `错误码应为 unreadable,实际:${thrown && thrown.code}`);
+  assert.match(thrown.message, /资料/, '错误信息必须点名是哪个分类读不到(否则用户无从下手)');
+  assert.deepEqual((await API.listBlobs()).slice().sort(), before, '中止时一张都不许删');
+});
+
 /* ============================================================
  * 版本历史的**成本契约**(2026-10-06 审计 P1/P2 重构)
  *
@@ -764,6 +822,56 @@ test('vault CAS 对弱验证器形态的 etag 免疫(CF 边缘把压缩 JSON 的
   await API.putVaultJson(JSON.stringify(again), fresh.etag);
   const final = await API.fetchVault();
   assert.equal(final.json.catMeta['测试二']?.pin, true);
+});
+
+/* ★ 2026-10-12 全站审计 P1:上面那条只覆盖了 vault —— **分类**那条读的是二进制
+ * 响应,同样会被 CF 边缘改写成弱验证器 W/"…",而它当时只剥了引号、没剥 `W/`。
+ * 后果一模一样:裸值里多一个 `W/`,拼进 If-Match 服务端归一对不上 →
+ * 该分类「恒 412」,用户看到的是「保存按钮点了没反应」,重新打开、重新解锁都不管用。
+ * (此前这条知识只写在 fetchVault 那一处注释里、也只有那一处剥过。) */
+test('P1:分类读取也必须剥掉弱验证器前缀(W/),否则该分类的条件保存恒 412', async () => {
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('弱etag分类密码abc', ITER);
+  assert.equal((await API.createVaultJson(JSON.stringify(json))).status, 201);
+  API.setToken(authKeyHex);
+  const a = new Library(await V.deriveAllKeys(dek), json, dek, null);
+  await a.rescan();
+  await a.createCategory('资料');
+
+  /* 复刻 CF 边缘:把分类响应的 etag 改写成弱验证器 W/"…" */
+  const realFetch = globalThis.fetch;
+  const weaken = (res) => {
+    const raw = res.headers.get('etag');
+    return {
+      ok: res.ok,
+      status: res.status,
+      headers: { get: (k) => (String(k).toLowerCase() === 'etag' ? (raw ? `W/${raw}` : null) : res.headers.get(k)) },
+      arrayBuffer: () => res.arrayBuffer(),
+      json: () => res.json(),
+    };
+  };
+  globalThis.fetch = async (input, init) => {
+    const res = await realFetch(input, init);
+    const u = String(typeof input === 'string' ? input : input.url);
+    return u.includes('/api/cat?key=') ? weaken(res) : res;
+  };
+  try {
+    await a.loadCategory('资料', { force: true });
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  const cat = a.categoryInfo('资料');
+  assert.ok(cat.lastSeenEtag, '前提:加载时记下了云端 etag');
+  assert.doesNotMatch(cat.lastSeenEtag, /^W\//, 'W/ 前缀必须剥掉 —— 带着它做 If-Match 会恒 412');
+  assert.doesNotMatch(cat.lastSeenEtag, /"/, '引号必须剥掉(条件写只认裸 etag)');
+
+  /* 用这份 etag 走一次真实的分类条件保存:必须成功,不能 412 */
+  const data = await a.loadCategory('资料');
+  data.notes.push({ id: 'n1', title: 'A', content: 'x', order: 1000, createdAt: 1, updatedAt: 1, attachments: [] });
+  assert.deepEqual(await a.saveCategory('资料'), { ok: true },
+    '用剥净的 etag 做条件写必须成功 —— 返回 conflict 说明 etag 里还残留 W/');
 });
 
 /* ============================================================

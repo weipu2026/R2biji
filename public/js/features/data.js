@@ -94,7 +94,11 @@ function restoreFromTrash(ctx, catName, note, row) {
   if (!cat?.data) { ctx.toast('原分类已不可读,无法恢复', 'error'); return; }
   cat.data.trash = (cat.data.trash || []).filter((t) => t.id !== note.id);
   delete note.deletedAt;
-  const maxOrder = cat.data.notes.reduce((m, n) => Math.max(m, n.order), 0);
+  const maxOrder = cat.data.notes
+    // order 非有限值(脏数据)会让 Math.max 一路传染成 NaN,而 F.orderBetween(NaN, null)
+    // 也是 NaN:那篇的 order 从此失效,排序退化成按创建时间兜底(不丢数据,但顺序不可预期)。
+    // 逐项过滤掉非有限值即可 —— 与 normalizeNoteData 的「宽容读取」同一条纪律。
+    .reduce((m, n) => (Number.isFinite(n.order) ? Math.max(m, n.order) : m), 0);
   note.order = F.orderBetween(maxOrder, null); // 排到分类末尾
   cat.data.notes.push(note);
   ctx.markDirty(catName);

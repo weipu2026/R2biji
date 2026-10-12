@@ -14,16 +14,16 @@ const THEME_KEY = 'jmbiji.theme';
 /** 深/浅色下 <meta name="theme-color"> 的取值(与 css 变量同色) */
 const THEME_COLOR = { dark: '#1e2128', light: '#faf8f2' };
 
-export function loadThemePref() {
+function loadThemePref() {
   try { return localStorage.getItem(THEME_KEY); } catch { return null; }
 }
 
-export function setThemePref(mode) {
+function setThemePref(mode) {
   try { localStorage.setItem(THEME_KEY, mode); } catch { /* 隐私模式:仅本次会话生效 */ }
 }
 
 /** 应用主题到 <html data-theme>、切换按钮图标、以及浏览器 UI 色。 */
-export function applyTheme(mode, ctx) {
+function applyTheme(mode, ctx) {
   const root = document.documentElement;
   if (root) root.dataset.theme = mode;
   const btn = ctx.dom.byId('btnTheme');

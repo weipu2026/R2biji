@@ -11,7 +11,7 @@
  * ============================================================ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { modal, handleConflict } from '../public/js/ui.js';
+import { modal, handleConflict, toast } from '../public/js/ui.js';
 import { store } from '../public/js/store.js';
 
 function installDom() {
@@ -20,6 +20,7 @@ function installDom() {
     const e = {
       tagName: String(tag).toUpperCase(),
       children: [],
+      parent: null,
       handlers: {},
       className: '',
       _text: null,
@@ -31,7 +32,7 @@ function installDom() {
       shown: false,
       closed: false,
       open: false,
-      appendChild(c) { e.children.push(c); return c; },
+      appendChild(c) { c.parent = e; e.children.push(c); return c; },
       addEventListener(ev, fn) { (e.handlers[ev] ||= []).push(fn); },
       removeEventListener(ev, fn) {
         const list = e.handlers[ev];
@@ -41,12 +42,28 @@ function installDom() {
       },
       click() { for (const fn of [...(e.handlers.click || [])]) fn({}); },
       keydown(key) { for (const fn of [...(e.handlers.keydown || [])]) fn({ key }); },
-      focus() {}, select() {}, remove() {},
+      focus() {}, select() {},
+      // remove() 必须真的从父节点摘掉:toast 靠「摘空了没」来决定要不要退出 top layer,
+      // 写成空函数会让那条判据永远为假(假绿)。
+      remove() {
+        const i = e.parent ? e.parent.children.indexOf(e) : -1;
+        if (i >= 0) e.parent.children.splice(i, 1);
+        e.parent = null;
+      },
+      get childElementCount() { return e.children.length; },
       // 真实 DOM 都有这两个 —— 无障碍属性(dialog aria-labelledby / input aria-label)
       // 只在 setAttribute 上生效,替身缺了会把「属性没设」掩盖成「测试崩了」
       attrs: {},
       setAttribute(k, v) { this.attrs[k] = String(v); },
       getAttribute(k) { return this.attrs[k] ?? null; },
+      hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); },
+      // top layer 相关(提示浮到弹窗之上靠 popover)——只覆盖 ui.js 用到的那点面
+      _popoverOpen: false,
+      popoverShown: 0,
+      popoverHidden: 0,
+      matches(sel) { return sel === ':popover-open' ? e._popoverOpen : false; },
+      showPopover() { e._popoverOpen = true; e.popoverShown += 1; },
+      hidePopover() { e._popoverOpen = false; e.popoverHidden += 1; },
       showModal() { e.shown = true; e.open = true; },
       // ★ close() 派发 close 事件,而且**异步**(排队到下个 task)——与真浏览器一致:
       //   按钮路径先 settle,close 晚到被 settled 挡住;同步派发会破坏这个顺序
@@ -286,3 +303,69 @@ test('P3 正对照:没给 label 时输入框退回用标题当可访问名(不�
   btn(dom.body, '取消').click();
   await p;
 });
+
+/* ---------------- 2026-10-12 全站审计 P2:提示必须浮在弹窗之上 ----------------
+ * <dialog>.showModal() 把弹窗放进浏览器的 **top layer** —— 那块区域的层级由
+ * 「加入顺序」决定,z-index 一概不参与。而 #toasts 原本只是 z-index:100 的普通
+ * fixed 容器 ⇒ **弹窗一开,这期间到达的提示全部被盖住**。
+ * 而提示恰恰常在弹窗开着时到达:另一个标签页保存/删除经 BroadcastChannel 推来的
+ * 通知、自动保存失败的报错,都是自己冒出来的 —— 用户看到的是「什么都没发生」。
+ * 判据:#toasts 必须被挂上 popover="manual" 并真的 showPopover()。 */
+
+test('★ 弹窗开着时提示必须进 top layer(否则被 <dialog> 整个盖住)', async () => {
+  const dom = installDom();
+  const p = modal({ type: 'confirm', title: '删除分类', danger: true });
+  assert.equal(dom.dlg.shown, true, '前提:弹窗已经进了 top layer');
+
+  toast('已在别处锁定 · 2 个分类的改动没能存上', 'warn');
+
+  assert.equal(dom.toasts.getAttribute('popover'), 'manual',
+    '#toasts 必须挂 popover="manual" —— 否则它不进 top layer,永远压在弹窗下面');
+  assert.equal(dom.toasts.popoverShown, 1, '必须真的调用 showPopover()');
+  assert.equal(dom.toasts.children.length, 1, '提示本身照常挂上去');
+
+  btn(dom.body, '取消').click();
+  await p;
+});
+
+test('提示:连着来两条只 showPopover 一次(已开时再调会抛 InvalidStateError)', () => {
+  const dom = installDom();
+  toast('第一条');
+  toast('第二条');
+  assert.equal(dom.toasts.popoverShown, 1, '第二条必须复用已经打开的 popover,重复调用会抛错');
+  assert.equal(dom.toasts.children.length, 2, '两条提示都要在');
+});
+
+test('提示:最后一条消失后退出 top layer(别一直占着顶层的点击面)', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dom = installDom();
+  toast('已复制');
+  assert.equal(dom.toasts._popoverOpen, true, '前提:提示在 top layer 里');
+  assert.equal(dom.toasts.children.length, 1);
+
+  t.mock.timers.tick(3000); // 非 error 提示 3 秒后自行消失
+
+  assert.equal(dom.toasts.children.length, 0, '到点必须把提示摘掉');
+  assert.equal(dom.toasts.popoverHidden, 1, '摘空后必须退出 top layer');
+  t.mock.timers.reset();
+});
+
+test('提示:error 提示留得比 info 久(失败信息更需要看清)', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const dom = installDom();
+  toast('保存失败', 'error');
+  t.mock.timers.tick(3000);
+  assert.equal(dom.toasts.children.length, 1, 'error 提示 3 秒时不该消失');
+  t.mock.timers.tick(5000);
+  assert.equal(dom.toasts.children.length, 0, 'error 提示 8 秒后应消失');
+  t.mock.timers.reset();
+});
+
+test('正对照:平台不支持 popover 时不得抛错,提示照常出现(退回普通层级)', () => {
+  const dom = installDom();
+  delete dom.toasts.showPopover; // 模拟老浏览器
+  assert.doesNotThrow(() => toast('降级路径'), '检测不到 showPopover 必须静默跳过,不能把提示功能整个带崩');
+  assert.equal(dom.toasts.getAttribute('popover'), null, '不支持时不该白挂一个 popover 属性');
+  assert.equal(dom.toasts.children.length, 1, '提示本身必须照常出现');
+});
+

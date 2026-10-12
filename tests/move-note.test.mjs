@@ -18,6 +18,7 @@ import { withDom, withLocalStorage } from './dom-stub.mjs';
 import { Store } from '../public/js/store.js';
 import { renameCategory, renameCategoryByName, renderCategoryList, renderNoteList, openNote, openCategory, deleteCategory } from '../public/js/features/sidebar.js';
 import { moveNoteToCategory, pickCategoryForNote, deleteNote, collectEditChanges } from '../public/js/features/note.js';
+import { Library } from '../public/js/lib.js';
 
 /** 把一个 Store + 一堆「被调过就记下来」的桩拼成 ctx。
  *  dom 必须由调用方(通常是 withDom 的 byId)注入 —— 见文件头那条说明。 */
@@ -518,4 +519,53 @@ test('★ deleteCategory:删除后 editing 必须复位(否则留下「编辑态
     assert.equal(st.get('activeCat'), null, '分类已删,选中清空');
     assert.equal(st.get('editing'), false, '★ 编辑标志必须跟着复位');
   });
+});
+
+/* ============================================================
+ * 库层:跨分类移动的「目标先写」那一步失败后的内存回滚
+ *
+ * 这是全应用唯一同时写两个分类文件的操作,追问的是同一件事:
+ * **失败之后内存里有没有留下云端并不存在的假象**。
+ * 上面的用例从 features/ 层用桩盯顺序;这里下到 Library 层,盯回滚**真的执行了**。
+ * ============================================================ */
+
+test('★ 库层 appendNoteToCategory:失败时必须回滚内存与快照引用(死分支会让孤儿引用留下)', async () => {
+  /* 2026-10-12 全站审计:原写法先 `notes.length = before`,再读 `notes[before]` ——
+   *   截断之后该下标恒为 undefined ⇒ 紧随其后那段「顺手截掉多出来的 snap 引用」
+   *   **从来没有执行过**:代码声称做了防孤儿处理而实际没做,且没有任何迹象能看出来。
+   *   这里直接盯住那条语句的**可观测结果**(快照引用数量),而不是盯它的写法。 */
+  const lib = new Library({}, { categories: [] }, new Uint8Array(32), null);
+  const cat = { data: { notes: [], trash: [] }, lastSeenEtag: 'e1' };
+  lib.categories.set('甲', cat);
+  lib.loadCategory = async () => cat.data;
+  lib.saveCategory = async () => {
+    // 复刻 saveCategory 的真实副作用:保存过程中会给这篇笔记留下一条快照引用
+    cat.data.notes[0].snaps.push({ file: 'snap-1.md', ts: 1 });
+    return { conflict: true };
+  };
+  const note = { id: 'n1', title: 't', content: 'c', createdAt: 1, updatedAt: 1, attachments: [], snaps: [] };
+  const res = await lib.appendNoteToCategory('甲', note);
+
+  assert.deepEqual(res, { conflict: true }, '冲突时原样把结果交给调用方');
+  assert.equal(cat.data.notes.length, 0, '失败时必须回滚内存:界面不得留下云端并不存在的笔记');
+  assert.equal(note.snaps.length, 0,
+    '★ 失败时「截掉多出来的 snap 引用」必须真的执行 —— 先截断再读会恒取到 undefined,该分支等于不存在');
+});
+
+test('库层 appendNoteToCategory:成功时不得动快照,且笔记与快照都在', async () => {
+  // 正对照:证明上面那条不是「一律把 snaps 清空」也能通过
+  const lib = new Library({}, { categories: [] }, new Uint8Array(32), null);
+  const cat = { data: { notes: [], trash: [] }, lastSeenEtag: 'e1' };
+  lib.categories.set('甲', cat);
+  lib.loadCategory = async () => cat.data;
+  lib.saveCategory = async () => {
+    cat.data.notes[0].snaps.push({ file: 'snap-1.md', ts: 1 });
+    return { ok: true };
+  };
+  const note = { id: 'n1', title: 't', content: 'c', createdAt: 1, updatedAt: 1, attachments: [], snaps: [] };
+  const res = await lib.appendNoteToCategory('甲', note);
+
+  assert.deepEqual(res, { ok: true });
+  assert.equal(cat.data.notes.length, 1, '成功时笔记必须留在内存里');
+  assert.equal(note.snaps.length, 1, '成功时快照引用不得被截掉(截掉 = 版本历史凭空消失)');
 });

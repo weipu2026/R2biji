@@ -32,8 +32,9 @@ const srgb = (c) => (c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 
 /** 相对亮度 L = 0.2126R + 0.7152G + 0.0722B,三通道线性化后加权 */
 function luminance(hex) {
-  const h = hex.replace('#', '');
-  assert.match(h, /^([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i, `色值格式不对:${hex}`);
+  let h = String(hex).trim().replace('#', '').toLowerCase();
+  assert.match(h, /^([0-9a-f]{3}|[0-9a-f]{6})$/, `色值格式不对:${hex}`);
+  if (h.length === 3) h = h.split('').map((c) => c + c).join(''); // #fff → #ffffff
   const [r, g, b] = [0, 2, 4].map((i) => srgb(parseInt(h.slice(i, i + 2), 16) / 255));
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
@@ -130,4 +131,68 @@ test('对比度:相对亮度函数自校验(判据本身不能算错)', () => {
   assert.ok(Math.abs(contrast('#ffffff', '#ffffff') - 1) < 0.001, '同色对比度应为 1:1');
   assert.ok(contrast('#ffffff', '#000000') === contrast('#000000', '#ffffff'),
     '参数顺序不应影响结果');
+});
+
+/* ---------- 文字压在**强调色底**上(主按钮)----------
+ * 上面那些用例算的都是「色值对纸面背景」,漏掉了反过来的情形:底色本身是
+ * --accent(主按钮 .btn.primary),字色写在规则里、与主题无关地硬编码 #fff。
+ * 亮色主题下白字压 #2f5a92 是 6.56:1(达标),所以这条一直没被看见 ——
+ * 但暗色主题为了让 --accent 在暗纸上达标把它**提亮**成了 #7fa7d9,
+ * 白字压上去只剩 2.49:1,不到 AA 门槛的一半。
+ * 判据必须按主题分别取「实际生效的字色」来算,不能只看一个硬编码值。 */
+
+/** 取某条规则里某个属性**实际生效**的声明值(找不到返回 null)。 */
+function decl(selector, prop) {
+  const esc = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const m = new RegExp(`${esc}\\s*\\{([^}]*)\\}`).exec(css);
+  assert.ok(m, `style.css 里找不到规则「${selector}」`);
+  // `(?:^|[;{\s])` 让 `color` 不会命中 `border-color`(它前面是 `-`,不在允许集合里)
+  const d = new RegExp(`(?:^|[;{\\s])${prop}\\s*:\\s*([^;]+)`).exec(m[1]);
+  return d ? d[1].trim() : null;
+}
+
+/** 把声明值解析成真实色值:支持 #rgb / #rrggbb / var(--token)。 */
+function color(v, theme = 'light') {
+  const m = /^var\(\s*(--[\w-]+)\s*\)$/.exec(String(v ?? '').trim());
+  if (!m) return v;
+  const t = tokens(m[1]);
+  const hex = theme === 'dark' ? (t.dark || t.light) : t.light;
+  assert.ok(hex, `解析不到 ${m[1]} 的${theme === 'dark' ? '暗色' : '亮色'}值`);
+  return hex;
+}
+
+test('对比度:主按钮文字压在强调色底上必须 ≥4.5:1(亮/暗两套主题都要算)', () => {
+  const cases = [
+    ['亮色', T.accent.light, color(decl('.btn.primary', 'color'), 'light')],
+    ['暗色', T.accent.dark, color(decl(':root[data-theme="dark"] .btn.primary', 'color'), 'dark')],
+  ];
+  for (const [theme, bg, fg] of cases) {
+    assert.ok(bg && fg, `${theme}主题:取不到 --accent 或 .btn.primary 的字色(取到 ${bg} / ${fg})`);
+    const r = contrast(fg, bg);
+    assert.ok(r >= 4.5,
+      `${theme}主题主按钮文字 ${fg} 压在强调色底 ${bg} 上只有 ${r.toFixed(2)}:1 —— ` +
+      `界面上最显眼的「确定 / 保存 / 登录」正好糊在底里`);
+  }
+});
+
+test('对比度:暗色主按钮 hover 态同样达标(--accent-hover 比 --accent 更浅)', () => {
+  const hover = tokens('--accent-hover');
+  const fg = color(decl(':root[data-theme="dark"] .btn.primary', 'color'), 'dark');
+  assert.ok(hover.dark && fg, '取不到暗色 --accent-hover 或暗色主按钮字色');
+  const r = contrast(fg, hover.dark);
+  assert.ok(r >= 4.5, `暗色主按钮 hover 文字 ${fg} on ${hover.dark} 只有 ${r.toFixed(2)}:1`);
+});
+
+test('对比度:暗色主按钮的禁用态必须单独给字色(底色比 accent 深,深墨字会看不见)', () => {
+  /* 上面那条把暗色主按钮的字色改成了深墨色(#1e2128)。而禁用态把底色换成
+   * 更深的 #3a4456 —— 深墨字压上去只有 1.59:1,几乎等于隐形。
+   * WCAG 1.4.3 豁免「非活动控件」,但看不出有个按不了的按钮不算豁免得了的问题,
+   * 所以这里要求它单独声明一个浅色字(≥3:1)。 */
+  const sel = ':root[data-theme="dark"] .btn.primary:disabled';
+  const disabled = color(decl(sel, 'color'), 'dark');
+  const bg = color(decl(sel, 'background'), 'dark');
+  assert.ok(disabled, '暗色主按钮的禁用态必须显式给 color —— 否则会继承深墨字,压在深底上看不见');
+  assert.ok(bg, '取不到暗色禁用态的 background');
+  const r = contrast(disabled, bg);
+  assert.ok(r >= 3, `暗色禁用态主按钮文字 ${disabled} on ${bg} 只有 ${r.toFixed(2)}:1(至少要能读出「这里有个按不了的按钮」)`);
 });

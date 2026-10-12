@@ -260,8 +260,11 @@ export class Library {
        *     旧实现一视同仁,于是一次网络抖动就把分类永久标成「无法解密」;而
        *     loadAllCategories 只在 !cat.error 时才重试 ⇒ 网络恢复后永不重试,
        *     孤儿图片清理被长期锁死(那是全应用唯一不可恢复的删除,锁死 = 永远清不了)。
-       *   ⚠️ cleanupOrphanBlobs 的「读不到就一张不删」判据是 !cat.data,与 cat.error 无关,
-       *     所以瞬时失败照旧进 unreadable —— 「保守不删」这条安全性不受本次改动影响。 */
+       *   ⚠️ cleanupOrphanBlobs 的「读不到就一张不删」判据**与这里无关**
+       *     (2026-10-12 全站审计 P1 起):它自己驱动重拉、按「本轮重拉成了没有」逐类记名,
+       *     永久损坏与瞬时失败一律保守 —— 两种都会让它整次中止。
+       *     所以 cat.error / cat.transient 只是**展示用**的态,不再是清理的安全判据。
+       *     (`if (!cat.data)` 那条旧判据会被内存里的旧明文骗过,已废弃。) */
       if (e instanceof C.FormatError || e instanceof C.CryptoError || e instanceof LibraryError) {
         cat.error = e.message;
       } else {
@@ -368,11 +371,13 @@ export class Library {
       throw e;
     }
     if (!res?.ok) {
-      dst.data.notes.length = before;
-      // saveCategory 里已跑过快照循环,被追加的那篇可能带上了 snaps + 已上传的 blob;
-      // 只还原长度不够 —— 那个 blob 会成为孤儿(内容寻址、无泄漏,但白占空间,
-      // 靠 cleanupOrphanBlobs 兜底,这里顺手把多出来的引用截掉)
+      /* ★ 顺序:先取出被追加的那篇,再截断数组(2026-10-12 全站审计)。
+       *   原写法先 `notes.length = before`、再读 `notes[before]` —— 截断后该下标
+       *   恒为 undefined,下面那段「顺手截掉多出来的 snap 引用」**从未执行过**:
+       *   代码声称做了防孤儿处理而实际没做,且没有任何迹象能看出来(死分支)。
+       *   反过来写即可,行为与注释一致。 */
       const added = dst.data.notes[before];
+      dst.data.notes.length = before;
       if (added && Array.isArray(added.snaps) && added.snaps.length) {
         added.snaps = added.snaps.slice(0, added.snaps.length - 1);
       }
@@ -640,17 +645,36 @@ export class Library {
    *      若直接拿旧明文清点,清点面就是「本机上次打开该分类时」的库 ——
    *      此后别的设备传上来的图不在引用里,会被当孤儿删掉(2026-10-06 审计 P0)。
    *      故这里用 force:true 强制全部重拉重解密:慢一点,换「绝不删正在用的图」。
+   *   4. **重拉失败但内存里还留着旧明文**(2026-10-12 审计 P1):`!cat.data` 判不出
+   *      这种情况,旧引用面照样进清点 → 误删。判据因此改成「本轮重拉是否成功」,
+   *      失败分类一律记名并整次中止(见下方实现)。
    *
    * 残余窗口:强制重拉到删除之间(秒级)别的设备若恰好新建分类并附图,仍可能误删。
    * 要更硬的保证得在服务端做标记-清扫或给新 blob 设冷却期,暂不引入。
    */
   async cleanupOrphanBlobs() {
     await this.rescan(); // ① 清单必须是新的:本机那份可能已经落后于别的设备
-    await this.loadAllCategories({ force: true }); // ② 全部**重新**解密,清点面必须是当下的库
+    /* ② 全部**重新**解密,清点面必须是当下的库。
+     * ★ 必须按「这一轮重拉成了没有」判,而不是「内存里有没有数据」
+     *   (2026-10-12 全站审计 P1):rescan() 有意保留已解密明文,而
+     *   loadCategory(force) 失败时**不会**清掉那份旧明文 —— 于是 `!cat.data`
+     *   对「重拉失败、但有旧明文」的分类不成立,它会带着几小时前的引用面
+     *   进入清点:此后别的设备上传、当前确实被引用的图片会被判成孤儿删掉。
+     *   而 blobs 是全应用唯一没有备份层的东西(删掉不可恢复)。
+     *   所以这里自己驱动重拉并逐类记名,判据收紧为「本轮是否拿到了当下的数据」;
+     *   永久损坏与瞬时失败**一样**保守:记名 → 整次中止 → 一张不删。 */
+    const names = [...this.categories.keys()];
+    const unreadable = new Set();
+    let i = 0;
+    await Promise.all(Array.from({ length: Math.min(4, names.length) }, async () => {
+      while (i < names.length) {
+        const name = names[i++];
+        try { await this.loadCategory(name, { force: true }); } catch { unreadable.add(name); }
+      }
+    }));
     const refs = new Set();
-    const unreadable = [];
     for (const [name, cat] of this.categories) {
-      if (!cat.data) { unreadable.push(name); continue; }
+      if (unreadable.has(name) || !cat.data) continue;
       for (const note of cat.data.notes) {
         for (const att of note.attachments) refs.add(att.file);
         for (const s of (note.snaps || [])) refs.add(s.file); // 版本历史也是活的引用,清了就回不去
@@ -661,9 +685,10 @@ export class Library {
         for (const s of (note.snaps || [])) refs.add(s.file);
       }
     }
-    if (unreadable.length) {
+    if (unreadable.size) {
+      const list = [...unreadable].sort();
       throw new LibraryError(
-        `有 ${unreadable.length} 个分类无法读取(${unreadable.join('、')}),无法清点它们引用的图片;`
+        `有 ${list.length} 个分类无法读取(${list.join('、')}),无法清点它们引用的图片;`
         + '已中止清理,未删除任何图片。请先解决这些分类的读取问题再重试。',
         'unreadable',
       );

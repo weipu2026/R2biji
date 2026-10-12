@@ -243,6 +243,61 @@ test('列表翻页:对象数超过单页上限时不会只拿到前 1000 个', a
   assert.equal((await (await call(env, 'GET', '/api/blobs', { headers: h })).json()).names.length, 4);
 });
 
+/* ★ 2026-10-12 全站审计 P2:截断判据必须用**本轮返回值**(res.truncated),
+ * 不能用「循环结束后 cursor 是否残留」。
+ *   cursor 只在 truncated 时被赋值,**正常翻完最后一页时不会被清掉** ⇒
+ *   任何超过一页的列表(>1000 个对象)都会打出「达到 50 页上限,其余被截断」的假警报:
+ *   备份与附件明明一个不少,日志却在喊被截断 —— 而这正是最费时间的那类误导。
+ * 两条用例:正常翻页**不许**出声;真的跑满上限**必须**出声。 */
+test('P2:正常翻页不得误报「被截断」(>1 页 ≠ 截断,假警报会把排查方向带偏)', async () => {
+  const env = { VAULT: new MemoryR2({ pageSize: 2 }), ALLOW_NO_ACCESS_KEY: '1' };
+  const { json, authKeyHex } = await createVault('pw-nofalse', ITER);
+  await call(env, 'PUT', '/api/vault', { body: JSON.stringify(json) });
+  const h = auth(authKeyHex);
+  const names = ['a', 'b', 'c', 'd', 'e'];
+  for (const n of names) {
+    await call(env, 'PUT', `/api/cat?key=${n}`, { body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' } });
+  }
+
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.map(String).join(' ')); };
+  let cats;
+  try {
+    cats = (await (await call(env, 'GET', '/api/cats', { headers: h })).json()).cats;
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(cats.length, names.length, '前提:确实跨了好几页才拿全');
+  assert.deepEqual(warns.filter((w) => /截断/.test(w)), [],
+    '正常翻页不得打截断警告 —— 「备份明明在却看不到」的排查方向会被整句假警报带偏');
+});
+
+test('P2 正对照:真的跑满页数上限时必须出声(静默截断无从诊断)', async () => {
+  /* 个人库到不了 50 页,但真到了必须报 —— 否则用户看到的界面少了一批对象,
+   * 而日志一片安静,连「是不是被截断了」都无从判断。 */
+  const env = { VAULT: new MemoryR2({ pageSize: 1 }), ALLOW_NO_ACCESS_KEY: '1' };
+  const { json, authKeyHex } = await createVault('pw-trunc', ITER);
+  await call(env, 'PUT', '/api/vault', { body: JSON.stringify(json) });
+  const h = auth(authKeyHex);
+  for (let i = 0; i < 51; i += 1) {
+    await call(env, 'PUT', `/api/cat?key=k${i}`, { body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' } });
+  }
+
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => { warns.push(a.map(String).join(' ')); };
+  let cats;
+  try {
+    cats = (await (await call(env, 'GET', '/api/cats', { headers: h })).json()).cats;
+  } finally {
+    console.warn = realWarn;
+  }
+  assert.equal(cats.length, 50, '前提:单页 1 条 × 50 页上限 = 只拿得到 50 个');
+  assert.ok(warns.some((w) => /截断/.test(w)),
+    '★ 确实截断了却一声不响,用户只会看到对象「凭空消失」而无从诊断');
+});
+
 /* /api/blobs 同时回 names 与带体积的 blobs:
  * 前者是向后兼容(既有调用方在用),后者是「全库导出」用来先提示体积的。 */
 test('附件清单:names 与带体积的 blobs 必须一致且 size 真实', async () => {

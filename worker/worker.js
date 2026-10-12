@@ -129,19 +129,28 @@ async function loadVault(env) {
 
 /** 列全前缀下的对象。真机 R2 单次最多返回 1000 个键并给游标,
  *  不分页会让第 1001 个之后的对象在界面上「凭空消失」。 */
+const MAX_LIST_PAGES = 50;
+
 async function listAll(bucket, prefix) {
   const objects = [];
   let cursor;
-  for (let page = 0; page < 50; page++) {
+  /* ★ 截断判据必须用**本轮返回值**(2026-10-12 全站审计):
+   *   旧写法循环结束后拿 `cursor` 是否残留来判断,而 cursor 只在 truncated 时被赋值、
+   *   正常翻完最后一页时**不会被清掉** —— 于是任何超过一页(>1000 个对象)的列表
+   *   都会打出一句「达到 50 页上限,其余被截断」的假警报,把排查方向直接带偏
+   *   (备份明明全在,日志却在喊被截断)。改成每轮用 res.truncated 覆盖一个独立标志。 */
+  let truncated = false;
+  for (let page = 0; page < MAX_LIST_PAGES; page++) {
     const res = await bucket.list(cursor ? { prefix, cursor } : { prefix });
     objects.push(...res.objects);
-    if (!res.truncated) break;
+    truncated = !!res.truncated;
+    if (!truncated) break;
     cursor = res.cursor;
   }
-  if (cursor) {
+  if (truncated) {
     // 循环跑满 50 页仍有游标 = 后面还有对象被截断。个人库到不了 5 万个对象,
     // 但真到了必须出声 —— 静默截断会让「备份明明存在却看不到」无从诊断
-    console.warn(`listAll: ${prefix} 达到 50 页上限,仅返回前 ${objects.length} 个对象,其余被截断`);
+    console.warn(`listAll: ${prefix} 达到 ${MAX_LIST_PAGES} 页上限,仅返回前 ${objects.length} 个对象,其余被截断`);
   }
   return objects;
 }
