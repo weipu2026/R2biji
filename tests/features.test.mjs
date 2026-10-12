@@ -31,7 +31,7 @@ const CTX_KEYS = ['dom', 'icons', 'toast', 'modal', 'store', 'markDirty', 'copyT
   'clickable', 'openNote', 'activeNoteData', 'renderNoteList', 'renderCategoryList',
   'addNote', 'renderReadView', 'moveNote', 'toggleNotePin', 'pickCategoryForNote', 'openHistory',
   // shell.js 的入口绑定(一律不带 ctx)
-  'showLock', 'lockNow', 'doUnlock', 'doCreateLibrary', 'resumeSession',
+  'showLock', 'lockNow', 'doUnlock', 'doCreateLibrary', 'resumeSession', 'reloadVault',
   'addCategory', 'renameCategory', 'deleteCategory', 'openCategory', 'renameLastReadCat',
   'enterEditMode', 'exitEditMode', 'collectEditChanges', 'addAttachments',
   'copyWholeNote', 'deleteNote', 'moveNoteSelection', 'bindReadSwipe',

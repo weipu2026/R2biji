@@ -25,6 +25,55 @@
 
 /* ================= 启动流程 ================= */
 
+/**
+ * 拉取库级信息(vault.json)并写入会话态。
+ *
+ * ★ 抽成独立函数是为了让「锁屏上的解锁点击」也能重新拉一次(见 lock.js 的 doUnlock):
+ *   boot 那次拉取失败时(办公网首次 TLS 握手/代理慢,超过启动探测的 10s 超时是最常见
+ *   的触发),`store.vaultJson` 是 **null**。此时用户点「解锁」会走到
+ *   `unlockVault(null)` → reason='corrupt' → 屏幕上出现「vault.json 已损坏,请从备份恢复」
+ *   —— 一句既吓人、药方又完全错误的话(库里什么都没坏,只是这一次没连上)。
+ *   (2026-10-12 用户真机反馈;复盘见 AUDIT-2026-10-12.md)
+ *
+ * @param {{ timeoutMs?: number }} [opt] 覆盖单次请求超时:启动探测取默认(10s,断网时
+ *   不能让锁屏转两分钟圈);用户主动点击触发的补拉给更长预算(他愿意多等一会儿)。
+ * @returns {Promise<'ok'|'missing'>} 'missing' = 服务器上确实没有库(该建库)
+ * @throws {ApiError} 网络不通 / 访问密钥 / 服务端未就绪(由调用方如实转述)
+ */
+export async function loadVaultInfo(ctx, opt = {}) {
+  for (;;) {
+    let res;
+    try {
+      res = await ctx.api.fetchVault(opt);
+    } catch (e) {
+      /* 访问密钥门的重试也收在这里:此前只写在 boot 的循环里,于是「锁屏上点解锁」
+       * 这条补拉路径遇到 401 access-key 会直接把错误弹给用户,连输入框都不出现
+       * (用户换设备/清了站点数据后必然撞上)。收进来之后 boot 与两条补拉路径
+       * 共用同一份实现。 */
+      if (e.code !== 'access-key') throw e;
+      const key = await ctx.modal({
+        type: 'prompt', title: '访问密钥',
+        label: '输入部署时设置的 ACCESS_KEY(≥16 字符)',
+        text: '此服务器启用了访问密钥(与主密码是两回事)。密钥只保存在本机浏览器里,换设备/换浏览器需再输一次。',
+      });
+      if (key != null && key.trim()) { ctx.api.saveAccessKey(key.trim()); continue; }
+      throw new Error('未提供访问密钥,无法连接笔记库');
+    }
+    if (res.status === 404) {
+      // 服务器上没有库:把上一次可能残留的库信息清掉,别让解锁拿旧的一份去解
+      ctx.store.set('vaultJson', null);
+      ctx.store.set('vaultEtag', null);
+      return 'missing';
+    }
+    /* ⚠️ 必须用 set():store 的状态都在 _state 里,实例上没有字段。
+     *    若按老习惯直接往实例上挂属性,那只是个没人读的实例属性,后续 get 读不到 ——
+     *    表现为「解锁永远说库损坏」。(2026-09-27 实测:护栏「建库后进入应用」超时,根因就是这个。) */
+    ctx.store.set('vaultJson', res.json);
+    ctx.store.set('vaultEtag', res.etag);
+    return 'ok';
+  }
+}
+
 /* 导出原因:ui.js 的「从备份恢复」在重建了库之后需要**重跑一遍启动流程**
  * (vaultJson 已失效、当前会话令牌也对不上),那个调用点在 ui.js 里。
  * 由 ui.js import 本函数即可 —— 反向(本文件 import ui.js)才是不允许的。 */
@@ -32,45 +81,27 @@ export async function boot(ctx) {
   ctx.loadSettings();
   ctx.api.loadAccessKey();
   ctx.showLock('loading'); // 首屏即过渡态:主密码框只在该手动解锁时出现,别闪现
-  // 拉取 vault.json:404 = 未建库 → 建库流程;其余错误 → 提示
-  for (;;) {
-    let res;
-    try {
-      res = await ctx.api.fetchVault();
-    } catch (e) {
-      if (e.code === 'access-key') {
-        const key = await ctx.modal({
-          type: 'prompt', title: '访问密钥',
-          label: `输入部署时设置的 ACCESS_KEY(≥16 字符)`,
-          text: '此服务器启用了访问密钥(与主密码是两回事)。密钥只保存在本机浏览器里,换设备/换浏览器需再输一次。',
-        });
-        if (key != null && key.trim()) { ctx.api.saveAccessKey(key.trim()); continue; }
-        ctx.dom.byId('lockErr').textContent = '未提供访问密钥,无法连接笔记库';
-        ctx.dom.byId('lockErr').hidden = false;
-        ctx.dom.byId('lockLoading').hidden = true;
-        return;
-      }
-      // 服务端 fail closed(ACCESS_KEY 未配置/过短):原样显示它给的可操作提示
-      // api.js 的网络分支已拼过「无法连接服务器:」,这里别再拼一遍(实测显示双前缀)
-      ctx.dom.byId('lockErr').textContent = e.message;
-      ctx.dom.byId('lockErr').hidden = false;
-      ctx.dom.byId('lockLoading').hidden = true;
-      // 把解锁表单放出来:此前只显示错误,既没密码框也没重试入口(2026-10-06 审计 P3)
-      ctx.dom.byId('lockForm').hidden = false;
-      return;
-    }
-    if (res.status === 404) { ctx.showLock('setup'); return; }
-    /* ⚠️ 必须用 set():store 的状态都在 _state 里,实例上没有字段。
-     *    若按老习惯直接往实例上挂属性(写成「ctx.store 点 字段名 等于 值」),
-     *    那只是个没人读的实例属性,后续 get 读不到 —— 表现为「解锁永远说库损坏」。
-     *    (2026-09-27 实测:护栏「建库后进入应用」超时,根因就是这个。) */
-    ctx.store.set('vaultJson', res.json);
-    ctx.store.set('vaultEtag', res.etag);
-    // 「记住本设备」:本机有可用会话就直接进,不问主密码(失败会自己回落锁屏)
-    if (ctx.store.get('settings').rememberDevice && await ctx.resumeSession()) return;
+  let status;
+  try {
+    status = await loadVaultInfo(ctx);
+  } catch (e) {
+    /* 网络不通 / 服务端 fail closed(ACCESS_KEY 未配置或过短) / 用户取消了访问密钥:
+     * 原样转述底层那句可操作提示(api.js 的网络分支已拼过「无法连接服务器:」,
+     * 这里不再加工,否则会出现双前缀)。
+     * ★ 放出的必须是**可重试**的解锁表单:此时 store.vaultJson 仍是 null,
+     *   用户点「解锁」会先走 doUnlock 的补拉分支(见 lock.js)拿到库信息再解 ——
+     *   这条重试路径才让「表单可见」有意义(2026-10-12 用户真机反馈)。
+     *   用 showLock('unlock') 而非手动 hidden=false:顺带复位 lockMode(旧写法留在
+     *   'loading',屏幕长得像解锁页却自称还在探测中)、清空上次的密码、放回焦点。 */
     ctx.showLock('unlock');
+    ctx.dom.byId('lockErr').textContent = e.message;
+    ctx.dom.byId('lockErr').hidden = false;
     return;
   }
+  if (status === 'missing') { ctx.showLock('setup'); return; }
+  // 「记住本设备」:本机有可用会话就直接进,不问主密码(失败会自己回落锁屏)
+  if (ctx.store.get('settings').rememberDevice && await ctx.resumeSession()) return;
+  ctx.showLock('unlock');
 }
 
 /* ================= 事件绑定 ================= */

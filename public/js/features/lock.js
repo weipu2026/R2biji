@@ -32,6 +32,12 @@ import * as F from '../format.js';
 /** 恢复会话失败时要在锁屏上说明的原因,由 showLock 消费一次后清空 */
 let pendingLockMsg = null;
 
+/** 用户**主动点击**触发的库信息补拉超时。比启动探测的 10s 更宽松:那 10s 是为了
+ *  「断网时别让锁屏转两分钟」,而这里用户已经点了一次按钮、明确表达了「现在就试」,
+ *  值得多等一会儿 —— 办公网首次 TLS 握手 / 代理预热常常正好卡在 10~20s 之间
+ *  (2026-10-12 真机反馈的那次失败就是启动探测超时)。 */
+const RELOAD_TIMEOUT_MS = 20_000;
+
 export function showLock(ctx, mode) {
   const S = ctx.store;
   const $ = (id) => ctx.dom.byId(id);
@@ -209,6 +215,34 @@ export async function doUnlock(ctx, password) {
   const $ = (id) => ctx.dom.byId(id);
   const err = $('lockErr');
   err.hidden = true;
+  /* ★ 没有库信息就别往下解(2026-10-12 真机反馈的根因,复现记录见 AUDIT-2026-10-12.md):
+   *   boot 那次拉取如果失败(办公网首包超时是最常见的触发),`store.vaultJson` 是 null,
+   *   而锁屏上**已经放着可点的解锁表单**(boot 的失败分支故意放出来给重试用)。
+   *   此时若直接 unlockVault(null),会走 reason='corrupt' 分支,给用户看到
+   *   「vault.json 已损坏,请从备份恢复」—— 一句既吓人、药方又完全错误的话:
+   *   库里什么都没坏,只是这一次没连上,而用户会真的去翻备份。
+   *   点「解锁」在用户心里就是「重试」,所以这里先补拉一次,按真实结果说话。 */
+  if (!S.get('vaultJson')) {
+    err.textContent = '正在重新获取库信息…';
+    err.hidden = false;
+    let status;
+    try {
+      status = await ctx.reloadVault({ timeoutMs: RELOAD_TIMEOUT_MS });
+    } catch (e) {
+      // 仍然拿不到:如实说是连接问题,别说「已损坏」——绝不让用户去翻备份
+      err.textContent = `还没能获取到库信息,无法解锁:${e.message}`;
+      return;
+    }
+    if (status === 'missing') {
+      // 服务器上确实没有库了(被清空 / 换了桶):切到建库态,并说清两条出路
+      ctx.showLock('setup');
+      $('lockErr').textContent = '服务器上没有找到笔记库(可能被清空或换过桶):请创建新库,或用备份恢复';
+      $('lockErr').hidden = false;
+      return;
+    }
+    err.textContent = '';
+    err.hidden = true;
+  }
   try {
     const res = await ctx.vault.unlockVault(S.get('vaultJson'), password);
     if (!res.ok) {
@@ -242,14 +276,25 @@ export async function doCreateLibrary(ctx, password, password2) {
     const { json, dek, authKeyHex } = await ctx.vault.createVault(password);
     const { status, etag } = await ctx.api.createVaultJson(JSON.stringify(json, null, 2));
     if (status === 409) {
-      err.textContent = '服务器上已存在笔记库,请直接解锁';
-      err.hidden = false;
-      S.set('vaultJson', null); // 重新走 boot 拉取
-      S.set('lockMode', 'unlock');
-      $('pwConfirmField').hidden = true;
-      $('pwBtn').textContent = '解锁';
-      $('pwInput').value = '';
-      $('pwInput').focus();
+      /* 服务器上已经有库了 —— 该做的不是「继续建库」,而是把**那一份**的库信息拉下来
+       * 再切到解锁态。⚠️ 旧写法只把 vaultJson 置 null 并自称「重新走 boot 拉取」,
+       * 但 boot 并没有重跑:用户接着点「解锁」→ unlockVault(null) →
+       * 「vault.json 已损坏,请从备份恢复」(与 2026-10-12 真机反馈同一条路径)。 */
+      ctx.showLock('unlock');
+      $('lockErr').textContent = '服务器上已存在笔记库,请直接解锁';
+      $('lockErr').hidden = false;
+      try {
+        if (await ctx.reloadVault({ timeoutMs: RELOAD_TIMEOUT_MS }) === 'missing') {
+          // 拉回来变成 404(这一会儿库被清空了):还是建库态,并如实说明
+          ctx.showLock('setup');
+          $('lockErr').textContent = '服务器上现在又没有笔记库了(可能刚被清空),请重试创建';
+          $('lockErr').hidden = false;
+        }
+      } catch (e) {
+        // 库信息没取回来 —— 说清楚「库是存在的、只是没连上」,别留成 null 让用户白试
+        $('lockErr').textContent = `服务器上已存在笔记库,但库信息没能取回:${e.message}`;
+        $('lockErr').hidden = false;
+      }
       return;
     }
     const keys = await ctx.vault.deriveAllKeys(dek);

@@ -33,7 +33,9 @@ import {
 } from './features/note.js';
 // shell 只导出 boot 给本文件用(「从备份恢复」后要重跑启动流程);
 // 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
-import { boot } from './features/shell.js';
+// loadVaultInfo 一并导出:锁屏上点「解锁」时若还没拿到库信息,要先补拉一次
+// 再解(见 lock.js 的 doUnlock),这条路径不能反向 import(会成环)。
+import { boot, loadVaultInfo } from './features/shell.js';
 
 const S = createProxy(store);
 
@@ -165,6 +167,9 @@ const ctx = {
   pickCategoryForNote: (id) => pickCategoryForNote(ctx, id),
   // —— 以下为 shell.js 的入口绑定(一律不带 ctx,由这里接线)——
   showLock: (mode) => showLock(ctx, mode),
+  /* 库信息补拉:boot 那次取不到时,「解锁」/「建库撞 409」两个入口会先调它。
+   * 走 ctx 而不是让 lock.js 直接 import shell.js —— 后者会与 shell→lock 成环。 */
+  reloadVault: (opt) => loadVaultInfo(ctx, opt),
   /* ⚠️ 必须把选项**透传**下去:写成 `() => lockNow(ctx)` 时调用方传的
    *   { confirmDiscard:false } 会被静默吞掉 —— 老板键看着「生效了」,其实照样弹确认框
    *   (2026-10-11 老板键落地时踩到,靠 ui-polish 的透传用例钉住)。 */

@@ -1126,6 +1126,56 @@ const MUTANTS = [
     to: ``,
     expect: 'B1:Ctrl/⌘+Shift+L 锁定',
   },
+  {
+    label: '解锁前不再补拉库信息(首包失败后点解锁 → 拿 null 去解 → 谎报「vault.json 已损坏」)',
+    file: 'public/js/features/lock.js',
+    from: `  if (!S.get('vaultJson')) {`,
+    to: `  if (false && !S.get('vaultJson')) { // MUTANT:不补拉`,
+    expect: 'boot 首包失败后点「解锁」',
+  },
+  {
+    label: '补拉失败时谎报「已损坏,请从备份恢复」(用户会真的去翻备份)',
+    file: 'public/js/features/lock.js',
+    from: '      err.textContent = `还没能获取到库信息,无法解锁:${e.message}`;',
+    to: "      err.textContent = 'vault.json 已损坏,请从备份恢复'; // MUTANT",
+    expect: '补拉仍然失败',
+  },
+  {
+    label: '建库撞 409 后不再补拉库信息(旧写法:置 null 就走,用户点解锁撞「已损坏」)',
+    file: 'public/js/features/lock.js',
+    from: `      $('lockErr').textContent = '服务器上已存在笔记库,请直接解锁';
+      $('lockErr').hidden = false;
+      try {`,
+    to: `      $('lockErr').textContent = '服务器上已存在笔记库,请直接解锁';
+      $('lockErr').hidden = false;
+      if (true) return; // MUTANT:不补拉库信息
+      try {`,
+    expect: '建库撞 409',
+  },
+  {
+    label: 'boot 拉取失败后不再放出解锁表单(用户没有重试入口,只能刷新页面)',
+    file: 'public/js/features/shell.js',
+    from: `    ctx.showLock('unlock');
+    ctx.dom.byId('lockErr').textContent = e.message;`,
+    to: `    ctx.dom.byId('lockErr').textContent = e.message; // MUTANT:放出表单那步被删`,
+    expect: 'boot:首包拉取失败时',
+  },
+  {
+    label: '404 时不清除残留的旧库信息(会拿别的库的 vault.json 去解当前密码)',
+    file: 'public/js/features/shell.js',
+    from: `      ctx.store.set('vaultJson', null);
+      ctx.store.set('vaultEtag', null);
+      return 'missing';`,
+    to: `      return 'missing'; // MUTANT:不清残留`,
+    expect: 'boot 拿到 404',
+  },
+  {
+    label: '补拉不透传超时(用户主动重试仍只给 10s 探测预算,慢网下白点一次)',
+    file: 'public/js/features/shell.js',
+    from: '      res = await ctx.api.fetchVault(opt);',
+    to: '      res = await ctx.api.fetchVault(); // MUTANT:忽略调用方给的超时',
+    expect: '更宽松的超时',
+  },
 
 ];
 
