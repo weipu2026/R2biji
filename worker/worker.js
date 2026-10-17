@@ -39,6 +39,9 @@ import { planBackupRotation, backupFileName, KEEP_BACKUPS_PER_CATEGORY } from '.
 
 const VAULT_KEY = 'vault.json';
 const CAT_PREFIX = 'cats/';
+/* 分类对象的后缀。抽成常量是为了「列表/重名检查」不再用 slice(..., -4) 盲切:
+ * 盲切会把 cats/readme.txt 切成分类「readme」(幻影分类),见 GET /api/cats。 */
+const CAT_SUFFIX = '.enc';
 const BLOB_PREFIX = 'blobs/';
 const BACKUP_PREFIX = 'backup/';
 
@@ -116,6 +119,12 @@ function onlyIfNoneMatchStar() {
 
 /* ---------------- vault.json 读取 ---------------- */
 
+/** vault.json 解析失败(永久损坏)的专用错误。
+ *  为什么要单列:顶层若统一返 500 internal,客户端会把 5xx 归成**瞬时**错误
+ *  (网络抖动,下次照常重试),于是「库真的坏了」永远只显示「请稍后重试」——
+ *  用户等不到「该从备份恢复了」这句唯一能救他的话(2026-10-17 审计 P2)。 */
+export class VaultCorruptError extends Error {}
+
 /** 读取 vault.json。刻意**不做任何缓存**:
  *  - 挂 `env` 上会重犯「跨请求状态放 env」的错(S1 就是这么栽的);
  *  - 挂模块级则会跨请求变脏 —— 改密码后同一 isolate 还会读到旧哈希,表现为「莫名 401」。
@@ -124,7 +133,11 @@ async function loadVault(env) {
   const raw = await env.VAULT.get(VAULT_KEY);
   if (!raw) return null;
   const buf = raw instanceof Uint8Array ? raw : new Uint8Array(await raw.arrayBuffer());
-  return { json: JSON.parse(new TextDecoder().decode(buf)), etag: normEtag(raw.etag) };
+  try {
+    return { json: JSON.parse(new TextDecoder().decode(buf)), etag: normEtag(raw.etag) };
+  } catch (e) {
+    throw new VaultCorruptError(`vault.json 已损坏(JSON 解析失败):${e.message}`);
+  }
 }
 
 /** 列全前缀下的对象。真机 R2 单次最多返回 1000 个键并给游标,
@@ -312,7 +325,12 @@ function readIfMatch(headers) {
 async function putCategory(method, headers, body, env, name) {
   if (method !== 'PUT') return fail(405, 'method', '不支持的请求方法');
   const raw = await bodyBytes(body);
-  if (!raw || raw.length > MAX_CAT_BYTES) return fail(413, 'too-large', `分类文件上限 ${MAX_CAT_BYTES / 1024 / 1024}MB`);
+  /* ★ `!raw` 拦不住空 body(2026-10-17 审计 P1):bodyBytes 返回 Uint8Array,
+   *   而**空数组是真值**,`!raw` 恒为假 —— 于是 Content-Length: 0 的 PUT 会写出
+   *   0 字节分类,接口照回 {ok:true},客户端下次读才 FormatError「无法解密」。
+   *   空体不可能是合法密文(至少含 magic + 版本头),一律 400。 */
+  if (!raw || raw.length === 0) return fail(400, 'empty-body', '请求体为空');
+  if (raw.length > MAX_CAT_BYTES) return fail(413, 'too-large', `分类文件上限 ${MAX_CAT_BYTES / 1024 / 1024}MB`);
   const r2key = `${CAT_PREFIX}${name}.enc`;
 
   const createOnly = (headers['if-none-match'] || '').trim() === '*';
@@ -352,7 +370,11 @@ async function findCatNameConflict(env, name) {
   const fold = catNameFold(name);
   const objects = await listAll(env.VAULT, CAT_PREFIX);
   for (const o of objects) {
-    const other = o.key.slice(CAT_PREFIX.length, -4);
+    /* ★ 只认本应用的键(2026-10-17 审计 P2):桶里若有 cats/readme.txt 这类外来
+     *   对象,盲切 slice(..., -4) 会得到一个根本不存在的「分类名」,它还会参与
+     *   大小写折叠比对,制造假 409。 */
+    if (!o.key.endsWith(CAT_SUFFIX)) continue;
+    const other = o.key.slice(CAT_PREFIX.length, -CAT_SUFFIX.length);
     if (other !== name && catNameFold(other) === fold) return other;
   }
   return null;
@@ -444,7 +466,8 @@ export async function handleApi(method, url, headers, body, env) {
     }
     if (method === 'PUT') {
       const raw = await bodyBytes(body);
-      if (!raw || raw.length > MAX_VAULT_BYTES) return fail(413, 'too-large', 'vault.json 过大或为空');
+      if (!raw || raw.length === 0) return fail(400, 'empty-body', '请求体为空');
+      if (raw.length > MAX_VAULT_BYTES) return fail(413, 'too-large', 'vault.json 过大');
       let parsed;
       try {
         parsed = JSON.parse(new TextDecoder().decode(raw));
@@ -476,8 +499,20 @@ export async function handleApi(method, url, headers, body, env) {
         //   (2026-09-29 审计 P2-8:离线给 put 注入延迟即复现 200/200。)
         //   分类路径自始就是原子的(见上方 putCategory 的 onlyIf.etagMatches),
         //   本次把 vault 路径补成同一语义 —— 两条路径不再一个有条件、一个没有。
+        /* 先取旧版留给备份(put 成功后就再也拿不到了)。原子性仍由下面的 onlyIf
+         * 保证:期间若有并发写,put 返回 null → 直接 412,不会把「不是被替换的
+         * 那一版」写成备份。 */
+        const before = await env.VAULT.get(VAULT_KEY);
         const res = await env.VAULT.put(VAULT_KEY, raw, { onlyIf: { etagMatches: normEtag(cur.etag) } });
         if (!res) return fail(412, 'conflict', 'vault.json 已被其他会话修改,请重新解锁');
+        /* ★ 改主密码是**不可逆**操作(2026-10-17 审计 P1):旧 wrap 一旦被覆盖,
+         *   新 vault 若解不开 DEK,全库就永久不可解 —— 而分类的覆盖/删除都留了
+         *   备份,唯独这条最该留的没有。复用 writeBackup 的轮换逻辑,落在
+         *   backup/vault/vault.<ts>.enc(与分类备份前缀互不交叉)。 */
+        if (before) {
+          const beforeBytes = before instanceof Uint8Array ? before : new Uint8Array(await before.arrayBuffer());
+          await writeBackup(env, 'vault', beforeBytes);
+        }
         return json({ ok: true, etag: res.etag });
       }
       // 建库:只允许创建一次
@@ -497,8 +532,10 @@ export async function handleApi(method, url, headers, body, env) {
 
   if (resource === 'cats' && parts.length === 2 && method === 'GET') {
     const objects = await listAll(env.VAULT, CAT_PREFIX);
-    const cats = objects.map((o) => ({
-      name: o.key.slice(CAT_PREFIX.length, -4), // 去掉前缀与 .enc
+    /* ★ 先按后缀过滤再切(2026-10-17 审计 P2):盲切会把 cats/readme.txt 变成
+     *   分类「readme」—— 点开 404、删也 404、刷新又回来,永远清不掉的幻影分类。 */
+    const cats = objects.filter((o) => o.key.endsWith(CAT_SUFFIX)).map((o) => ({
+      name: o.key.slice(CAT_PREFIX.length, -CAT_SUFFIX.length),
       size: o.size,
       uploaded: o.uploaded instanceof Date ? o.uploaded.getTime() : o.uploaded,
     }));
@@ -542,7 +579,9 @@ export async function handleApi(method, url, headers, body, env) {
     }
     if (method === 'PUT') {
       const raw = await bodyBytes(body);
-      if (!raw || raw.length > MAX_BLOB_BYTES) return fail(413, 'too-large', `附件上限 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
+      /* 同 putCategory:`!raw` 对空 Uint8Array 恒为假,空附件会写成 0 字节(2026-10-17 审计 P1)。 */
+      if (!raw || raw.length === 0) return fail(400, 'empty-body', '请求体为空');
+      if (raw.length > MAX_BLOB_BYTES) return fail(413, 'too-large', `附件上限 ${MAX_BLOB_BYTES / 1024 / 1024}MB`);
       const res = await env.VAULT.put(key, raw, { onlyIf: onlyIfNoneMatchStar() });
       return json({ ok: true, existed: !res }, res ? 201 : 200);
     }
@@ -600,8 +639,14 @@ export async function handleApiRequest(request, env) {
     const out = await handleApi(request.method, request.url, headers, body, env);
     return new Response(out.body, { status: out.status, headers: out.headers });
   } catch (e) {
-    // 顶层兜底:任何未捕获异常(典型:vault.json 损坏导致 JSON.parse 抛错)
-    // 都必须返回结构化错误,而不是让平台吐出无法诊断的裸 1101 错误页
+    // 顶层兜底:任何未捕获异常都必须返回结构化错误,而不是让平台吐出无法诊断的裸 1101 错误页
+    /* ★ 库损坏必须与普通 5xx 分开报(2026-10-17 审计 P2):客户端把 5xx 一律归为
+     *   瞬时错误(网络抖动,下次照常重试),一份真坏掉的库只会让用户反复看到
+     *   「请稍后重试」—— 等不到「该从备份恢复了」这句唯一有用的信息。 */
+    if (e instanceof VaultCorruptError) {
+      console.error('[jmbiji] vault.json 损坏:', e.message);
+      return errorResponse(500, 'vault-corrupt', 'vault.json 已损坏,无法解锁。请从 R2 的 backup/ 目录恢复,或导入此前导出的备份');
+    }
     console.error('[jmbiji] 请求处理未捕获异常:', e);
     return errorResponse(500, 'internal', '服务器内部错误,请稍后重试');
   }

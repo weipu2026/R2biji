@@ -1,7 +1,7 @@
 /* Worker 单测:内存 mock R2,覆盖鉴权 / CAS / 建库守卫 / 备份轮换 / 大小上限 */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { handleApi, declaredTooLarge, missingDeclaredLength, MAX_REQUEST_BYTES } from '../worker/worker.js';
+import { handleApi, handleApiRequest, declaredTooLarge, missingDeclaredLength, MAX_REQUEST_BYTES } from '../worker/worker.js';
 import { MemoryR2 } from '../worker/memory-r2.mjs';
 import { createVault } from '../public/js/vaultlib.js';
 
@@ -707,4 +707,127 @@ test('vault 写:head→put 之间被插空必须 412,绝不覆盖别人的写(P2
   });
   assert.equal(res.status, 412, 'head 之后盘面变了:条件写必须失败(旧实现是无条件 put → 200 覆盖别人的写)');
   assert.equal(real.map.get('vault.json').etag, 'etag-other-session', '别人的写入绝不能被覆盖');
+});
+
+/* ---------- 2026-10-17 审计:空体 / vault 损坏 / 幻影分类 / 改密码备份 ---------- */
+
+test('★ 空 body:三条写路径都必须 400,绝不落 0 字节对象(P1-1)', async () => {
+  /* 根因:bodyBytes 返回 Uint8Array,而**空数组是真值** —— `if (!raw)` 恒为假,
+   * Content-Length: 0 的 PUT 能写出 0 字节分类/附件并回 {ok:true},客户端下次读
+   * 才 FormatError「无法解密」。下面三条都要挡在写盘之前。 */
+  const { env, token } = await setup();
+  const h = auth(token);
+  const empty = new Uint8Array(0);
+
+  const cat = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('空')}`, {
+    body: empty, headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal(cat.status, 400, '空体分类必须 400');
+  assert.equal((await cat.json()).error, 'empty-body');
+  assert.equal((await call(env, 'GET', `/api/cat?key=${encodeURIComponent('空')}`, { headers: h })).status, 404,
+    '被拒之后不得留下 0 字节对象');
+
+  const before = await call(env, 'GET', '/api/vault');
+  const etag = before.headers.get('etag');
+  const vault = await call(env, 'PUT', '/api/vault', { body: empty, headers: { ...h, 'if-match': etag } });
+  assert.equal(vault.status, 400, '空体 vault 必须 400');
+  assert.equal((await vault.json()).error, 'empty-body');
+  assert.equal((await call(env, 'GET', '/api/vault')).headers.get('etag'), etag, 'vault.json 不得被动过');
+
+  const name = `${'B'.repeat(43)}.png`;
+  const blob = await call(env, 'PUT', `/api/blob?key=${name}`, { body: empty, headers: h });
+  assert.equal(blob.status, 400, '空体附件必须 400');
+  assert.equal((await blob.json()).error, 'empty-body');
+  assert.deepEqual((await (await call(env, 'GET', '/api/blobs', { headers: h })).json()).names, [],
+    '被拒的附件不得进清单');
+
+  // 正对照:非空体照常写成功 —— 否则「一律 400」也能让上面全绿
+  assert.equal((await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('空')}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  })).status, 201);
+});
+
+test('★ vault.json 损坏:必须回 vault-corrupt(永久),不能伪装成瞬时 internal(P2-4)', async () => {
+  const { env } = await setup();
+  assert.equal((await call(env, 'GET', '/api/vault')).status, 200, '正对照:破坏之前是可读的');
+
+  env.VAULT.map.set('vault.json', {
+    bytes: te.encode('{"magic":"JMBIJI", 这里坏了'), etag: 'broken-1', uploaded: new Date(),
+  });
+
+  /* 必须走**适配层**(handleApiRequest):错误码映射在它的顶层 catch 里,
+   * 直接调 handleApi 只会看到 VaultCorruptError 抛出 —— 用户看到的是哪句话由这里决定。 */
+  const res = await handleApiRequest(new Request('http://localhost/api/vault'), env);
+  assert.equal(res.status, 500);
+  assert.equal((await res.json()).error, 'vault-corrupt',
+    '★ 必须是可判定的永久错误码:客户端据此提示「从备份恢复」,而不是当作网络抖动让你稍后重试');
+
+  // 受保护接口也走 authOk → loadVault,同样要给出同一错误码
+  const prot = await handleApiRequest(
+    new Request('http://localhost/api/cats', { headers: { authorization: `Bearer ${'f'.repeat(64)}` } }),
+    env,
+  );
+  assert.equal(prot.status, 500);
+  assert.equal((await prot.json()).error, 'vault-corrupt');
+});
+
+test('★ 分类列表只认 *.enc:cats/readme.txt 不得变成幻影分类(P2-5)', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  assert.equal((await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('真')}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  })).status, 201);
+
+  // 桶里混进一个非 .enc 对象(手工上传 / 别的工具留下)
+  env.VAULT.map.set('cats/readme.txt', { bytes: new Uint8Array([2]), etag: 'x1', uploaded: new Date() });
+  const cats = (await (await call(env, 'GET', '/api/cats', { headers: h })).json()).cats;
+  assert.deepEqual(cats.map((c) => c.name), ['真'],
+    'readme.txt 不是分类:列出来会点开 404、删也 404、刷新又回来,永远清不掉');
+});
+
+test('★ 重名检查只比对 *.enc:外来的 cats/x.txt 不得挡住建分类(P2-5)', async () => {
+  const { env, token } = await setup();
+  const h = auth(token);
+  /* 用「盲切后恰好大小写等价」的名字:旧实现 slice(5, -4) 把 cats/API.txt
+   * 切成「API」,再参与大小写折叠 → 建「api」被假 409 挡住。 */
+  env.VAULT.map.set('cats/API.txt', { bytes: new Uint8Array([2]), etag: 'x2', uploaded: new Date() });
+
+  const ok = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('api')}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal(ok.status, 201, 'API.txt 不是分类,不能以「大小写等价」为由挡住「api」');
+
+  // 正对照:真正的分类同名(大小写等价)仍要拦
+  env.VAULT.map.set('cats/api2.enc', { bytes: new Uint8Array([3]), etag: 'x3', uploaded: new Date() });
+  const dup = await call(env, 'PUT', `/api/cat?key=${encodeURIComponent('API2')}`, {
+    body: new Uint8Array([1]), headers: { ...h, 'if-none-match': '*' },
+  });
+  assert.equal(dup.status, 409, '大小写等价的真分类必须拦住');
+});
+
+test('★ 改主密码覆盖 vault.json 前必须留备份(P1-3)', async () => {
+  const { env, token, json } = await setup();
+  const h = auth(token);
+  const before = await call(env, 'GET', '/api/vault');
+  const etag = before.headers.get('etag');
+  const oldBytes = env.VAULT.map.get('vault.json').bytes.slice();
+  assert.equal(env.VAULT.backupCount('vault'), 0);
+
+  const res = await call(env, 'PUT', '/api/vault', {
+    body: JSON.stringify({ ...json, touch: 'new' }), headers: { ...h, 'if-match': etag },
+  });
+  assert.equal(res.status, 200);
+  assert.equal(env.VAULT.backupCount('vault'), 1, '不可逆覆盖前必须留一份旧版');
+
+  // 备份的必须是**被替换的那一版**,不是覆盖后的新版
+  const key = [...env.VAULT.map.keys()].find((k) => k.startsWith('backup/vault/'));
+  assert.ok(key, '备份文件必须落在 backup/vault/ 下');
+  assert.deepEqual([...env.VAULT.map.get(key).bytes], [...oldBytes], '备份内容必须是覆盖前的字节');
+
+  // 失败的条件写不得产生备份(否则备份里会混进「没被替换」的版本)
+  const res2 = await call(env, 'PUT', '/api/vault', {
+    body: JSON.stringify({ ...json, touch: 'x' }), headers: { ...h, 'if-match': etag },
+  });
+  assert.equal(res2.status, 412);
+  assert.equal(env.VAULT.backupCount('vault'), 1);
 });
