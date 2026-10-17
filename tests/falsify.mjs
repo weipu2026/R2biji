@@ -727,8 +727,8 @@ const MUTANTS = [
   {
     label: '切换分类前不收集编辑框(跨分类切走时字静默丢失)',
     file: 'public/js/features/sidebar.js',
-    from: "  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }\n  const catInfo = S.get('lib').categoryInfo(name);",
-    to: "  const catInfo = S.get('lib').categoryInfo(name); // MUTANT:切分类前不收集",
+    from: "  if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }\n  /* ★ await 之后必须**重新取 lib 并复核存活**",
+    to: "  /* MUTANT:切分类前不收集 */\n  /* ★ await 之后必须**重新取 lib 并复核存活**",
     expect: '切换分类前同样先收集编辑框',
   },
   {
@@ -1280,7 +1280,7 @@ const MUTANTS = [
     label: '分类 etag 只剥引号不剥 W/(该分类条件保存恒 412,表现是「点了没反应」)',
     file: 'public/js/api.js',
     from: "  return String(raw || '').replace(/\"/g, '').replace(/^W\\//i, '');",
-    to: "  return String(raw || '').replace(/\"/g, ''); // MUTANT:不剥 W/",
+    to: `  return String(raw || '').replace(/"/g, ''); // MUTANT:不剥 W/`,
     expect: '分类读取也必须剥掉弱验证器前缀',
   },
   {
@@ -1318,7 +1318,304 @@ const MUTANTS = [
     to: '  if (folded.length >= n) return folded.slice(0, n + 3); // MUTANT',
     expect: 'notePreview:必须与朴素实现',
   },
+  {
+    label: '回收站剩余天数不再判到期(过期条目会显示「还剩 -10 天」)',
+    file: 'public/js/format.js',
+    from: `  return left <= 0 ? 0 : Math.ceil(left / 86400000);`,
+    to: `  return Math.round(left / 86400000); // MUTANT:不管是否到期`,
+    expect: 'trashDaysLeft',
+  },
+  {
+    label: '离线文案判据放宽成真值判断(取不到 onLine 时反过来误报离线)',
+    file: 'public/js/format.js',
+    from: `  return online === false ? offlineText : errText;`,
+    to: `  return online ? errText : offlineText; // MUTANT:undefined 也走离线分支`,
+    expect: 'offlineBlobMessage',
+  },
+  {
+    label: '任务列表判定删掉(「[ ] 」标记原样留在正文里)',
+    file: 'public/js/render.js',
+    from: `    const task = TASK_RE.exec(line);
+    if (task) {
+      flushPara();
+      if (listTag !== 'ul') { flushList(); listItems = []; listTag = 'ul'; }
+      listItems.push({ text: task[2], task: true, checked: task[1].toLowerCase() === 'x' });
+      i += 1;
+      continue;
+    }
 
+`,
+    to: ``,
+    expect: '任务列表渲染成只读勾选框',
+  },
+  {
+    label: '任务勾选框不再 disabled(每条任务多一个 Tab 停靠点)',
+    file: 'public/js/render.js',
+    from: `          box.disabled = true;`,
+    to: `          box.disabled = false; // MUTANT`,
+    expect: '任务列表渲染成只读勾选框',
+  },
+  {
+    label: '任务列表的块复制不再补 [x]/[ ] 标记(勾选状态被静默丢掉)',
+    file: 'public/js/render.js',
+    from: `        return (box ? (box.checked ? '[x] ' : '[ ] ') : '') + cloneWithoutStars(li).textContent;`,
+    to: `        return cloneWithoutStars(li).textContent; // MUTANT:丢掉勾选状态`,
+    expect: 'data-copy 补回',
+  },
+  {
+    label: '分割线判定删掉(--- 退化成普通段落)',
+    file: 'public/js/render.js',
+    from: `    if (HR_RE.test(line)) {
+      flushPara(); flushList();
+      addBlock('hr', null, '');
+      i += 1;
+      continue;
+    }
+
+`,
+    to: ``,
+    expect: '分割线 --- / *** / ___ 渲染成',
+  },
+  {
+    label: '阅读站的任务条目退化成普通 li(与主站语法漂移)',
+    file: 'public/recover.html',
+    from: `      lis.push('<li' + (it.task ? ' class="task"' : '') + '>' + box + rdrInline(it.text, true) + '</li>');`,
+    to: `      lis.push('<li>' + rdrInline(it.text, true) + '</li>'); // MUTANT`,
+    expect: '阅读站 rdrMd 与主站 renderMarkdown 同语法',
+  },
+  {
+    label: '回收站条目不再显示剩余天数(算了不显示)',
+    file: 'public/js/features/data.js',
+    from: "        const leftText = leftDays > 0 ? `还剩 ${leftDays} 天` : '今天到期';",
+    to: "        const leftText = ''; // MUTANT:算了不显示",
+    expect: 'B8:回收站条目必须显示剩余保留天数',
+  },
+  {
+    label: '密码生成器又写回内联样式(绕过 style.css 的口径)',
+    file: 'public/js/features/data.js',
+    from: `      out.className = 'modal-input gen-out';`,
+    to: `      out.className = 'modal-input';
+      out.style.fontFamily = 'var(--mono)'; // MUTANT`,
+    expect: 'A7:密码生成器的静态样式',
+  },
+  {
+    label: '附件失败退回直接报「解密失败」(离线被误报成文件损坏)',
+    file: 'public/js/features/note.js',
+    from: "    ctx.toast(F.offlineBlobMessage(isOffline(),\n      '离线状态:附件需要联网(正文可正常阅读)',\n      `附件解密失败:${e.message}`), 'error');",
+    to: "    ctx.toast(`附件解密失败:${e.message}`, 'error'); // MUTANT:不看离线",
+    expect: '离线读附件/历史',
+  },
+  {
+    label: '添加附件失败退回不区分离线',
+    file: 'public/js/features/note.js',
+    from: "      ctx.toast(F.offlineBlobMessage(isOffline(),\n        '离线状态:添加附件需要联网',\n        `「${file.name}」入库失败:${e.message}`), 'error');",
+    to: "      ctx.toast(`「${file.name}」入库失败:${e.message}`, 'error'); // MUTANT",
+    expect: '离线读附件/历史',
+  },
+  {
+    label: 'isOffline 恒为真(在线也报离线,把网络抖动说成离线)',
+    file: 'public/js/features/note.js',
+    from: `  return typeof navigator !== 'undefined' && navigator.onLine === false;`,
+    to: `  return true; // MUTANT:永远算离线`,
+    expect: '离线读附件/历史',
+  },
+  {
+    label: 'SW 清单漏登记 apple-touch-icon(离线时 iOS 主屏图标 404)',
+    file: 'public/sw.js',
+    from: `  './apple-touch-icon.png',`,
+    to: ``,
+    expect: 'index.html 与 manifest 引用的每个本地文件都必须登记',
+  },
+
+  {
+    label: "复制按钮把「点击那一刻的 DOM」当原值(连点卡在已复制)",
+    file: "public/js/ui.js",
+    from: "    if (btn.dataset.origLabel === undefined) btn.dataset.origLabel = label.textContent;",
+    to: "    btn.dataset.origLabel = label.textContent; // MUTANT:每点一次都覆盖原值",
+    expect: "A9:复制按钮",
+  },
+  {
+    label: "搜索空查询不作废在途轮次(慢搜索在空输入框上自己弹面板)",
+    file: "public/js/features/search.js",
+    from: "  if (!q) { searchSeq++; panel.hidden = true; panel.textContent = ''; return; }",
+    to: "  if (!q) { panel.hidden = true; panel.textContent = ''; return; } // MUTANT",
+    expect: "空查询必须作废在途搜索轮次",
+  },
+  {
+    label: "closeSearch 不作废在途轮次(Esc 之后面板又被弹回来)",
+    file: "public/js/features/search.js",
+    from: "  searchSeq++;\n  const box = ctx.dom.byId('searchBox');",
+    to: "  const box = ctx.dom.byId('searchBox'); // MUTANT:不作废在途轮次",
+    expect: "closeSearch(Esc / 点别处)同样要作废在途轮次",
+  },
+  {
+    label: "点搜索结果写回裸分类名(抹掉「· N 篇」)",
+    file: "public/js/features/search.js",
+    from: "      panel.hidden = true;\n      ctx.dom.byId('searchBox').value = '';",
+    to: "      ctx.dom.byId('activeCatName').textContent = r.cat; // MUTANT:覆盖标题\n      panel.hidden = true;\n      ctx.dom.byId('searchBox').value = '';",
+    expect: "点搜索结果不得覆盖 activeCatName",
+  },
+  {
+    label: "openCategory 失败也回传 true(调用方据此报「已载入最新版本」)",
+    file: "public/js/features/sidebar.js",
+    from: "    ctx.toast(`分类「${name}」无法打开:${e.message}`, 'error');\n    renderCategoryList(ctx);\n    return false;",
+    to: "    ctx.toast(`分类「${name}」无法打开:${e.message}`, 'error');\n    renderCategoryList(ctx);\n    return true; // MUTANT:失败也报喜",
+    expect: "openCategory 加载失败必须回传 false",
+  },
+  {
+    label: "会话已销毁也把冲突分类塞回脏集(幻影「有未保存更改」)",
+    file: "public/js/ui.js",
+    from: "    if (S.lib) S.markDirty(name); // 留待稍后",
+    to: "    S.markDirty(name); // MUTANT:不判会话存活",
+    expect: "重载失败不报喜 / 会话已销毁不标脏 / 追加失败先取引用再截断",
+  },
+  {
+    label: "openCategory 在 await 之后不复核 lib(锁屏上抛 null.categoryInfo)",
+    file: "public/js/features/sidebar.js",
+    from: "  const lib = S.get('lib');\n  if (!lib || seq !== catOpenSeq) return false;",
+    to: "  const lib = S.get('lib');\n  if (seq !== catOpenSeq) return false; // MUTANT:不判 lib 存活",
+    expect: "openCategory 在 await 期间会话被销毁",
+  },
+  {
+    label: "搜索拉全部分类失败不 catch(离线按 Ctrl+K 零反馈 + unhandledrejection)",
+    file: "public/js/features/search.js",
+    from: "  try { await lib.loadAllCategories(); }\n  catch (e) { ctx.toast(`搜索需要先联网加载全部分类:${e.message}`, 'error'); return; }",
+    to: "  await lib.loadAllCategories(); // MUTANT:无 catch",
+    expect: "搜索前拉全部分类失败(离线)必须给反馈",
+  },
+  {
+    label: "紧急锁定不先关冲突弹窗(老板键卡在永不落定的 promise 上)",
+    file: "public/js/features/lock.js",
+    from: "    const dlg = ctx.dom?.byId('modal');\n    if (dlg && dlg.open) dlg.close();",
+    to: "    // MUTANT:不关弹窗,直接等保存",
+    expect: "锁定必须先关掉冲突弹窗再等保存",
+  },
+  {
+    label: "downloadBytes 自造不 append 的锚点(部分浏览器拿到空文件)",
+    file: "public/js/ui.js",
+    from: "  downloadUrl(url, fileName);",
+    to: "  const a = document.createElement('a'); a.href = url; a.download = fileName; a.click(); // MUTANT",
+    expect: "下载锚点只有一份实现",
+  },
+  {
+    label: "doUnlock 失败不清理半成品会话(lib 与令牌留在内存)",
+    file: "public/js/features/lock.js",
+    from: "    const cur = S.get('lib');\n    if (cur) { cur.destroy(); S.set('lib', null); }\n    ctx.api.clearToken();\n    err.textContent = `打开失败:${e.message}`;",
+    to: "    err.textContent = `打开失败:${e.message}`; // MUTANT:半成品会话留在内存",
+    expect: "doUnlock 失败必须收干净半成品会话",
+  },
+  {
+    label: "追加失败先截断长度再取引用(取回恒 undefined,清理从未执行)",
+    file: "public/js/lib.js",
+    from: "      const added = dst.data.notes[before];\n      dst.data.notes.length = before;",
+    to: "      dst.data.notes.length = before; // MUTANT:先截断\n      const added = dst.data.notes[before];",
+    expect: "重载失败不报喜 / 会话已销毁不标脏 / 追加失败先取引用再截断",
+  },
+  {
+    label: "zip 写端不校验 bytes 类型(漏传内容静默写成 0 字节条目)",
+    file: "public/js/zip.js",
+    from: "    const raw = e.bytes;\n    let data;\n    if (raw instanceof Uint8Array) data = raw;\n    else if (raw instanceof ArrayBuffer) data = new Uint8Array(raw);\n    else if (Array.isArray(raw)) data = new Uint8Array(raw);\n    else {\n      throw new ZipError(`条目「${name}」缺少内容(bytes 必须是 Uint8Array / ArrayBuffer / 数字数组)`);\n    }",
+    to: "    const data = e.bytes instanceof Uint8Array ? e.bytes : new Uint8Array(e.bytes); // MUTANT:不校验",
+    expect: "写端:bytes 缺失或类型不对必须当场报错",
+  },
+  {
+    label: "zip 写端不查重(写出的包自己读不回来)",
+    file: "public/js/zip.js",
+    from: "    if (seenNames.has(name)) throw new ZipError(`条目重复:${name}`);\n    seenNames.add(name);",
+    to: "    seenNames.add(name); // MUTANT:不查重",
+    expect: "条目重复要报错",
+  },
+  {
+    label: "zip 日期不处理无效 Date、不夹 2107(写出非法 DOS 日期)",
+    file: "public/js/zip.js",
+    from: "  const d = Number.isNaN(raw.getTime()) ? new Date(1980, 0, 1) : raw;\n  const year = Math.min(2107, Math.max(1980, d.getFullYear()));",
+    to: "  const d = raw; // MUTANT:不处理无效日期\n  const year = Math.max(1980, d.getFullYear()); // MUTANT:不夹上限",
+    expect: "日期:无效 Date 退回 1980-01-01",
+  },
+  {
+    label: "zip 读端取第一个 EOCD 签名(注释里的假签名会误导解析)",
+    file: "public/js/zip.js",
+    from: "    if (dv.getUint32(i, true) !== SIG_EOCD) continue;\n    if (i + 22 + dv.getUint16(i + 20, true) !== bytes.length) continue;\n    eocd = i; break;",
+    to: "    if (dv.getUint32(i, true) === SIG_EOCD) { eocd = i; break; } // MUTANT:不看注释长度",
+    expect: "EOCD 只认",
+  },
+  {
+    label: "zip 读端不显式校验条目名长度(subarray 静默截短)",
+    file: "public/js/zip.js",
+    from: "    if (p + 46 + nameLen > bytes.length) {\n      throw new ZipError(`zip 结构损坏(第 ${i + 1} 个条目名越界)`);\n    }",
+    to: "    // MUTANT:不校验名字长度",
+    expect: "条目名长度越界要说清楚",
+  },
+  {
+    label: "zip 读端不校验中央目录用尽(count 偏小就静默少读)",
+    file: "public/js/zip.js",
+    from: "  if (p !== cdOffset + cdSize) {\n    throw new ZipError(\n      `zip 结构损坏(中央目录与条目数不符:读到 ${p - cdOffset} 字节,声明 ${cdSize} 字节)`,\n    );\n  }",
+    to: "  // MUTANT:不校验中央目录是否用尽",
+    expect: "中央目录必须刚好用尽",
+  },
+  {
+    label: "moveDirty 不判目标已脏(覆盖代数,在途保存会误清脏标记)",
+    file: "public/js/store.js",
+    from: "    if (this._state.dirty.has(to)) {\n      throw new Error(`待保存队列里已存在「${to}」,不能把「${from}」的改动合并过去`);\n    }",
+    to: "    // MUTANT:不判重,直接覆盖",
+    expect: "moveDirty:目标分类已有脏标记",
+  },
+  {
+    label: "编辑器工具条不排除 [data-genpw](pw 按钮被双绑)",
+    file: "public/js/features/shell.js",
+    from: "  for (const b of document.querySelectorAll('#edTools .ed-btn:not([data-genpw])')) {",
+    to: "  for (const b of document.querySelectorAll('#edTools .ed-btn')) { // MUTANT:双绑",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "tabsync 消息处理失败完全静默(多标签页同步失效无痕迹)",
+    file: "public/js/tabsync.js",
+    from: "          console.error('tab 消息处理失败', msg, e);",
+    to: "          // MUTANT:静默",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "getCat 不剥 W/ 弱 etag(与 fetchVault 口径不一致 → 恒 412)",
+    file: "public/js/api.js",
+    from: "  return { bytes: new Uint8Array(await res.arrayBuffer()), etag: normEtag(res.headers.get('etag')) };",
+    to: `  return { bytes: new Uint8Array(await res.arrayBuffer()), etag: (res.headers.get('etag') || '').replace(/"/g, '') }; // MUTANT:不剥 W/`,
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "建库失败退回解锁态时不清 pwHint(留下上一态的强度提示)",
+    file: "public/js/features/lock.js",
+    from: "      ctx.showLock('unlock');",
+    to: "      ctx.showLock('setup'); // MUTANT:留在建库态",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "ui.js 重新导入搜索纯函数(死导入)",
+    file: "public/js/ui.js",
+    from: "import { saveSession, loadSession, clearSession } from './session.js';",
+    to: "import { findMatches, renderSearchResult } from './search.js'; // MUTANT:死导入\nimport { saveSession, loadSession, clearSession } from './session.js';",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "theme.js 把内部函数重新导出(无人引用的公开面)",
+    file: "public/js/features/theme.js",
+    from: "function applyTheme(mode, ctx) {",
+    to: "export function applyTheme(mode, ctx) { // MUTANT",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "search 重新引入死字段 qLen",
+    file: "public/js/features/search.js",
+    from: "/** 搜索序号守卫:慢查询后到不得覆盖新查询的结果。",
+    to: "const qLen = 0; // MUTANT:死字段\n\n/** 搜索序号守卫:慢查询后到不得覆盖新查询的结果。",
+    expect: "A11:死代码与双绑清理",
+  },
+  {
+    label: "冲突弹窗「留待稍后」无条件报喜(重载失败也报「已改为云端版本」)",
+    file: "public/js/ui.js",
+    from: "    const reloaded = S.activeCat === name ? await openCategory(ctx, name) : true;\n    if (reloaded) toast(`「${name}」已改为云端版本,本地未保存的改动已放弃`, 'warn');",
+    to: "    await openCategory(ctx, name); // MUTANT:不看返回值\n    toast(`「${name}」已改为云端版本,本地未保存的改动已放弃`, 'warn');",
+    expect: "A12:重载失败不报喜",
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
@@ -1341,7 +1638,12 @@ function runTests() {
   const cc = Number(process.env.TEST_CONCURRENCY || '');
   if (Number.isFinite(cc) && cc > 0) args.splice(1, 0, `--test-concurrency=${cc}`);
   try {
-    out = execFileSync(NODE, args, { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    // maxBuffer 必须显式给足:默认 1MB,而 430 项全套 + 失败详情已到 160KB 量级,
+    // 再长一点就会 ENOBUFS —— 那时 e.stdout 是 undefined,out 变成空串,
+    // 一条 not ok 都解析不到(2026-10-17 实测过一次假绿,根因就是这个家族)
+    out = execFileSync(NODE, args, {
+      cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 64 * 1024 * 1024,
+    });
   } catch (e) {
     out = `${e.stdout || ''}${e.stderr || ''}`;
   }
@@ -1353,7 +1655,12 @@ function runTests() {
   }
   const pass = /# pass (\d+)/.exec(out);
   const fail = /# fail (\d+)/.exec(out);
-  return { failed, pass: pass ? Number(pass[1]) : 0, fail: fail ? Number(fail[1]) : -1 };
+  /* ran = 这一轮测试**真的跑完了**(看到了 TAP 的汇总行)。
+   * 没有它,「测试进程根本没起来」(沙箱 spawn 抖动 / 磁盘瞬时占用 / ENOBUFS)
+   * 与「跑完了且全绿」在返回值上**完全一样** —— failed 都是空数组,
+   * 于是被误判成「这条守卫没有判别力」,而真相是这次测量从未发生。
+   * 假绿比漏报危险得多:它会让人相信一套根本不存在的护栏。 */
+  return { failed, pass: pass ? Number(pass[1]) : 0, fail: fail ? Number(fail[1]) : -1, ran: !!pass };
 }
 
 const only = process.argv[2] || '';
@@ -1380,7 +1687,15 @@ for (const m of selected) {
   }
   try {
     writeFileSync(path, src.replace(from, to), 'utf8');
-    const { failed, pass, fail } = runTests();
+    const { failed, pass, fail, ran } = runTests();
+    if (!ran) {
+      /* 测试没跑成 ≠ 守卫没判别力。此时 failed 为空,若继续走下面的判定,
+       * 会打印一条假的「[绿✗] 这条守卫没有判别力」—— 而真相是这次测量从未发生。
+       * 宁可中断并计入 bad,也绝不产出没有事实支撑的结论。 */
+      bad += 1;
+      console.log(`[中断] ${m.label}\n        测试进程未能完成运行(未见 # pass 汇总),本轮不计入结论 —— 请重跑`);
+      continue;
+    }
     const hit = failed.some((f) => f.includes(m.expect));
     if (hit) {
       console.log(`[红✓] ${m.label}\n        「${m.expect}」如期失败(共 ${fail} 项,用例通过 ${pass} 项)`);
@@ -1389,12 +1704,22 @@ for (const m of selected) {
       console.log(`[绿✗] ${m.label}\n        期望「${m.expect}」变红,实际没红 —— 这条守卫没有判别力。失败项:${failed.slice(0, 3).join(' / ') || '(无)'}`);
     }
   } finally {
-    writeFileSync(path, src, 'utf8'); // 无论如何都还原
+    /* 还原失败必须**炸出声**:静默失败会把工作区留在变异态,
+     * 而后续所有测试都会拿变异态当基线跑(2026-10-17 实测:
+     * 一次 EPERM 就让 style.css 带着 MUTANT 注释活到了下一次会话)。 */
+    try {
+      writeFileSync(path, src, 'utf8'); // 无论如何都还原
+    } catch (e) {
+      console.error(`\n[严重] 还原失败:${path} —— ${e.message}\n        工作区可能已留在变异态,请立刻执行 git diff 核对!`);
+      throw e;
+    }
   }
 }
 
 const final = runTests();
-const restored = final.fail === 0;
+/* restored 必须同时要求 ran:没跑成时 fail 是哨兵值 -1,
+ * 只比 fail===0 足以把「压根没测」糊弄成另一种结论。 */
+const restored = final.ran && final.fail === 0;
 console.log(`\n还原后复跑:${restored ? `全绿 ✓(${final.pass} 项)` : `仍有失败 ✗ ${final.failed.join(' / ')}`}`);
 const ok = bad === 0 && restored;
 console.log(`鉴伪结论:${ok ? '全部守卫具备判别力 ✓' : '存在无效守卫或未还原 ✗'}`);

@@ -188,3 +188,38 @@ test('autoLock:lockNow 返回 undefined(异常路径)时不得当成「丢了改
   await autoLock(ctx);
   assert.equal(calls.toasts[0].msg, '已自动锁屏', 'undefined 应退化成「没丢改动」的普通提示');
 });
+
+test('★ doUnlock 失败必须收干净半成品会话(lib 与令牌不得留在内存)', async () => {
+  const { doUnlock } = await import('../public/js/features/lock.js');
+  /* setToken 与 S.set(lib) 都在 await lib.rescan() 之前执行;rescan 抛错时
+   * 若只写错误文本,lib 与令牌会原样留在内存,而界面停在锁屏 ——
+   * 之后 onTabMessage 的 `if (!S.lib) return` 会把这个死会话当成活的。 */
+  const store = new Store();
+  store.set('vaultJson', {});
+  store.set('vaultEtag', 'e1');
+  let destroyed = 0;
+  let token = null;
+  class Lib {
+    constructor() { this.rescan = async () => { throw new Error('网络断了'); }; }
+    destroy() { destroyed += 1; }
+  }
+  const nodes = new Map();
+  const byId = (id) => {
+    if (!nodes.has(id)) nodes.set(id, { hidden: true, textContent: '', value: '' });
+    return nodes.get(id);
+  };
+  const ctx = {
+    store,
+    dom: { byId },
+    vault: { unlockVault: async () => ({ ok: true, dek: 'd', authKeyHex: 'a' }), deriveAllKeys: async () => ({}) },
+    api: { setToken: (t) => { token = t; }, clearToken: () => { token = null; } },
+    Library: Lib,
+    enterApp: async () => { throw new Error('不该走到这里'); },
+    toast: () => {},
+  };
+  await doUnlock(ctx, 'pw');
+  assert.equal(store.get('lib'), null, '半成品 lib 必须从会话态摘掉');
+  assert.equal(destroyed, 1, '必须调用 destroy() 释放密钥');
+  assert.equal(token, null, '必须清掉鉴权令牌');
+  assert.match(byId('lockErr').textContent, /打开失败/, '锁屏上要如实报错');
+});

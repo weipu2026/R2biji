@@ -236,3 +236,26 @@ test('P2:提示宿主挂 popover 后必须把 UA 默认样式归零(否则会被
     `#toasts[popover] 的底部对齐量必须与 #toasts 一致(${baseBottom}),否则提示进 top layer 的那一刻会跳位`);
 });
 
+/* ---------- 2026-10-17 自查:ASSETS 的**反向**核对 ---------- */
+test('SW 清单:index.html 与 manifest 引用的每个本地文件都必须登记(反向扫描)', () => {
+  /* ★ 方向性盲区:上面几条全是「ASSETS → 磁盘」的正向核对(条目存在即放过),
+   *   从来没有反向的那一半 ——「页面引用了某个文件 → 它必须在 ASSETS 里」。
+   *   2026-10-17 实测正是这个盲区:index.html 引了 apple-touch-icon.png、
+   *   manifest 引了 icon-192/512/maskable-512 三个 PNG,四个文件都不在 ASSETS,
+   *   而当时全部护栏**全绿放过**。后果只在离线时显形(图标 404、iOS 主屏与
+   *   PWA 安装图标缺失),联网时照样能拉到 —— 肉眼和正向断言都发现不了。
+   *   与「焦点圈列举式会漏项 → 改反向扫描」是同一条教训。 */
+  const html = readFileSync(join(PUBLIC, 'index.html'), 'utf8');
+  const manifest = readFileSync(join(PUBLIC, 'manifest.webmanifest'), 'utf8');
+  const listed = new Set(ASSETS.map((a) => a.replace(/^\.\//, '')));
+  const refs = new Set();
+  for (const m of html.matchAll(/(?:href|src)="([^"]+)"/g)) refs.add(m[1]);
+  // manifest 只认图标 src:start_url / scope 是 './',不是文件
+  for (const m of manifest.matchAll(/"src"\s*:\s*"([^"]+)"/g)) refs.add(m[1]);
+  const missing = [...refs]
+    .map((r) => r.replace(/^\.\//, ''))
+    .filter((r) => r && !/^(https?:|data:|#|\/\/)/.test(r))
+    .filter((r) => !listed.has(r));
+  assert.deepEqual(missing, [],
+    `这些被 index.html / manifest.webmanifest 引用的文件没登记进 ASSETS(离线时 404):${missing.join(', ')}`);
+});

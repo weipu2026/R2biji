@@ -118,3 +118,94 @@ test('搜索结果表头:上限之差 1 就该提示(判据不能是宽松的近
   assert.equal(resultHeadline(50), '50 条匹配');
   assert.ok(resultHeadline(51).includes('51'), '51 条就必须提示,不能等到很悬殊才提示');
 });
+
+/* ---------- runSearch / closeSearch 的竞态与错误反馈(2026-10-17 审计) ---------- */
+
+/** 造一套能真跑 runSearch 的 ctx:lib.loadAllCategories 由用例控制何时放行。
+ *  面板渲染需要 document.querySelector('.topbar')(窄屏定位),桩里返回 null 即可。
+ *  @returns {{ctx:object, byId:Function, release:Function, clicks:Function[]}} */
+function mkSearchCtx(byId, { failLoad = null, notes = null } = {}) {
+  let release = () => {};
+  const gate = new Promise((r) => { release = r; });
+  const lib = {
+    listCategories: () => ['工作'],
+    categoryInfo: () => ({ data: { notes: notes || [{ id: 'n1', title: '账号说明', content: '账号 admin123 保密' }] } }),
+    loadAllCategories: () => (failLoad ? Promise.reject(failLoad) : gate),
+  };
+  const clicks = [];
+  const ctx = {
+    store: { get: (k) => (k === 'lib' ? lib : undefined), set: () => {} },
+    dom: { byId },
+    toast: () => {},
+    clickable: (el, fn) => { clicks.push(fn); },
+    openNote: () => {},
+    renderCategoryList: () => {},
+  };
+  return { ctx, byId, release, clicks };
+}
+
+test('★ 空查询必须作废在途搜索轮次 —— 慢搜索不能在空输入框上自己弹出来', async () => {
+  const { runSearch } = await import('../public/js/features/search.js');
+  await withDom(async (_mkctx, byId) => {
+    document.querySelector = () => null; // 生产代码要按 .topbar 底边定位,桩里没有它
+    const { ctx, release } = mkSearchCtx(byId);
+    byId('searchBox').value = 'admin123';
+    const inflight = runSearch(ctx);          // 首次搜索:卡在 loadAllCategories(冷启动)
+    byId('searchBox').value = '';             // 用户在等待期间清空了输入框
+    await runSearch(ctx);                     // 空查询:应立即收起并作废上一轮
+    assert.equal(byId('searchPanel').hidden, true, '空查询要收起面板');
+    release();
+    await inflight;                           // 旧轮次醒来
+    assert.equal(byId('searchPanel').hidden, true, '旧轮次不得把面板重新弹开');
+    assert.equal(byId('searchPanel').children.length, 0, '旧轮次不得渲染结果');
+  });
+});
+
+test('★ closeSearch(Esc / 点别处)同样要作废在途轮次', async () => {
+  const { runSearch, closeSearch } = await import('../public/js/features/search.js');
+  await withDom(async (_mkctx, byId) => {
+    document.querySelector = () => null;
+    const { ctx, release } = mkSearchCtx(byId);
+    byId('searchBox').value = 'admin123';
+    const inflight = runSearch(ctx);
+    closeSearch(ctx);                         // 用户按 Esc
+    release();
+    await inflight;
+    assert.equal(byId('searchPanel').hidden, true, 'Esc 之后旧轮次不得重新弹面板');
+    assert.equal(byId('searchBox').value, '', 'Esc 要清空输入');
+  });
+});
+
+test('★ 搜索前拉全部分类失败(离线)必须给反馈,不能冒泡成 unhandledrejection', async () => {
+  const { runSearch } = await import('../public/js/features/search.js');
+  await withDom(async (_mkctx, byId) => {
+    document.querySelector = () => null;
+    const { ctx } = mkSearchCtx(byId, { failLoad: new Error('Failed to fetch') });
+    const toasts = [];
+    ctx.toast = (text, kind) => { toasts.push({ text, kind }); };
+    byId('searchBox').value = 'admin123';
+    await runSearch(ctx);
+    assert.equal(toasts.length, 1, '必须给一条提示(旧写法无 catch → 面板不开也没提示)');
+    assert.equal(toasts[0].kind, 'error');
+    assert.ok(toasts[0].text.includes('Failed to fetch'), '要把原始错误说出来,便于排障');
+    assert.equal(byId('searchPanel').children.length, 0, '失败时不得渲染任何结果');
+  });
+});
+
+test('★ 点搜索结果不得覆盖 activeCatName(会把「分类 · N 篇」的篇数抹掉)', async () => {
+  const { runSearch } = await import('../public/js/features/search.js');
+  await withDom(async (_mkctx, byId) => {
+    document.querySelector = () => null;
+    const { ctx, release, clicks } = mkSearchCtx(byId);
+    /* 真实顺序:openNote → renderNoteList 会把标题写成「分类 · N 篇」 */
+    ctx.openNote = () => { byId('activeCatName').textContent = '工作 · 2 篇'; };
+    byId('searchBox').value = 'admin123';
+    const p = runSearch(ctx);
+    release();
+    await p;
+    assert.equal(clicks.length, 1, '应渲染出 1 条可点结果');
+    clicks[0]();
+    assert.equal(byId('activeCatName').textContent, '工作 · 2 篇',
+      '点结果后标题必须保持 renderNoteList 写的「分类 · N 篇」,不能被裸分类名覆盖');
+  });
+});

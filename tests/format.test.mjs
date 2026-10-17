@@ -11,6 +11,7 @@ import {
   statusAllowsOverride, STATUS_RANK,
   pushSnap, normalizeSnaps, SNAP_KEEP, SNAP_WINDOW_MS,
   notePreview,
+  trashDaysLeft, offlineBlobMessage, TRASH_DAYS,
 } from '../public/js/format.js';
 
 test('分类名清洗:非法字符 / 空白 / 限长', () => {
@@ -494,4 +495,26 @@ test('normalizeSnaps:收敛脏数据(非数组 / 坏条目 / 坏 ts / 超上限)
     [{ file: 'a.md', ts: 3, m: 1 }, { file: 'b.md', ts: 2, m: 1 }], '真值 m 一律收敛为 m:1(决定窗口内 head 的去向)');
   const many = Array.from({ length: SNAP_KEEP + 3 }, (_, i) => ({ file: 'f' + i + '.md', ts: i }));
   assert.equal(normalizeSnaps(many).length, SNAP_KEEP, '超上限丢最旧(按存储序)');
+});
+
+/* ---------- 2026-10-11(本批):回收站剩余天数 / 离线感知文案 ----------
+ * 两个都是纯函数,直接真跑 —— 不靠「文件里出现过某字符串」。 */
+
+test('trashDaysLeft:到期时刻 = deletedAt + TRASH_DAYS 天,负值不外传', () => {
+  const DAY = 86400000;
+  const now = 1_700_000_000_000;
+  assert.equal(trashDaysLeft(now, now), TRASH_DAYS, '刚删除 → 还剩满期天数');
+  assert.equal(trashDaysLeft(now - 10 * DAY, now), TRASH_DAYS - 10, '过了 10 天 → 差额');
+  assert.equal(trashDaysLeft(now - (TRASH_DAYS - 1) * DAY - 1000, now), 1, '不足 1 天按 1 天(向上取整)');
+  assert.equal(trashDaysLeft(now - TRASH_DAYS * DAY, now), 0, '正好到期 → 0');
+  assert.equal(trashDaysLeft(now - 40 * DAY, now), 0, '已过期 → 0,不得是负数(UI 会念出「还剩 -10 天」)');
+  assert.equal(trashDaysLeft(undefined, now), 0, '脏数据兜底 0,不抛');
+});
+
+test('offlineBlobMessage:只在「确定离线」时换文案,方向不能反', () => {
+  const OFF = '离线:要联网';
+  const ERR = '附件解密失败:Failed to fetch';
+  assert.equal(offlineBlobMessage(false, OFF, ERR), OFF, 'onLine === false → 离线文案');
+  assert.equal(offlineBlobMessage(true, OFF, ERR), ERR, '在线 → 原错误文案(密文真坏时不得盖成「离线」)');
+  assert.equal(offlineBlobMessage(undefined, OFF, ERR), ERR, '取不到 onLine(Node / 老环境)→ 按在线,不得误报离线');
 });

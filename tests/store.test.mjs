@@ -278,3 +278,19 @@ test('★ createProxy:经代理调用的 store 方法 this 必须绑到真实 st
   assert.equal(md('丁'), 1);
   assert.equal(st.get('dirty').has('丁'), true);
 });
+
+test('★ moveDirty:目标分类已有脏标记时必须炸掉(覆盖代数会让在途保存误清脏标记)', () => {
+  /* 场景:to 已有未保存改动且在途保存(捕获 gen=1);此时把同样 gen=1 的
+   * from 改名到 to,若覆盖,在途保存结束后的 clearDirtyIfUnchanged(to,1)
+   * 会判「无新改动」把脏标记清掉 —— from 的改动从未上传却离开了队列。
+   * renameCategory 已按分类名唯一性拦过,这里是源头兜底。 */
+  const st = new Store();
+  const g1 = st.markDirty('旧名');
+  const g2 = st.markDirty('新名');
+  assert.throws(() => st.moveDirty('旧名', '新名'), /待保存队列里已存在/);
+  /* 炸掉之后两份状态必须原样保留 —— 不能「删了一半」(先 delete 再判重就会这样) */
+  assert.equal(st.get('dirty').has('旧名'), true, '源分类的脏标记不得被删');
+  assert.equal(st.get('dirty').has('新名'), true);
+  assert.equal(st.get('dirtyGen').get('旧名'), g1, '源代数不得被改');
+  assert.equal(st.get('dirtyGen').get('新名'), g2, '目标代数不得被覆盖');
+});

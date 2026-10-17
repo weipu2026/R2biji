@@ -330,3 +330,35 @@ test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据
     for (const t of rd.st.maskTimers) clearTimeout(t);
   }
 });
+
+/* ---------- 2026-10-11(本批):渲染子集补「任务列表 / 分割线」—— 两边必须同语法 ---------- */
+
+test('★ 任务列表 / 分割线:阅读站 rdrMd 与主站 renderMarkdown 同语法', async () => {
+  /* 阅读站(recover.html 模板内的 rdrMd)与主站 render.js 是同一套语法的**两份实现**,
+   * 历史上一度漂移(2026-10-06 的 P0:主站改了按行切分、阅读站没跟)。
+   * 本批新增的块级形态必须两边同时具备,所以这里既查阅读站的输出,也查主站的块序列。 */
+  const readerCode = extractBetween(
+    mod.READER_TEMPLATE, '/*READER-SCRIPT-START*/', '/*READER-SCRIPT-END*/', 'READER-SCRIPT',
+  );
+  const rd = await import('data:text/javascript,' + encodeURIComponent(readerCode + '\nexport { rdrMd };'));
+
+  const src = '- [ ] 买菜\n- [x] 交电费\n\n---\n\n结尾';
+  const html = rd.rdrMd(src);
+  assert.match(html, /<li class="task"><input type="checkbox" class="task-box" disabled>/,
+    '未勾选的任务必须渲染成只读勾选框(disabled → 不进 Tab 序)');
+  assert.match(html, /<li class="task"><input type="checkbox" class="task-box" disabled checked>/,
+    '已勾选的任务必须带 checked');
+  assert.ok(html.includes('<hr>'), '分割线必须渲染成 <hr>,不能把 --- 原样留在正文里');
+  assert.ok(!html.includes('[ ] 买菜'), '标记字符不得留在正文里');
+  assert.ok(html.includes('买菜'), '条目正文必须保留');
+
+  await withDom(async () => {
+    const { renderMarkdown } = await import('../public/js/render.js');
+    const md = renderMarkdown(src);
+    assert.deepEqual(md.children.map((c) => c.tag), ['ul', 'hr', 'p'], '块序列必须与阅读站一致');
+    assert.equal(md.children[0].children.length, 2, '两条任务必须同属一个 ul');
+    assert.equal(
+      md.children[0].children.filter((li) => String(li.className).split(/\s+/).includes('task')).length,
+      2, '主站也要标出 .task');
+  });
+});

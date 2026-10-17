@@ -286,3 +286,41 @@ test('P3:敏感行必须可聚焦并能向读屏器表达状态(tabindex/role/ar
   assert.ok(label && label.length > 0, '必须有无障碍名(svg/title 都不算)');
   assert.ok(!label.includes('Jm8#vQ2x'), '可访问名里绝不能带上真值本身');
 }));
+
+/* ---------- 2026-10-11(本批):渲染子集补「任务列表 / 分割线」 ---------- */
+
+test('★ renderMarkdown:任务列表渲染成只读勾选框(且先于无序列表判定)', () => withDom(() => {
+  const md = renderMarkdown('- [ ] 买菜\n- [x] 交电费\n- 普通条目');
+  assert.equal(md.children.length, 1, '三条必须落在同一个 ul 里(任务行不得另起一块)');
+  const ul = md.children[0];
+  assert.equal(ul.tag, 'ul');
+  const [a, b, c] = ul.children;
+  const hasCls = (n, cls) => String(n.className).split(/\s+/).includes(cls);
+  const boxOf = (li) => li.children.find((n) => n.className === 'task-box');
+  assert.ok(hasCls(a, 'task'), '任务条目标 .task');
+  const boxA = boxOf(a);
+  assert.ok(boxA, '必须真的渲染出勾选框,而不是把「[ ] 」当正文留下来');
+  assert.equal(boxA.type, 'checkbox');
+  assert.equal(boxA.checked, false, '未勾选 → checked 必须为 false');
+  assert.equal(boxA.disabled, true, '只读内容里的勾选框必须 disabled,否则每条任务都多一个 Tab 停靠点');
+  assert.equal(boxOf(b).checked, true, '- [x] 必须勾上');
+  assert.equal(a.textContent, '买菜', '标记字符不得留在正文里');
+  assert.equal(boxOf(c), undefined, '普通条目不受影响');
+  assert.equal(c.textContent, '普通条目');
+}));
+
+test('★ renderMarkdown:分割线 --- / *** / ___ 渲染成 <hr>', () => withDom(() => {
+  const md = renderMarkdown('前段\n\n---\n\n后段\n\n***\n___');
+  assert.deepEqual(md.children.map((c) => c.tag), ['p', 'hr', 'p', 'hr', 'hr']);
+  assert.ok(md.children.filter((c) => c.tag === 'hr').every((c) => c.dataset.copy === ''),
+    '分割线没有可复制的文本,data-copy 必须是空串(不能是 undefined)');
+  // 两个连字符、以及行内出现的 --- 都不是分割线
+  const md2 = renderMarkdown('--\n正文 --- 续\n- a');
+  assert.equal(md2.children.filter((c) => c.tag === 'hr').length, 0, '-- 与行内的 --- 不得被当成分割线');
+}));
+
+test('★ renderMarkdown:任务列表的 data-copy 补回 [x]/[ ] 标记', () => withDom(() => {
+  const md = renderMarkdown('- [ ] 买菜\n- [x] 交电费');
+  assert.equal(md.children[0].dataset.copy, '[ ] 买菜\n[x] 交电费',
+    'checkbox 不贡献 textContent → 不补标记的话「复制本段」会静默丢掉勾选状态');
+}));

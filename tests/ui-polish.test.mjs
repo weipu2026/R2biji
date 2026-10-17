@@ -23,6 +23,7 @@ const uiJs = read('js/ui.js');
 const shellJs = read('js/features/shell.js');
 const lockJs = read('js/features/lock.js');
 const indexHtml = read('index.html');
+const dataJs = read('js/features/data.js');
 
 /* ---------- A1 焦点圈覆盖 ---------- */
 
@@ -312,4 +313,152 @@ test('P3:远端锁定也要消费回传的 dropped(别静默丢本端改动)', (
   const seg = /if \(msg\.type === 'locked'\)\s*\{([\s\S]*?)\n  \}/.exec(uiJs);
   assert.ok(seg, '必须能取出 onTabMessage 的 locked 分支');
   assert.match(seg[1], /\.then\(\(n\) => n > 0 && toast\(/, '必须消费 lockNow 的返回值并提示');
+});
+
+/* ---------- 2026-10-11(本批):离线提示 / 静态样式 / 回收站剩余天数 ---------- */
+
+test('A7:密码生成器的静态样式必须走 style.css(不得内联)', () => {
+  /* data.js 是 feature 模块,里面的样式全是静态值 —— 按 index.html 的口径应一律进 style.css。
+   * ⚠️ 唯一的例外是「运行时算出来的定位」(search.js 的浮层 top 依赖 getBoundingClientRect),
+   *    那类值来自布局、写不进样式表;data.js 里不存在这种需求,所以这里可以全禁。
+   * (2026-10-11 审计 P3:此前 fontFamily / fontSize / justifyContent 三处写在内联 style 上,
+   *  靠 CSSOM 侥幸绕过 CSP(style-src 'self'),功能无碍但口径不一致。) */
+  assert.doesNotMatch(dataJs, /\.style\.\w+\s*=/, 'data.js 不得再出现内联样式赋值');
+  assert.match(dataJs, /'modal-input gen-out'/, '生成结果框必须挂 .gen-out');
+  assert.match(dataJs, /'modal-btns gen-ops'/, '按钮行必须挂 .gen-ops');
+  assert.match(css, /\.modal-input\.gen-out\s*\{[^}]*font-family:\s*var\(--mono\)/,
+    'style.css 必须定义 .gen-out 的等宽字体');
+  assert.match(css, /\.modal-btns\.gen-ops\s*\{[^}]*justify-content:\s*flex-start/,
+    'style.css 必须定义 .gen-ops 的左对齐');
+});
+
+test('B8:回收站条目必须显示剩余保留天数', () => {
+  // 纯函数(到期口径 / 向上取整 / 负值截 0)在 format.test.mjs 真跑;这里只钉「接线」:
+  // 算了不显示等于没做,所以文案模板也要断言。
+  assert.match(dataJs, /F\.trashDaysLeft\(note\.deletedAt\)/, '回收站条目必须用 F.trashDaysLeft 算剩余天数');
+  assert.match(dataJs, /还剩 \$\{leftDays\} 天/, '必须把剩余天数显示出来');
+  assert.match(dataJs, /'今天到期'/, '到期当天要有明确文案,不能显示「还剩 0 天」');
+});
+
+test('P2:离线读附件/历史的失败提示必须区分「离线」与「解密失败」', () => {
+  /* ① 真跑 isOffline —— 判据落在**分支语义**上,不是「文件里出现过某字符串」。
+   *    附件与版本历史走 /api/blob,它不在 SW 离线白名单 → 断网必然失败;
+   *    若原样抛出,用户看到的是「附件解密失败:Failed to fetch」,把离线误报成文件损坏。 */
+  const src = /function isOffline\(\)\s*\{[\s\S]*?\n\}/.exec(noteJs);
+  assert.ok(src, 'note.js 必须定义 isOffline()');
+  const isOffline = new Function(src[0] + '; return isOffline;')();
+  const desc = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const setNav = (v) => Object.defineProperty(globalThis, 'navigator', { value: v, configurable: true, writable: true });
+  try {
+    setNav({ onLine: false });
+    assert.equal(isOffline(), true, 'onLine === false 才算离线');
+    setNav({ onLine: true });
+    assert.equal(isOffline(), false, '在线不得误判成离线');
+    setNav(undefined);
+    assert.equal(isOffline(), false, '取不到 navigator(Node / 老环境)必须按在线 —— 反了会把网络抖动误报成离线');
+  } finally {
+    if (desc) Object.defineProperty(globalThis, 'navigator', desc);
+    else delete globalThis.navigator;
+  }
+
+  /* ② 附件(预览 / 下载 / 入库)+ 历史恢复 = 4 条需要联网的失败路径,都必须过 offlineBlobMessage。
+   *    ⚠️ 将来新增第 5 条这类路径时,这个数字要一起改 —— 否则本用例不会自动翻红。 */
+  const wired = noteJs.match(/F\.offlineBlobMessage\(isOffline\(\)/g) || [];
+  assert.equal(wired.length, 4, `附件/历史的 4 条网络失败路径都要区分离线,实际 ${wired.length} 处`);
+
+  /* ③ 旧写法绝迹:toast 不得直接以失败文案开头(退回去就是「把离线报成解密失败」) */
+  assert.doesNotMatch(noteJs, /ctx\.toast\(\s*`附件解密失败/, '附件失败必须经过 offlineBlobMessage');
+  assert.doesNotMatch(noteJs, /ctx\.toast\(\s*`「\$\{file\.name\}」入库失败/, '入库失败必须经过 offlineBlobMessage');
+  assert.doesNotMatch(noteJs, /ctx\.toast\(\s*`恢复失败/, '历史恢复失败必须经过 offlineBlobMessage');
+});
+
+/* ---------- 2026-10-17 审计:交互竞态 / 死代码 / 口径一致 ---------- */
+
+const libJs = read('js/lib.js');
+const apiJs = read('js/api.js');
+const tabsyncJs = read('js/tabsync.js');
+const themeJs = read('js/features/theme.js');
+const searchFeatureJs = read('js/features/search.js');
+
+test('A9:复制按钮 1.5 秒内连点两次,不得永久卡在「已复制」', () => {
+  /* 旧实现把「原值」存成点击那一刻的 DOM 文本:第二次点击时 label 里已经是
+   * 「 已复制」,它的定时器到点就把按钮**永久**还原成这个中间态。
+   * 判据必须落在**连点后的最终文案**上 —— 只看「有没有 copied 类」抓不到。 */
+  const src = /function flashCopied\(btn\)\s*\{[\s\S]*?\n\}/.exec(uiJs);
+  assert.ok(src, 'ui.js 里应能找到 flashCopied 定义');
+  const timers = [];
+  const setTimeoutStub = (fn) => { timers.push(fn); return timers.length; };
+  const clearTimeoutStub = (id) => { if (id) timers[id - 1] = () => {}; };
+  const flashCopied = new Function(
+    'document', 'ICON', 'setTimeout', 'clearTimeout',
+    src[0] + '; return flashCopied;',
+  )({ createElement: () => ({ className: '', textContent: '' }) }, { check: '<svg/>' }, setTimeoutStub, clearTimeoutStub);
+
+  /* 文字按钮(已拆好 .btn-label 结构) */
+  const label = { className: '', textContent: '复制' };
+  const btn = {
+    dataset: {},
+    classList: { add() {}, remove() {} },
+    textContent: '复制',
+    querySelector: (sel) => (sel === '.btn-label' ? label : null),
+  };
+  flashCopied(btn);
+  flashCopied(btn);              // 1.5s 内第二次
+  for (const fn of timers) fn(); // 所有定时器到点
+  assert.equal(label.textContent, '复制', '连点后必须还原成原始文案,不能停在「已复制」');
+  assert.equal(btn.dataset.origLabel, '复制', '原值要记在元素上,不能取「点击那一刻的 DOM」');
+
+  /* 纯图标按钮:内容存 dataset.origHTML,连点同样要还原 */
+  const timers2 = [];
+  const flash2 = new Function(
+    'document', 'ICON', 'setTimeout', 'clearTimeout',
+    src[0] + '; return flashCopied;',
+  )({ createElement: () => ({}) }, { check: '<svg class=\'check\'/>' },
+    (fn) => { timers2.push(fn); return timers2.length; },
+    (id) => { if (id) timers2[id - 1] = () => {}; });
+  const iconBtn = { dataset: {}, classList: { add() {}, remove() {} }, textContent: '', innerHTML: '<svg class=\'orig\'/>', querySelector: () => null };
+  flash2(iconBtn);
+  flash2(iconBtn);
+  for (const fn of timers2) fn();
+  assert.equal(iconBtn.innerHTML, '<svg class=\'orig\'/>', '纯图标按钮连点后必须还原成原图标');
+});
+
+test('A10:下载锚点只有一份实现(不 append 就 click 会拿到空文件)', () => {
+  /* downloadUrl 的注释早就写明「必须先 append 进文档再 click」,
+   * 而 downloadBytes / downloadVaultBackup 各写了一份**裸 click** 的锚点逻辑。 */
+  const db = /function downloadBytes\([\s\S]*?\n\}/.exec(uiJs);
+  assert.ok(db, 'ui.js 里应能找到 downloadBytes');
+  assert.match(db[0], /downloadUrl\(url, fileName\)/, 'downloadBytes 必须委托 downloadUrl');
+  /* lock.js 的 vault.json 备份同样不得自建锚点:它走 ctx.downloadBytes,
+   * 而 downloadBytes 内部再走 downloadUrl —— 与 note.js 收敛到 ctx.downloadUrl
+   * 是同一条纪律:一处实现,一处修。 */
+  assert.match(lockJs, /ctx\.downloadBytes\([\s\S]{0,60}TextEncoder/, 'downloadVaultBackup 必须走 ctx.downloadBytes');
+  assert.doesNotMatch(lockJs, /document\.createElement\('a'\)/, 'lock.js 不得自建下载锚点');
+});
+
+test('A11:死代码与双绑清理', () => {
+  assert.doesNotMatch(uiJs, /import \{[^}]*findMatches[^}]*\} from '\.\/search\.js'/, 'ui.js 不得再导入 findMatches(搜索已迁走)');
+  assert.match(shellJs, /\.ed-btn:not\(\[data-genpw\]\)/, 'pw 按钮同时带 .ed-btn 与 data-genpw,循环必须排除它');
+  assert.doesNotMatch(searchFeatureJs, /\bqLen\b/, 'searchSeq 用序号判据,qLen 是死字段');
+  assert.doesNotMatch(themeJs, /export function (loadThemePref|setThemePref|applyTheme)/, 'theme.js 的三个函数无人外部引用,收回模块内');
+  assert.match(tabsyncJs, /catch \(e\) \{[\s\S]*?console\.error\('tab 消息处理失败'/, '多标签页同步失败必须留痕');
+  /* 409 建库冲突:必须切到解锁态(showLock 本身负责清掉上一态残留的 pwHint) */
+  assert.match(lockJs, /ctx\.showLock\('unlock'\)/, '409 分支必须切到解锁态,不能留着建库表单');
+  assert.match(lockJs, /hint\.hidden = !isSetup;[\s\S]*?hint\.textContent = '';/, 'showLock 必须清掉上一态的密码强度提示');
+  /* etag 归一化:fetchVault 与 getCat 必须走同一个 normEtag(都剥 W/ 弱验证器) */
+  const vaultFn = /export async function fetchVault\([\s\S]*?\n\}/.exec(apiJs);
+  const catFn = /export async function getCat\([\s\S]*?\n\}/.exec(apiJs);
+  assert.ok(vaultFn && catFn, 'api.js 里应能找到 fetchVault 与 getCat');
+  assert.match(vaultFn[0], /normEtag\(/, 'fetchVault 必须归一化 etag');
+  assert.match(catFn[0], /normEtag\(/, 'getCat 必须与 fetchVault 同口径 —— 口径不一致迟早 412');
+});
+
+test('A12:重载失败不报喜 / 会话已销毁不标脏 / 追加失败先取引用再截断', () => {
+  const reloaded = uiJs.match(/if \(reloaded\) toast\(/g) || [];
+  assert.equal(reloaded.length, 2, 'handleConflict 与 onTabMessage 两处都必须看 openCategory 的返回值再报喜');
+  assert.match(uiJs, /if \(S\.lib\) S\.markDirty\(name\)/, '会话已销毁时不得把分类塞回脏集(幻影未保存标记)');
+  /* lib.js 追加失败回滚:必须先取 added 再截断长度 ——
+   * 旧写法先 length = before 再取 notes[before],取回恒 undefined,引用清理从未执行。 */
+  const m = /const added = dst\.data\.notes\[before\];\s*\n\s*dst\.data\.notes\.length = before;/.exec(libJs);
+  assert.ok(m, 'lib.js 必须先取 notes[before] 再截断');
 });

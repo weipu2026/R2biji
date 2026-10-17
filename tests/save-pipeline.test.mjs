@@ -175,3 +175,24 @@ test('★ 锁屏必须关掉共用 <dialog>(它浮在 top layer,会盖在锁屏�
     assert.equal(document.body?.textContent?.includes?.('sk-should-not-be-visible') ?? false, false);
   });
 });
+
+test('★ 锁定必须先关掉冲突弹窗再等保存(否则老板键卡在那枚永不落定的 promise 上)', async () => {
+  const lib = mkLib({ notes: {} });
+  await withDom(async () => {
+    setup(lib);
+    const modal = document.getElementById('modal');
+    modal.open = true;
+    appStore.markDirty('甲');
+    /* saveAll 受控挂起:模拟「正阻塞在冲突弹窗上」的那一轮保存 */
+    let releaseSave = () => {};
+    const hung = new Promise((r) => { releaseSave = r; });
+    const ctx2 = { ...ctx, store: appStore, saveAll: () => hung };
+    const p = lockNow(ctx2, { broadcast: false, confirmDiscard: false });
+    /* 让出微任务:旧写法此刻还挂在 await saveAll 上,弹窗仍开着 */
+    await Promise.resolve();
+    assert.equal(modal.open, false, '★ 必须在 await 保存之前就关掉弹窗(紧急锁定不能等人先处理冲突)');
+    releaseSave();
+    await p;
+    assert.equal(appStore.get('lib'), null, '锁定最终仍要销毁会话');
+  });
+});

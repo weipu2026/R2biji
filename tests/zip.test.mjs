@@ -119,11 +119,110 @@ test('压缩过的条目一律拒绝(本模块只认自己写出的 store)', () 
   assert.throws(() => readZipStore(patched), /压缩过/, '必须明确拒绝而不是瞎猜');
 });
 
-test('条目重复要报错(否则恢复时不知道用哪份)', () => {
+test('条目重复要报错(写侧直接炸,读侧也要拦住被改坏的包)', () => {
   const entries = [
     { name: 'cats/a.enc', bytes: enc('1') },
     { name: 'cats/a.enc', bytes: enc('2') },
   ];
-  const zip = zipStore(entries, { date: DATE }); // 写侧允许(结构本身合法)
+  /* ★ 写侧必须当场报错(2026-10-17 审计 P2):旧行为是「照写、让读侧兜」,
+   *   可这张包是用来恢复全库的 —— 写出来自己都读不回来的包,等于到恢复那天
+   *   才发现。要么当场炸,要么保证可读,没有第三条路。 */
+  assert.throws(() => zipStore(entries, { date: DATE }), /重复/, '写侧必须拦住');
+
+  /* 读侧守卫仍要独立成立:拿一个合法包,把第二个条目的名字在字节层面改成
+   * 与第一个相同(本地头与中央目录各一处),模拟「被改坏/被拼接」的包。 */
+  const zip = zipStore([
+    { name: 'cats/a.enc', bytes: enc('1') },
+    { name: 'cats/b.enc', bytes: enc('2') },
+  ], { date: DATE });
+  const from = enc('cats/b.enc');
+  const to = enc('cats/a.enc');
+  let hits = 0;
+  for (let i = 0; i + from.length <= zip.length; i++) {
+    if (from.every((b, k) => zip[i + k] === b)) {
+      zip.set(to, i);
+      hits += 1;
+      i += from.length - 1;
+    }
+  }
+  assert.equal(hits, 2, '名字应在本地头与中央目录各出现一次');
   assert.throws(() => readZipStore(zip), /重复/, '读侧必须拦住');
+});
+/* ---------------- 2026-10-17 审计 P2:写出/读入加固 ---------------- */
+
+/** 读第一个条目本地头的 DOS 日期字(年 = (v>>9)+1980,月 = (v>>5)&0xf,日 = v&0x1f) */
+function firstDosDate(zip) {
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  return dv.getUint16(12, true);
+}
+
+test('写端:bytes 缺失或类型不对必须当场报错(不能静默写成 0 字节条目)', () => {
+  for (const bad of [undefined, null, 'abc', 42, {}]) {
+    assert.throws(
+      () => zipStore([{ name: 'vault.json', bytes: bad }], { date: DATE }),
+      ZipError,
+      `bytes=${String(bad)} 必须拒绝`,
+    );
+  }
+  /* 0 字节本身是合法的(空文件 / 空 blob 就是),不能连它也拦 —— 只能按类型判。 */
+  assert.doesNotThrow(() => zipStore([{ name: 'blobs/empty', bytes: new Uint8Array(0) }], { date: DATE }));
+  /* ArrayBuffer 也是合法输入(调用方可能直接从 arrayBuffer 拿来) */
+  const buf = new ArrayBuffer(3);
+  new Uint8Array(buf).set([1, 2, 3]);
+  const back = readZipStore(zipStore([{ name: 'a.bin', bytes: buf }], { date: DATE }));
+  assert.deepEqual(back[0].bytes, new Uint8Array([1, 2, 3]));
+});
+
+test('日期:无效 Date 退回 1980-01-01,超出 2107 夹到 2107', () => {
+  /* 旧写法:NaN << 9 得 0 → 写出「1980 年 0 月 0 日」这种非法 DOS 日期 */
+  const bad = firstDosDate(zipStore([{ name: 'a', bytes: enc('x') }], { date: new Date('不是日期') }));
+  assert.equal((bad >> 9) + 1980, 1980, '无效日期必须退回 1980 年');
+  assert.equal((bad >> 5) & 0xf, 1, '月份不能是 0');
+  assert.equal(bad & 0x1f, 1, '日不能是 0');
+  assert.equal(readZipStore(zipStore([{ name: 'a', bytes: enc('x') }], { date: new Date('x') })).length, 1,
+    '无效日期仍要写出可读的包');
+  /* DOS 日期年字段只有 7 位:2200 会被 setUint16 静默截断成 1980 */
+  const far = firstDosDate(zipStore([{ name: 'a', bytes: enc('x') }], { date: new Date(2200, 0, 1) }));
+  assert.equal((far >> 9) + 1980, 2107, '2200 年必须夹到 2107');
+});
+
+test('读端:EOCD 只认「注释长度正好收到文件尾」的那一个(注释里撞上假签名不算)', () => {
+  const base = zipStore([{ name: 'vault.json', bytes: enc('{"magic":"JMBIJI"}') }], { date: DATE });
+  /* 给真 EOCD 挂 40 字节注释,注释开头塞一个假 EOCD(声称 7 条、目录 999 字节)。
+   * 旧写法从尾部往前扫,**第一个命中的签名**就是它 → 按垃圾字段解析 → 报
+   * 「中央目录越界」这种误导错误;新写法用「22 + 注释长度 == 文件尾」把它筛掉。 */
+  const COMMENT = 40;
+  const out = new Uint8Array(base.length + COMMENT);
+  out.set(base);
+  const fv = new DataView(out.buffer);
+  fv.setUint32(base.length, 0x06054b50, true); // 假签名
+  fv.setUint16(base.length + 8, 7, true);      // 声称 7 个条目
+  fv.setUint32(base.length + 12, 999, true);   // cdSize 垃圾
+  fv.setUint32(base.length + 16, 999, true);   // cdOffset 垃圾
+  fv.setUint16(base.length + 20, 0, true);     // 它声称没注释 → 收不到文件尾
+  fv.setUint16(base.length - 22 + 20, COMMENT, true); // 真 EOCD 的注释长度
+  const back = readZipStore(out);
+  assert.deepEqual(back.map((e) => e.name), ['vault.json'], '必须认回真 EOCD');
+});
+
+test('读端:条目名长度越界要说清楚,不能靠 subarray 静默截短', () => {
+  const zip = zipStore([{ name: 'cats/a.enc', bytes: enc('1') }], { date: DATE });
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  /* 中央目录头在 EOCD 记录的 cdOffset 处;nameLen 在头内偏移 28 */
+  const eocd = zip.length - 22;
+  const cdOffset = dv.getUint32(eocd + 16, true);
+  dv.setUint16(cdOffset + 28, 0xffff, true);
+  assert.throws(() => readZipStore(zip), /条目名越界/, '必须点名是名字越界');
+});
+
+test('读端:中央目录必须刚好用尽(count 被改小不能静默少读)', () => {
+  const zip = zipStore([
+    { name: 'vault.json', bytes: enc('{}') },
+    { name: 'cats/a.enc', bytes: enc('1') },
+  ], { date: DATE });
+  const dv = new DataView(zip.buffer, zip.byteOffset, zip.byteLength);
+  /* 条目数字段在 EOCD 偏移 8/10;改小后旧写法只读 1 条就收工,恢复时静默少文件 */
+  dv.setUint16(zip.length - 22 + 8, 1, true);
+  dv.setUint16(zip.length - 22 + 10, 1, true);
+  assert.throws(() => readZipStore(zip), /中央目录与条目数不符/, '必须拦住');
 });

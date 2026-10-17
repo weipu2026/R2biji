@@ -202,3 +202,35 @@ test('组合链路的 showEmpty 桩必须与 ui.js 的真实契约一致(防桩�
   assert.match(m[0], /\$\('readView'\)\.hidden = true;/, '真实 showEmpty 必须隐藏 #readView(桩按此建模)');
   assert.match(m[0], /box\.hidden = false;/, '真实 showEmpty 必须显示空状态容器');
 });
+
+/* ---------- openCategory 的返回值(2026-10-17 审计 P1/P2) ---------- */
+
+test('★ openCategory 成功必须回传 true —— 调用方靠它决定要不要报喜', async () => {
+  await withDom(async () => {
+    const { ctx } = mkCtx({ 甲: [mkNote('a', 1000, true)] });
+    assert.equal(await openCategory(ctx, '甲'), true, '成功必须返回 true');
+  });
+});
+
+test('★ openCategory 加载失败必须回传 false(不能返回 undefined 让调用方误判成功)', async () => {
+  await withDom(async () => {
+    const { ctx } = mkCtx({ 甲: [mkNote('a', 1000, true)] });
+    ctx.store.get('lib').loadCategory = async () => { throw new Error('网络炸了'); };
+    const toasts = [];
+    ctx.toast = (text, kind) => { toasts.push({ text, kind }); };
+    assert.equal(await openCategory(ctx, '甲'), false, '失败必须返回 false');
+    assert.equal(toasts.length, 1, '失败由自己报一条红条,调用方不得再报喜');
+    assert.equal(toasts[0].kind, 'error');
+  });
+});
+
+test('★ openCategory 在 await 期间会话被销毁(锁屏)→ 返回 false,且不在锁屏上抛 TypeError', async () => {
+  await withDom(async () => {
+    const { ctx } = mkCtx({ 甲: [mkNote('a', 1000, true)] });
+    /* 复刻真实时序:loadCategory 是在捕获到的旧实例上跑的,锁定发生在它有结果之前;
+     * 旧写法随后直接 S.get('lib').categoryInfo(...) → 在锁屏上抛
+     * 「Cannot read properties of null」,冒泡到 doUnlock 的 catch 里写成打开失败。 */
+    ctx.store.get('lib').loadCategory = async () => { ctx.store.set('lib', null); };
+    assert.equal(await openCategory(ctx, '甲'), false, '会话已销毁时不能继续渲染');
+  });
+});
