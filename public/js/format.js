@@ -221,8 +221,10 @@ export function catMovePatch(names, metaOf, name, dir) {
     ? ordered.map((n) => metaOf(n).order)
     : ordered.map((_, i) => (i + 1) * CAT_ORDER_STEP);
   const tmp = values[idx]; values[idx] = values[j]; values[j] = tmp;
-  const patch = {};
-  ordered.forEach((n, i) => { patch[n] = values[i]; });
+  /* fromEntries 用 CreateDataProperty 建自有属性:分类名可以是 __proto__,
+   * 普通对象上 `patch['__proto__'] = 序号` 走的是原型 setter → order 静默丢失
+   * (2026-10-17 审计 P2 同族)。 */
+  const patch = Object.fromEntries(ordered.map((n, i) => [n, values[i]]));
   return patch;
 }
 

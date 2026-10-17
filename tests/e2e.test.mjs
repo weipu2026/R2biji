@@ -1093,3 +1093,58 @@ test('★ 跨分类移动:目标先写、源后删;目标冲突时源一动不�
   assert.equal(jia.data.notes.length, beforeJia,
     '★ 冲突时源分类一动不动:笔记一篇都不能少(这是「先写目标」换来的安全性)');
 });
+
+test('★ __proto__ 作分类名:置顶/篇数/顺序/改名都不丢(P2-6 全链路)', async () => {
+  /* 分类本体在 Map 里,正文读写完全正常 —— 丢的只有 vault.json 的 catMeta。
+   * 最隐蔽的是「首次写入」:对象上还没有自有 __proto__ 键,meta[name] = entry
+   * 走原型 setter,连 updateVaultMeta 的「内容没变」短路都当成没改动(返回 false)。 */
+  freshEnv();
+  API.clearToken();
+  const { json, dek, authKeyHex } = await V.createVault('proto密码abc', ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  assert.equal(created.status, 201);
+  API.setToken(authKeyHex);
+  const lib = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await lib.rescan();
+  await lib.createCategory('__proto__');
+  await lib.createCategory('普通');
+
+  const readVault = () => JSON.parse(new TextDecoder().decode(env.VAULT.map.get('vault.json').bytes));
+
+  // ① 首次置顶
+  assert.equal(await lib.setCatMeta('__proto__', { pin: true }), true,
+    '★ 首次置顶必须真的写进 vault.json(旧写法静默返回 false)');
+  assert.equal(lib.catPin('__proto__'), true);
+  assert.ok(Object.prototype.hasOwnProperty.call(readVault().catMeta, '__proto__'),
+    '落盘后必须是自有键,JSON.stringify 才不会丢');
+
+  // ② 篇数:先清掉元信息,制造「setCatCounts 首次写入 __proto__」的场景
+  //    (若 catMeta 里已有该键,旧写法会命中自有属性而不丢 —— 那样这条就测不到东西)
+  await lib.setCatMeta('__proto__', { pin: null });
+  assert.equal(lib.catPin('__proto__'), false);
+  assert.equal(await lib.setCatCounts(Object.fromEntries([['__proto__', 7]])), true);
+  assert.equal(lib.catCount('__proto__'), 7);
+  assert.equal(readVault().catMeta['__proto__'].count, 7, '篇数必须真的落盘');
+
+  // ③ 排序:只给「普通」铺 order;__proto__ 没有 order → catMovePatch 走「全量铺开」,
+  //    于是这一步是 moveCat 首次写 __proto__ 的元信息
+  await lib.setCatMeta('__proto__', { pin: null, count: null, order: null });
+  await lib.setCatMeta('普通', { order: 1000 });
+  assert.ok(!Object.prototype.hasOwnProperty.call(readVault().catMeta, '__proto__'),
+    '前置:catMeta 里此刻不应有 __proto__ 键');
+  assert.equal(await lib.moveCat('__proto__', -1), true);
+  assert.equal(lib.catMetaOf('__proto__').order, 1000, '交换后的 order 必须落到 __proto__ 上');
+  assert.equal(lib.catMetaOf('普通').order, 2000);
+  assert.equal(readVault().catMeta['__proto__'].order, 1000, 'order 必须真的落盘');
+
+  // ④ 改名到 __proto__(元信息必须跟着搬家)
+  await lib.deleteCategory('__proto__');
+  await lib.setCatMeta('普通', { pin: true });
+  assert.equal(await lib.renameCategory('普通', '__proto__'), '__proto__');
+  /* ★ 必须查**落盘的自有键**:原型被污染时 catPin('__proto__') 会从 [[Prototype]]
+   *   读到 pin=true,看着像成功,换一台设备重新加载就没了。 */
+  const after = readVault();
+  assert.ok(Object.prototype.hasOwnProperty.call(after.catMeta, '__proto__'),
+    '改名后的元信息必须落成自有键(原型污染在读取时看起来有值,换设备就丢)');
+  assert.equal(after.catMeta['__proto__'].pin, true);
+});

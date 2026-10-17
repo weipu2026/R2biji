@@ -652,7 +652,9 @@ function syncCatCounts(pairs) {
   // 只把「篇数真的变了」的分类攒进这一次条件写:逐个写就是每个分类一次
   // PUT /api/vault(多分类保存时 N 次网络往返),批量接口 setCatCounts 本来就有
   // (跨分类移动在用),这里统一走它(2026-10-06 审计 P3)。
-  const todo = {};
+  /* 分类名可控:普通对象上 __proto__ 是 setter,赋数字会被静默忽略 → 该分类篇数
+   * 永远不进这一次批量写(2026-10-17 审计 P2)。用无原型对象绕开。 */
+  const todo = Object.create(null);
   for (const [name, n] of pairs) {
     const cat = S.lib.categoryInfo(name);
     if (!cat?.data || !Number.isInteger(n)) continue;
@@ -1267,4 +1269,6 @@ function closeDrawer() {
 /* saveAll / markDirty 仅为了可测:「锁定必须等到在途保存结束」「分类被别端删除
  * 必须提示」这两条不变量跨 ui.js ↔ features/lock.js,离线测试要能直接驱动它们
  * (与 handleConflict 同一理由:唯一验法是把真实接线跑起来)。 */
-export { ctx, handleConflict, saveAll, markDirty };
+/* syncCatCounts 仅为了可测:它「把哪些分类攒进这一次批量写」的组包逻辑写错了
+ * 不会报错,只会静默少写(分类名是 __proto__ 时尤其隐蔽) —— tests/save-pipeline 钉住。 */
+export { ctx, handleConflict, saveAll, markDirty, syncCatCounts };

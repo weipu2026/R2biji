@@ -159,15 +159,21 @@ export class Library {
    */
   async setCatMeta(name, patch) {
     return this.updateVaultMeta((json) => {
-      const meta = { ...(json.catMeta || {}) };
-      const entry = { ...(meta[name] || {}) };
+      /* ★ 全程用 Map,不要用普通对象(2026-10-17 审计 P2):分类名是用户可控的,
+       *   「__proto__」在普通对象上走的是**原型 setter** —— `meta[name] = entry`
+       *   改的是原型,Object.keys() 根本看不到,该分类的置顶/顺序/篇数会静默丢失
+       *   (分类本体在 Map 里,正文读写完全正常,用户只觉得「怎么置顶又没了」)。
+       *   ⚠️ 只把构造改成 fromEntries 并不够:首次写入时 meta 上还没有自有
+       *   __proto__ 键,那一句赋值照样走 setter → 整条链路都必须是 Map。 */
+      const meta = new Map(Object.entries(json.catMeta || {}));
+      const entry = { ...(meta.get(name) || {}) };
       for (const [k, v] of Object.entries(patch)) {
         if (v === undefined || v === null) delete entry[k];
         else entry[k] = v;
       }
-      if (Object.keys(entry).length) meta[name] = entry;
-      else delete meta[name];
-      if (Object.keys(meta).length) json.catMeta = meta;
+      if (Object.keys(entry).length) meta.set(name, entry);
+      else meta.delete(name);
+      if (meta.size) json.catMeta = Object.fromEntries(meta);
       else delete json.catMeta; // 全空就整个摘掉,不在 vault.json 里留空壳
     });
   }
@@ -204,9 +210,11 @@ export class Library {
     const patch = F.catMovePatch([...this.categories.keys()], (n) => this.catMetaOf(n), name, dir);
     if (!patch) return false;                // 端点 / 跨置顶分区 → 不动(与笔记 moveNote 同规矩)
     const json = JSON.parse(JSON.stringify(this.vaultJson));
-    const meta = { ...(json.catMeta || {}) };
-    for (const [n, order] of Object.entries(patch)) meta[n] = { ...(meta[n] || {}), order };
-    json.catMeta = meta;
+    /* Map 而非对象展开:__proto__ 分类首次排序时,`meta[n] =` 走原型 setter
+     * 会把 order 静默写丢(与 setCatMeta 同一根因)。 */
+    const meta = new Map(Object.entries(json.catMeta || {}));
+    for (const [n, order] of Object.entries(patch)) meta.set(n, { ...(meta.get(n) || {}), order });
+    json.catMeta = Object.fromEntries(meta);
     try {
       const etag = await API.putVaultJson(JSON.stringify(json), this.vaultEtag);
       this.vaultJson = json;
@@ -402,9 +410,11 @@ export class Library {
       .filter(([n, c]) => Number.isInteger(c) && c >= 0 && this.catCount(n) !== c);
     if (!todo.length) return false;
     return this.updateVaultMeta((json) => {
-      const meta = { ...(json.catMeta || {}) };
-      for (const [n, c] of todo) meta[n] = { ...(meta[n] || {}), count: c };
-      json.catMeta = meta;
+      /* 同 setCatMeta:普通对象上 __proto__ 走原型 setter,篇数会静默写丢。
+       * 必须整条链路用 Map —— 首次写入时对象上还没有自有 __proto__ 键。 */
+      const meta = new Map(Object.entries(json.catMeta || {}));
+      for (const [n, c] of todo) meta.set(n, { ...(meta.get(n) || {}), count: c });
+      json.catMeta = Object.fromEntries(meta);
     });
   }
 
@@ -461,8 +471,13 @@ export class Library {
     if (this.vaultJson?.catMeta?.[oldName]) {
       try {
         await this.updateVaultMeta((json) => {
-          json.catMeta[newName] = json.catMeta[oldName];
-          delete json.catMeta[oldName];
+          /* 一步用 fromEntries 重建:目标名可能是 __proto__,对它直接赋值会走
+           * 原型 setter 而静默丢失(与 setCatMeta 同一根因)。 */
+          json.catMeta = Object.fromEntries(
+            Object.entries(json.catMeta || {})
+              .filter(([n]) => n !== oldName)
+              .concat([[newName, json.catMeta[oldName]]]),
+          );
         });
       } catch { /* 元信息迁移失败只影响置顶显示,不回滚改名 */ }
     }

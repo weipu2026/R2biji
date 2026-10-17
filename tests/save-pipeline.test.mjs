@@ -16,7 +16,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { store as appStore } from '../public/js/store.js';
-import { ctx, saveAll } from '../public/js/ui.js';
+import { ctx, saveAll, syncCatCounts } from '../public/js/ui.js';
 import { lockNow } from '../public/js/features/lock.js';
 import { withDom } from './dom-stub.mjs';
 import { ApiError } from '../public/js/api.js';
@@ -194,5 +194,29 @@ test('★ 锁定必须先关掉冲突弹窗再等保存(否则老板键卡在那
     releaseSave();
     await p;
     assert.equal(appStore.get('lib'), null, '锁定最终仍要销毁会话');
+  });
+});
+
+test('★ __proto__ 分类保存后,篇数必须进批量写(UI 组包不能走原型 setter)', async () => {
+  /* syncCatCounts 里 todo[name] = n 若用普通对象:__proto__ 是 setter,
+   * 赋数字被静默忽略 → Object.keys(todo) 为空 → 直接 return,篇数永远不写。
+   * 分类本体在 Map 里能正常保存,所以这条只能从「setCatCounts 收到了什么」验。
+   * 直接驱动 syncCatCounts(而非 saveAll):后者会带出一串保存收尾的定时器。 */
+  const lib = mkLib({ notes: {} });
+  lib.categories.set('__proto__', { data: { notes: [{ id: 'p1' }] } });
+  lib.catCount = () => 0; // 与真值 1 不同 → 必须触发一次写
+  let captured = null;
+  /* 返回 false(不是 true):.then 只在 changed 时重画侧栏,用例结束后 document 已撤 */
+  lib.setCatCounts = async (pairs) => { captured = pairs; return false; };
+
+  await withDom(async () => {
+    setup(lib);
+    syncCatCounts([['__proto__', 1]]);
+    // 有意不 await → 等一个宏任务让整条链跑完
+    await new Promise((r) => setTimeout(r, 0));
+    assert.ok(captured, '有篇数变化时必须调用 setCatCounts');
+    assert.ok(Object.prototype.hasOwnProperty.call(captured, '__proto__'),
+      '★ __proto__ 必须在批量写的自有键里(普通对象赋数字会被 setter 静默吃掉)');
+    assert.equal(captured['__proto__'], 1);
   });
 });
