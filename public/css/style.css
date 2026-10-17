@@ -835,6 +835,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   border-radius: 2px;
 }
 .read-body strong { font-weight: 650; }
+/* 任务列表(render.js 的 `- [ ]`):勾选框是 disabled 的只读 <input>(不进 Tab 序),
+ * flex 让框与首行文本对齐;accent-color 跟随主题,免得是系统蓝。 */
+.read-body li.task { list-style: none; display: flex; align-items: flex-start; gap: .5em; }
+.read-body li.task > .task-box { flex: 0 0 auto; margin: .4em 0 0; accent-color: var(--accent); }
+/* 分割线(render.js 的 `---`):用发丝线色,不靠浏览器默认的 inset 立体边 */
+.read-body hr.blk { border: 0; border-top: 1px solid var(--border); margin: 16px 0; }
 .read-empty { color: var(--muted); }
 
 /* 敏感行打码:星号图层盖住真值(比模糊滤镜干净,多处打码不满屏糊块);
@@ -1132,6 +1138,9 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
 }
 .modal-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
 .modal-btns { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+/* 密码生成器:等宽显示 + 按钮左对齐(原先写在内联 style 上,见 data.js 同处注释) */
+.modal-input.gen-out { font-family: var(--mono); font-size: 15px; }
+.modal-btns.gen-ops { justify-content: flex-start; }
 /* 移动笔记的目标分类清单:纵向排列 + 间距。
  * 没有这条时 .btn.block 零间距叠放成一整块(2026-09-29 审计);滚动交给 #modalBody。 */
 .cat-pick { display: grid; gap: 8px; }

@@ -285,6 +285,38 @@ export const TRASH_DAYS = 30;
 /** 回收站条目上限:防极端情况无界膨胀,超出时丢最旧的 */
 export const TRASH_MAX = 500;
 
+/**
+ * 回收站条目的剩余保留天数(纯函数,便于单测)。已到期返回 0,不往外传负数。
+ * 与 normalizeNoteData 的清除口径同源:到期时刻都是 deletedAt + TRASH_DAYS 天。
+ * @param {number} deletedAt 删除时刻(ms)
+ * @param {number} [now] 当前时刻(ms),默认取系统时间
+ */
+export function trashDaysLeft(deletedAt, now = Date.now()) {
+  if (!Number.isFinite(deletedAt)) return 0;
+  const left = deletedAt + TRASH_DAYS * 86400000 - now;
+  return left <= 0 ? 0 : Math.ceil(left / 86400000);
+}
+
+/* ---------- 面向用户的失败文案 ---------- */
+
+/**
+ * 离线感知的失败文案(纯函数,便于单测)。
+ *
+ * 为什么需要:附件与版本历史走 /api/blob,而它**不在** SW 的离线白名单里 ——
+ * 断网时读取必然失败。若原样抛出,用户看到的是「附件解密失败:Failed to fetch」,
+ * 把「离线」误报成「文件损坏」,方向完全错了。
+ *
+ * 判据只认「**确定离线**」(online === false):网络抖动、服务异常、密文真坏
+ * 都仍走原错误文案 —— 不能把真实的解密失败反过来盖成「离线」,那是另一方向的误报。
+ *
+ * @param {boolean} online navigator.onLine 的取值(不可用时按在线处理)
+ * @param {string} offlineText 确定离线时的文案
+ * @param {string} errText 其余情况下的原文案
+ */
+export function offlineBlobMessage(online, offlineText, errText) {
+  return online === false ? offlineText : errText;
+}
+
 /* ---------- 笔记版本历史(快照) ---------- */
 
 /** 每篇笔记保留的历史版本数上限:超出丢最旧的 */

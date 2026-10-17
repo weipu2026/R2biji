@@ -5,8 +5,16 @@
  *   - 全程 createElement/createTextNode,零 innerHTML
  *   - 不解析链接、不解析任何 HTML → 无执行面
  *   支持:#/##/### 标题、**加粗**、*斜体*、~~删除线~~、==高亮==、
- *         `行内代码`、``` 代码块、- 无序列表、1. 有序列表
+ *         `行内代码`、``` 代码块、- 无序列表、1. 有序列表、- [ ] 任务列表、--- 分割线
  * ============================================================ */
+
+/* 块级形态:任务列表与分割线。
+ * ⚠️ 任务列表必须**先于**无序列表判定 —— 否则「- [ ] 买菜」会被 ul 当成普通条目,
+ *   「[ ] 」原样留在正文里(用户看到的是一串字符,而不是一个勾选框)。
+ * 分割线与 ul 不冲突:ul 要求 `[-*]` 后紧跟空白,而 `---` / `***` / `___` 都没有。
+ * ⚠️ 阅读站 recover.html 的 rdrMd 是同一套子集的**第二实现**,两处必须同步。 */
+const TASK_RE = /^[-*]\s+\[([ xX])\]\s+(.*)$/;
+const HR_RE = /^(-{3,}|\*{3,}|_{3,})\s*$/;
 
 /* 交替顺序即优先级:**粗** 必须先于 *斜*(否则双星会被拆成两个单星);
  * 故意不做 _下划线_ 斜体 —— 中文语境下划线常见于 snake_case,误伤面太大 */
@@ -140,11 +148,26 @@ export function renderMarkdown(content) {
       const code = document.createElement('code');
       code.textContent = text;
       el.appendChild(code);
+    } else if (tag === 'hr') {
+      el = document.createElement('hr');
     } else if (tag === 'ul' || tag === 'ol') {
       el = document.createElement(tag);
       for (const item of items) {
+        // 条目要么是字符串(普通条目),要么是 { text, task, checked }
+        const it = typeof item === 'string' ? { text: item } : item;
         const li = document.createElement('li');
-        renderInline(li, item);
+        if (it.task) {
+          li.classList.add('task');
+          const box = document.createElement('input');
+          box.type = 'checkbox';
+          box.className = 'task-box';
+          box.checked = !!it.checked;
+          /* disabled:只读内容里的勾选框不该可点,更不该进 Tab 序 ——
+           * 否则一篇任务清单会多出几十个 Tab 停靠点,读屏器还会把它念成表单。 */
+          box.disabled = true;
+          li.appendChild(box);
+        }
+        renderInline(li, it.text);
         el.appendChild(li);
       }
     } else {
@@ -152,12 +175,24 @@ export function renderMarkdown(content) {
       renderInline(el, text);
     }
     el.classList.add('blk');
-    // 快照复制文本:跳过星号图层(.secret-stars),否则块复制会带上一串 •
-    // (textContent 不理会 CSS 显隐,两个图层都会被拼进来)
-    el.dataset.copy = [...el.querySelectorAll('.secret')].length
-      ? cloneWithoutStars(el).textContent
-      : el.textContent;
+    el.dataset.copy = copyTextOf(el);
     root.appendChild(el);
+  }
+
+  /** 块的复制文本。两处必须「修正」:
+   *  · 敏感行:双图层后 textContent 会把 raw+stars 拼起来 → 剔除星号层,
+   *    否则用户点「复制本段」得到的是 '密码:xxx••••';
+   *  · 任务列表:checkbox 是表单元素、不贡献 textContent → 补回 [x]/[ ] 标记,
+   *    否则「复制本段」会静默丢掉勾选状态(看到的与复制到的不是一回事)。
+   *  ⚠️ 只用 .class 选择器:测试替身(dom-stub / render.test)只支持 .class。 */
+  function copyTextOf(el) {
+    if (el.querySelectorAll('.task-box').length) {
+      return [...el.children].map((li) => {
+        const box = li.querySelectorAll('.task-box')[0];
+        return (box ? (box.checked ? '[x] ' : '[ ] ') : '') + cloneWithoutStars(li).textContent;
+      }).join('\n');
+    }
+    return el.querySelectorAll('.secret').length ? cloneWithoutStars(el).textContent : el.textContent;
   }
 
   /** 复制快照用的浅克隆:星号图层置空,真值图层保留 → textContent 即纯净原文 */
@@ -185,6 +220,22 @@ export function renderMarkdown(content) {
     if (heading) {
       flushPara(); flushList();
       addBlock(`h${heading[1].length}`, null, heading[2]);
+      i += 1;
+      continue;
+    }
+
+    if (HR_RE.test(line)) {
+      flushPara(); flushList();
+      addBlock('hr', null, '');
+      i += 1;
+      continue;
+    }
+
+    const task = TASK_RE.exec(line);
+    if (task) {
+      flushPara();
+      if (listTag !== 'ul') { flushList(); listItems = []; listTag = 'ul'; }
+      listItems.push({ text: task[2], task: true, checked: task[1].toLowerCase() === 'x' });
       i += 1;
       continue;
     }

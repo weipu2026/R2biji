@@ -225,18 +225,23 @@ export function renderCategoryList(ctx) {
  *  ★ 与 search.js 的 searchSeq 同款做法 —— 这类竞态句柄只服务本模块,不进 store。 */
 let catOpenSeq = 0;
 
+/** 打开分类并选中该读的那篇。
+ *  @returns {Promise<boolean>} 是否**真的**打开了。失败(含慢请求后到被放弃、
+ *   会话已销毁)一律返回 false 且不渲染 —— 调用方必须看这个返回值再决定要不要报喜,
+ *   否则重载失败时会和 openCategory 自己那条红 toast 叠成自相矛盾的两句
+ *   (2026-10-17 审计 P1:await 不等于校验)。 */
 export async function openCategory(ctx, name) {
   const S = ctx.store;
   const seq = ++catOpenSeq;
   try {
     await S.get('lib').loadCategory(name);
   } catch (e) {
-    if (seq !== catOpenSeq) return; // 期间用户已换分类,这个失败不必再弹
+    if (seq !== catOpenSeq) return false; // 期间用户已换分类,这个失败不必再弹
     ctx.toast(`分类「${name}」无法打开:${e.message}`, 'error');
     renderCategoryList(ctx);
-    return;
+    return false;
   }
-  if (seq !== catOpenSeq) return; // 慢的分类请求后到:放弃,别覆盖用户新选的分类
+  if (seq !== catOpenSeq) return false; // 慢的分类请求后到:放弃,别覆盖用户新选的分类
   /* 点分类默认读列表最顶端那篇(2026-09-28 用户要求:省掉「再点一次笔记」这步)。
    * 顺序必须用 F.sortNotes —— 与侧栏渲染同源,视觉第一行就是第一篇。
    * 例外:重载**当前**分类(冲突回云端 / 多标签页同步)时,原选中的笔记还在
@@ -244,7 +249,14 @@ export async function openCategory(ctx, name) {
   /* 切分类前收集编辑框(同 openNote:逐键收集已在,这道是结构护栏;必须赶在
    * activeCat/activeNoteId 改写之前 —— collect 靠它们定位「正在编辑的那篇」)。 */
   if (S.get('editing')) { try { ctx.collectEditChanges?.(); } catch { /* 按内存现状切换 */ } }
-  const catInfo = S.get('lib').categoryInfo(name);
+  /* ★ await 之后必须**重新取 lib 并复核存活**(2026-10-17 审计 P2):
+   *   loadCategory 是在捕获到的旧实例上跑的,锁定之后它也能正常 resolve;
+   *   而这里重新 S.get('lib') 拿到的可能已是 null(锁屏已销毁会话)→ 抛 TypeError。
+   *   最重的一条路径:解锁流程 restoreReading → openCategory,异常冒泡到
+   *   doUnlock 的 catch,在**锁屏上**写一条「打开失败:Cannot read properties of null」。 */
+  const lib = S.get('lib');
+  if (!lib || seq !== catOpenSeq) return false;
+  const catInfo = lib.categoryInfo(name);
   const notes = catInfo?.data ? F.sortNotes(catInfo.data.notes) : [];
   const prevId = S.get('activeNoteId');
   const openId = notes.some((n) => n.id === prevId) ? prevId : (notes[0]?.id ?? null);
@@ -260,6 +272,7 @@ export async function openCategory(ctx, name) {
     /* 真正空分类才落空状态,并顺手给「新建笔记」引导 */
     ctx.showEmpty(`「${name}」暂无笔记`, { label: '新建笔记', fn: () => ctx.addNote() });
   }
+  return true;
 }
 
 export async function addCategory(ctx) {

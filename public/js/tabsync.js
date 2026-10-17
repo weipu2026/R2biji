@@ -65,7 +65,14 @@ export class TabSync {
       this.channel.onmessage = (e) => {
         const msg = parseTabMessage(e?.data);
         if (!msg) return;
-        try { onMessage(msg); } catch { /* 单条消息处理失败不影响后续 */ }
+        try { onMessage(msg); }
+        catch (e) {
+          /* 单条消息处理失败不影响后续,但**不能完全静默**(2026-10-17 审计 P3):
+           * 连 console.error 都没有的话,多标签页同步会悄悄失效,用户侧表现为
+           * 「偶尔不刷新」,而排障时一点痕迹都没有。影响被设计 bounded(消息仅是
+           * 重拉提示),所以只记日志、不中断通道。 */
+          console.error('tab 消息处理失败', msg, e);
+        }
       };
     } catch {
       this.channel = null; // 构造失败(隐私模式等)同样降级

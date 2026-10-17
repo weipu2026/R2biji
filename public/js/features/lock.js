@@ -158,6 +158,17 @@ export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } =
      *   「保存失败」,而脏标记已被清空 ⇒ 未保存改动静默消失。
      *   现在 await 的是 S.savePromise(同一轮保存的 promise):等它落地,
      *   它自己会把「会话已销毁 → 不再写、不算失败」处理好。 */
+    /* ★ 紧急锁定(老板键 / 远端锁定)必须先关掉共用弹窗(2026-10-17 审计 P2):
+     *   saveAll 可能正阻塞在冲突弹窗上(handleConflict 在等用户选),不关的话
+     *   这里 await 到的是那枚永远不落定的 promise —— 连「有人走过来」时的
+     *   紧急锁定都要等用户先手工解决冲突才生效,而慢一秒都是事故。
+     *   close() 会让弹窗走它自己的 close 路径落定 null,handleConflict 的
+     *   else 分支随即执行(那里有 S.lib 存活判据),saveAll 收尾后这里才继续。
+     *   副作用是好的:该分类因此重新进入脏集,下面的 dropped 计数也才准确。
+     *   ⚠️ 走 ctx.dom.byId 而不是 document.querySelector:后者在测试 DOM 桩里
+     *      不存在,而这里要被真跑一遍(见 tests/save-pipeline.test.mjs)。 */
+    const dlg = ctx.dom?.byId('modal');
+    if (dlg && dlg.open) dlg.close();
     try { await (S.get('savePromise') || ctx.saveAll()); } catch { /* 尽力保存 */ }
   }
   // ★ 锁定必毁全部明文,这是安全不变量;但「毁改动」必须经用户确认 ——
@@ -301,9 +312,12 @@ export async function doUnlock(ctx, password) {
     /* ★ 到这里失败(典型:rescan 时网络不通)时,上面已经把 Library 实例塞进了
      *   store —— 它手里握着三把子密钥与 DEK。视图停在锁屏,却没人再引用它,
      *   要等 GC 才释放;期间任何残留回调/DevTools 都能读到明文(2026-10-12 全站审计)。
-     *   与 resumeSession 的失败分支同一条处置:销毁 + 摘掉引用 + 清令牌。 */
+     *   与 resumeSession 的失败分支同一条处置:销毁 + 摘掉引用 + 清令牌。
+     *   (令牌这步是 2026-10-17 补上的:只清 lib 不清令牌,残留的仍是一枚可用的
+     *    鉴权凭据 ——「会话已关」与「凭据还在」是两件事。) */
     const cur = S.get('lib');
     if (cur) { cur.destroy(); S.set('lib', null); }
+    ctx.api.clearToken();
     err.textContent = `打开失败:${e.message}`;
     err.hidden = false;
   }
@@ -353,6 +367,12 @@ export async function doCreateLibrary(ctx, password, password2) {
     ctx.toast('笔记库已创建。vault.json 备份已开始下载,请妥善保存(全库钥匙的唯一载体)');
     await ctx.enterApp();
   } catch (e) {
+    /* ★ 同 doUnlock:失败也要收干净半成品会话(2026-10-17 审计 P2)。
+     *   setToken 与 S.set('lib') 都在 await lib.rescan() 之前执行,
+     *   rescan 失败时它们会原样留在内存,而界面停在锁屏。 */
+    const cur = S.get('lib');
+    if (cur) { cur.destroy(); S.set('lib', null); }
+    ctx.api.clearToken();
     err.textContent = `创建失败:${e.message}`;
     err.hidden = false;
   }

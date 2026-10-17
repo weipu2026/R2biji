@@ -49,10 +49,19 @@ export async function runSearch(ctx) {
   const lib = ctx.store.get('lib');
   const q = ctx.dom.byId('searchBox').value.trim();
   const panel = ctx.dom.byId('searchPanel');
-  if (!q) { panel.hidden = true; panel.textContent = ''; return; }
+  /* ★ 空查询也要**作废在途轮次**(2026-10-17 审计 P1):不递增 searchSeq 的话,
+   *   首次搜索触发的 loadAllCategories(全分类拉取,冷启动数百 ms~秒级)仍在飞,
+   *   用户这时清空输入框 / 按 Esc / 点别处,旧轮次醒来后 seq 校验照样通过 →
+   *   把旧关键词的结果重新渲染、并把 panel.hidden 置回 false ——
+   *   面板对着一个空输入框自行弹出。closeSearch 同理(见其内部)。 */
+  if (!q) { searchSeq++; panel.hidden = true; panel.textContent = ''; return; }
   if (!lib) return;
   const seq = ++searchSeq;
-  await lib.loadAllCategories();
+  /* 离线/超时不能冒泡成 unhandledrejection(2026-10-17 审计 P2):调用方是
+   * shell.js 里 setTimeout(() => ctx.runSearch(), 160) 的浮空 Promise。
+   * 至少给个反馈 —— 否则离线按 Ctrl+K 输入关键词,面板既不开也没任何提示。 */
+  try { await lib.loadAllCategories(); }
+  catch (e) { ctx.toast(`搜索需要先联网加载全部分类:${e.message}`, 'error'); return; }
   if (seq !== searchSeq) return; // 期间用户又输入了:这轮结果作废
   const notesByCat = new Map();
   let unreadable = 0;
@@ -82,7 +91,10 @@ export async function runSearch(ctx) {
       ctx.store.set('activeCat', r.cat);
       ctx.openNote(r.note.id);
       ctx.renderCategoryList();
-      ctx.dom.byId('activeCatName').textContent = r.cat;
+      /* ★ 不要再手动写 activeCatName(2026-10-17 审计 P1):openNote → renderNoteList
+       *   刚把标题写成「分类 · N 篇」,这里用裸分类名覆盖会把篇数抹掉,
+       *   直到下次重绘才回来。sidebar.js 的注释早已写明
+       *   「标题栏由 renderNoteList 统一维护,这里再手动覆盖一次只会把篇数抹掉」。 */
       panel.hidden = true;
       ctx.dom.byId('searchBox').value = '';
     });
@@ -100,6 +112,10 @@ export async function runSearch(ctx) {
 export function closeSearch(ctx) {
   const panel = ctx.dom.byId('searchPanel');
   if (panel && !panel.hidden) panel.hidden = true;
+  /* 作废在途搜索轮次(2026-10-17 审计 P1):与 runSearch 空查询分支同理。
+   * 只隐藏面板是不够的 —— 首次搜索触发的 loadAllCategories 可能还在飞,
+   * 它醒来后会把面板重新弹开。 */
+  searchSeq++;
   const box = ctx.dom.byId('searchBox');
   if (box) box.value = '';
 }

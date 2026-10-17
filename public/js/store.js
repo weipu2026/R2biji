@@ -129,6 +129,16 @@ export class Store {
 
   /** 重命名分类时把脏标记与代数一并搬到新名字下(重命名不改变内容新旧)。 */
   moveDirty(from, to) {
+    /* ★ to 上已有脏标记时直接炸掉,不要无条件覆盖(2026-10-17 审计 P2):
+     *   若 to 已有未保存改动且在途保存(捕获了 gen=1),此时把同样 gen=1 的
+     *   from 改名到 to,覆盖后 gen(to) 仍是 1 → 在途保存结束,
+     *   clearDirtyIfUnchanged(to, 1) 判「无新改动」而清掉脏标记
+     *   ⇒ from 的改动从未上传,却不再处于待保存队列。
+     *   上层(renameCategory)已按分类名唯一性拦过,这里是把非法状态
+     *   在源头炸掉的兜底,不是主判据。 */
+    if (this._state.dirty.has(to)) {
+      throw new Error(`待保存队列里已存在「${to}」,不能把「${from}」的改动合并过去`);
+    }
     if (!this._state.dirty.delete(from)) return false;
     this._state.dirty.add(to);
     const gen = this._state.dirtyGen.get(from);

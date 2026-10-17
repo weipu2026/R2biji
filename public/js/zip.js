@@ -59,10 +59,17 @@ function concat(parts) {
   return out;
 }
 
-/** JS Date → ZIP 用的 DOS 时间/日期(1980 起算,秒只有 2 秒精度) */
+/** JS Date → ZIP 用的 DOS 时间/日期(1980 起算,秒只有 2 秒精度)。
+ *  两处必须夹住(2026-10-17 审计 P2):
+ *   ① 无效 Date:getFullYear() 等全是 NaN,`NaN << 9` 得 0 —— 会写出
+ *      「1980 年 0 月 0 日」这种非法 DOS 日期,部分解压器直接判包损坏;
+ *   ② 年份字段只有 7 位(1980..2107):超出部分被 setUint16 静默截断,
+ *      2108 年会被写成 1980 年。夹住比写坏好 —— 时间戳只影响显示。
+ *  注:空文件条目是合法的(blobs/empty 就是 0 字节),别跟无效日期混为一谈。 */
 function dosDateTime(date) {
-  const d = date instanceof Date ? date : new Date(date);
-  const year = Math.max(1980, d.getFullYear());
+  const raw = date instanceof Date ? date : new Date(date);
+  const d = Number.isNaN(raw.getTime()) ? new Date(1980, 0, 1) : raw;
+  const year = Math.min(2107, Math.max(1980, d.getFullYear()));
   return {
     time: (d.getHours() << 11) | (d.getMinutes() << 5) | (d.getSeconds() >> 1),
     date: ((year - 1980) << 9) | ((d.getMonth() + 1) << 5) | d.getDate(),
@@ -105,10 +112,27 @@ export function zipStore(entries, { date = new Date() } = {}) {
   }
 
   let total = 0;
+  /* ★ 条目名要查重、内容要校验类型(2026-10-17 审计 P2):
+   *   a) 重名:写端照写两个条目、EOCD 也计 2,而读端的 seen 判重会抛错 ——
+   *      也就是「本模块写出的包,本模块自己读不回来」。备份包要能恢复,必须写时炸。
+   *   b) bytes 漏传:new Uint8Array(undefined/null) **不报错**,返回空数组 ——
+   *      某一条内容忘传时,包里会静默出现 0 字节条目(恢复出来是个空 vault.json)。
+   *      注意 0 字节本身合法(空文件/空 blob 就是),所以只能按**类型**判,不能按长度判。
+   *      接受 Uint8Array / ArrayBuffer / 数字数组三种(测试与 recover 侧都用得到)。 */
+  const seenNames = new Set();
   const prepared = entries.map((e) => {
     const name = e?.name;
     if (!isSafeEntryName(name)) throw new ZipError(`条目名不合法:${JSON.stringify(name)}`);
-    const data = e.bytes instanceof Uint8Array ? e.bytes : new Uint8Array(e.bytes);
+    if (seenNames.has(name)) throw new ZipError(`条目重复:${name}`);
+    seenNames.add(name);
+    const raw = e.bytes;
+    let data;
+    if (raw instanceof Uint8Array) data = raw;
+    else if (raw instanceof ArrayBuffer) data = new Uint8Array(raw);
+    else if (Array.isArray(raw)) data = new Uint8Array(raw);
+    else {
+      throw new ZipError(`条目「${name}」缺少内容(bytes 必须是 Uint8Array / ArrayBuffer / 数字数组)`);
+    }
     total += data.length;
     return { name: te.encode(name), data, crc: crc32(data) };
   });
@@ -194,8 +218,14 @@ export function readZipStore(input) {
   // EOCD 可能带注释,所以从尾部往前扫(注释最长 65535)
   let eocd = -1;
   const from = Math.max(0, bytes.length - 22 - 0xffff);
+  /* ★ 数据区里碰巧出现 0x06054b50 这 4 个字节是完全可能的(密文是随机的),
+   *   从后往前扫第一个命中的不一定真是 EOCD。规范给了判据:EOCD 之后只剩
+   *   注释,所以「22 + 注释长度」必须**正好**收到文件末尾。不满足就继续往前找。
+   *   (2026-10-17 审计 P2:旧写法取第一个命中,随机密文里撞上就解包失败。) */
   for (let i = bytes.length - 22; i >= from; i--) {
-    if (dv.getUint32(i, true) === SIG_EOCD) { eocd = i; break; }
+    if (dv.getUint32(i, true) !== SIG_EOCD) continue;
+    if (i + 22 + dv.getUint16(i + 20, true) !== bytes.length) continue;
+    eocd = i; break;
   }
   if (eocd < 0) throw new ZipError('不是 zip 文件(找不到结尾记录)');
 
@@ -220,6 +250,12 @@ export function readZipStore(input) {
     const extraLen = dv.getUint16(p + 30, true);
     const commentLen = dv.getUint16(p + 32, true);
     const localOff = dv.getUint32(p + 42, true);
+    /* ★ 先验长度再切(2026-10-17 审计 P2):subarray 越界是**静默截短**,
+     *   截出来的半个名字若恰好通过 isSafeEntryName,就会被当成正常条目 ——
+     *   而这张包是用来恢复全库的,名字错一位就意味着文件对不上。 */
+    if (p + 46 + nameLen > bytes.length) {
+      throw new ZipError(`zip 结构损坏(第 ${i + 1} 个条目名越界)`);
+    }
     const name = td.decode(bytes.subarray(p + 46, p + 46 + nameLen));
     p += 46 + nameLen + extraLen + commentLen;
 
@@ -242,6 +278,15 @@ export function readZipStore(input) {
     const data = bytes.slice(dataStart, dataStart + csize);
     if (crc32(data) !== crc) throw new ZipError(`条目「${name}」校验失败(内容损坏或被改过)`);
     out.push({ name, bytes: data });
+  }
+  /* ★ 中央目录必须**刚好**用尽(2026-10-17 审计 P2):EOCD 里的 count 若被
+   *   改小(或包被截断),上面的循环会提前收工、把少读的条目当不存在 ——
+   *   恢复时表现为「静默少恢复几个文件」,比直接报错坏得多。
+   *   本模块只认自己写出的包(extra/comment 恒 0),所以这里可以严格相等。 */
+  if (p !== cdOffset + cdSize) {
+    throw new ZipError(
+      `zip 结构损坏(中央目录与条目数不符:读到 ${p - cdOffset} 字节,声明 ${cdSize} 字节)`,
+    );
   }
   return out;
 }

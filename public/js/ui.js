@@ -423,35 +423,45 @@ async function copyText(text, btn) {
  */
 function flashCopied(btn) {
   if (!btn) return;
+  /* ★ 原值必须存元素自身,不能存「点击那一刻的 DOM」(2026-10-17 审计 P1):
+   *   1.5 秒内第二次点击时,label.textContent 已经是「  已复制」——
+   *   把这个中间态当原值记下,它的定时器到点后就把按钮**永久**还原成
+   *   「已复制」/对勾,此后每次点击都只会再次固化该状态。
+   *   做法:首次点击时把原值写进 dataset,且全局只保留一枚恢复定时器
+   *   (连点时清掉上一枚,不叠加)。 */
+  if (btn._flashTimer) { clearTimeout(btn._flashTimer); btn._flashTimer = null; }
   btn.classList.add('copied');
-  const label = btn.querySelector('.btn-label');
+  let label = btn.querySelector('.btn-label');
+  if (!label && btn.textContent.trim().length > 0) {
+    /* 有文字但还没拆过结构:拆成「前导图标 + .btn-label」,以后只动 label。
+     * 只在第一次拆 —— 拆完 label 就存在,后续点击直接走上一条路。 */
+    const text = btn.textContent.trim();
+    const iconEl = btn.querySelector('svg');
+    const tail = btn.textContent.slice(btn.textContent.indexOf(text));
+    btn.textContent = '';
+    if (iconEl) btn.insertAdjacentHTML('afterbegin', iconEl.outerHTML);
+    label = document.createElement('span');
+    label.className = 'btn-label';
+    label.textContent = tail;
+    btn.appendChild(label);
+  }
   if (label) {
     /* 图标 + 文字(复用时按钮已拆好结构):只动文字段 */
-    const old = label.textContent;
+    if (btn.dataset.origLabel === undefined) btn.dataset.origLabel = label.textContent;
     label.textContent = ' 已复制';
-    setTimeout(() => { label.textContent = old; btn.classList.remove('copied'); }, 1500);
+    btn._flashTimer = setTimeout(() => {
+      label.textContent = btn.dataset.origLabel;
+      btn.classList.remove('copied');
+    }, 1500);
     return;
   }
-  const hasText = btn.textContent.trim().length > 0;
-  if (!hasText) {
-    /* 纯图标按钮:换对勾,SVG 尺寸与原图标一致(都是 15px),框子不撑不缩 */
-    const prev = btn.innerHTML;
-    btn.innerHTML = ICON.check;
-    setTimeout(() => { btn.innerHTML = prev; btn.classList.remove('copied'); }, 1500);
-    return;
-  }
-  /* 有文字但还没拆过结构:拆成「前导图标 + .btn-label」,以后只动 label */
-  const text = btn.textContent.trim();
-  const iconEl = btn.querySelector('svg');
-  const tail = btn.textContent.slice(btn.textContent.indexOf(text));
-  btn.textContent = '';
-  if (iconEl) btn.insertAdjacentHTML('afterbegin', iconEl.outerHTML);
-  const span = document.createElement('span');
-  span.className = 'btn-label';
-  span.textContent = tail;
-  btn.appendChild(span);
-  span.textContent = ' 已复制';
-  setTimeout(() => { span.textContent = tail; btn.classList.remove('copied'); }, 1500);
+  /* 纯图标按钮:换对勾,SVG 尺寸与原图标一致(都是 15px),框子不撑不缩 */
+  if (btn.dataset.origHTML === undefined) btn.dataset.origHTML = btn.innerHTML;
+  btn.innerHTML = ICON.check;
+  btn._flashTimer = setTimeout(() => {
+    btn.innerHTML = btn.dataset.origHTML;
+    btn.classList.remove('copied');
+  }, 1500);
 }
 
 /** 编辑器选区包裹:已包裹则剥掉(再点一次 = 取消)。导出仅为可测(tests/edtools.test.mjs) */
@@ -604,7 +614,18 @@ function saveAll() {
     for (const name of skippedGone) {
       toast(`「${name}」已被其他标签页删除,本机对它的未保存改动已丢弃`, 'warn');
     }
-    if (skippedGone.length) { S.resavePending = false; refreshSaveStatus(); return; }
+    /* ★ skippedGone 也要跑补跑(2026-10-17 审计 P3):旧写法在这里
+     *   直接清掉 resavePending 就 return,于是保存期间用户按的 Ctrl+S
+     *   被静默降级成 4 秒后的自动存 —— 数据不丢,但「立即保存」的语义爽约。
+     *   与下面 resavePending 分支同一套逻辑(状态栏 + 300ms 补跑)。 */
+    if (skippedGone.length) {
+      refreshSaveStatus();
+      if (S.resavePending) {
+        S.resavePending = false;
+        setTimeout(() => { saveAll(); }, 300);
+      }
+      return;
+    }
     if (S.resavePending) {
       S.resavePending = false;
       // ★ 必须刷状态栏:走这条分支时主循环已把 dirty 清空,300ms 后的 saveAll
@@ -679,12 +700,22 @@ async function handleConflict(name) {
     // 丢弃内存改动,重读云端
     cat.data = null; cat.lastSeenEtag = null; cat.error = null; cat.transient = null;
     S.clearDirty(name); // 本地已无未保存改动,别让「未保存」标记一直挂着
-    if (S.activeCat === name) {
-      await openCategory(ctx, name);
-    }
-    toast(`「${name}」已改为云端版本,本地未保存的改动已放弃`, 'warn');
+    /* ★ 重载**真的成功**才报喜(2026-10-17 审计 P1):openCategory 失败时
+     *   自己已 toast 过红条并 return false,这里若无条件再报一句
+     *   「已改为云端版本」,用户会同时看到两条自相矛盾的提示。
+     *   (await 不等于校验 —— 旧注释写着「必须 await 重载成功后再报喜」,
+     *   但 await 只等它返回,没看它返回什么。) */
+    const reloaded = S.activeCat === name ? await openCategory(ctx, name) : true;
+    if (reloaded) toast(`「${name}」已改为云端版本,本地未保存的改动已放弃`, 'warn');
   } else {
-    S.markDirty(name); // 留待稍后
+    /* ★ 先判会话存活(2026-10-17 审计 P1):冲突分类在弹窗前就被
+     *   clearDirtyIfUnchanged 移出了脏集,若这期间用户按了老板键、或另一
+     *   标签页锁了屏,lockNow 看到 dirty.size===0 便不等保存、直接
+     *   releaseSession 销毁 lib → 弹窗落定 null 走到这里时 S.lib 已是 null。
+     *   此时 markDirty 会把一个无人再认领的分类塞回脏集:下次解锁后状态栏
+     *   永久显示「有未保存更改」,且第一次保存会对一个用户从未碰过的分类
+     *   做一次无谓 PUT(甚至 412 再弹一次冲突框)。 */
+    if (S.lib) S.markDirty(name); // 留待稍后
   }
   refreshSaveStatus();
 }
@@ -728,11 +759,12 @@ function onTabMessage(msg) {
     void (async () => {
       const cat = S.lib.categoryInfo(msg.name);
       cat.data = null; cat.lastSeenEtag = null; cat.error = null; cat.transient = null;
-      // ★ 必须 await 重载成功后再报喜,否则加载失败时用户会同时看到
-      //   绿色「已载入最新版本」+ 红色「分类无法打开」两条矛盾 toast
-      //   (2026-09-27 审计 P3-6;与 handleConflict 的 disk 分支同款时序)
-      if (S.activeCat === msg.name) await openCategory(ctx, msg.name);
-      toast(`「${msg.name}」已在另一个标签页更新,已载入最新版本`);
+      /* ★ 重载**真的成功**才报喜(2026-10-17 审计 P1):openCategory 失败时
+       *   只 toast 红条并 return false,不看返回值就会红绿两条一起弹。
+       *   旧注释写着「必须 await 重载成功后再报喜」,但 await 只等它返回、
+       *   没看它返回什么 —— 与 handleConflict 的 disk 分支同款时序。 */
+      const reloaded = S.activeCat === msg.name ? await openCategory(ctx, msg.name) : true;
+      if (reloaded) toast(`「${msg.name}」已在另一个标签页更新,已载入最新版本`);
     })();
   }
 }
@@ -1101,6 +1133,11 @@ function downloadUrl(url, fileName) {
   }
 }
 
+/** 字节流下载:委托 downloadUrl —— 它那版**把锚点 append 进文档**才 click,
+ *  部分浏览器不认脱离文档的锚点(裸 click 拿到空文件或毫无反应)。
+ *  这里只负责造 objectURL 与按时 revoke(大包要给足时间,提前 revoke 会是空文件)。
+ *  2026-10-17 审计 P2:此前这里另写了一份不 append 的锚点逻辑,与 downloadUrl 并存,
+ *  而 downloadUrl 的注释早就把那个坑记下来了。 */
 function downloadBytes(bytes, fileName, mime = 'application/zip') {
   /* ★ 与 downloadUrl 走同一条「建锚点 → 进文档 → click」路径(2026-10-12 全站审计):
    *   此前本函数与 lock.js 的 vault.json 备份各写了一份内联锚点,行为还不一样

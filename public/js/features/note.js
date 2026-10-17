@@ -202,6 +202,13 @@ function renderReadAttachments(ctx, note) {
   }
 }
 
+/** 是否**确定**离线。
+ *  只在 navigator.onLine === false 时才认:onLine 为 true、或环境里根本没有
+ *  navigator(Node 单测)一律按在线处理 —— 否则会把网络抖动 / 服务异常误报成「离线」。 */
+function isOffline() {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
 /** 解密中的附件:防双击竞态重复贴图。模块级持有(只服务本模块)。 */
 const attLoading = new Set();
 
@@ -234,7 +241,9 @@ async function toggleAttachmentImage(ctx, att, chip) {
     wrap.appendChild(dl);
     chip.after(wrap);
   } catch (e) {
-    ctx.toast(`附件解密失败:${e.message}`, 'error');
+    ctx.toast(F.offlineBlobMessage(isOffline(),
+      '离线状态:附件需要联网(正文可正常阅读)',
+      `附件解密失败:${e.message}`), 'error');
   } finally {
     attLoading.delete(att.file);
   }
@@ -298,8 +307,12 @@ async function downloadAttachment(ctx, att) {
     ctx.downloadUrl(url, att.name);
     ctx.toast(`已下载「${att.name}」`);
   } catch (e) {
-    // 附件是永久类错误(密文坏了 / 被外部改过),重试无用 —— 如实说是解密失败
-    ctx.toast(`附件解密失败:${e.message}`, 'error');
+    // 密文坏了 / 被外部改过 → 永久类错误,重试无用,如实说解密失败;
+    // 但**断网**是另一回事:/api/blob 不在 SW 离线白名单 → 必须点明「要联网」,
+    // 否则用户会以为附件本身坏了
+    ctx.toast(F.offlineBlobMessage(isOffline(),
+      '离线状态:附件需要联网(正文可正常阅读)',
+      `附件解密失败:${e.message}`), 'error');
   } finally {
     attLoading.delete(att.file);
   }
@@ -419,7 +432,9 @@ export async function addAttachments(ctx, files) {
       added.push(entry);
       note.attachments.push(entry);
     } catch (e) {
-      ctx.toast(`「${file.name}」入库失败:${e.message}`, 'error');
+      ctx.toast(F.offlineBlobMessage(isOffline(),
+        '离线状态:添加附件需要联网',
+        `「${file.name}」入库失败:${e.message}`), 'error');
     }
   }
   if (!added.length) return;
@@ -683,7 +698,9 @@ async function restoreFromHistory(ctx, catName, note, snap, row) {
     for (const b of row.querySelectorAll('button')) b.disabled = true;
     ctx.toast('已恢复到所选版本');
   } catch (e) {
-    ctx.toast(`恢复失败:${e?.message || '历史版本读取异常'}`, 'error');
+    ctx.toast(F.offlineBlobMessage(isOffline(),
+      '离线状态:恢复历史版本需要联网(正文可正常阅读)',
+      `恢复失败:${e?.message || '历史版本读取异常'}`), 'error');
   }
 }
 

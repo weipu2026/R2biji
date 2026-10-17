@@ -281,7 +281,11 @@ function bindEvents(ctx) {
   $('sideBackdrop').addEventListener('click', () => ctx.closeDrawer());
 
   // Markdown 快捷插入:选区包裹 / 行前缀,写完立刻算改动
-  for (const b of document.querySelectorAll('#edTools .ed-btn')) {
+  /* ★ 必须排除 [data-genpw](2026-10-17 审计 P3):那枚 pw 按钮在 index.html 里
+     *   同时带着 class="ed-btn" 与 data-genpw,会被这个循环和下面那条生成器监听
+     *   **双重绑定** —— 编辑态点它先 ta.focus() + collectEditChanges()(随即被
+     *   弹窗焦点覆盖),确是重复绑定。旧注释写着「不走 wrap/prefix 委托」,与实际不符。 */
+  for (const b of document.querySelectorAll('#edTools .ed-btn:not([data-genpw])')) {
     b.addEventListener('click', () => {
       if (!ctx.store.get('editing')) return;
       const ta = $('editBody');

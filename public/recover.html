@@ -877,6 +877,10 @@ const READER_TEMPLATE = `<!DOCTYPE html>
   .md h1 { font-size: 20px; } .md h2 { font-size: 17.5px; } .md h3 { font-size: 15.5px; }
   .md ul, .md ol { margin: 0 0 14px; padding-left: 24px; }
   .md li { margin: 3px 0; }
+  /* 任务列表 / 分割线:与主站 render.js 的子集保持一致(见 DESIGN.md §11) */
+  .md li.task { list-style: none; display: flex; align-items: flex-start; gap: .5em; }
+  .md li.task > .task-box { flex: 0 0 auto; margin: .4em 0 0; accent-color: var(--accent); }
+  .md hr { border: 0; border-top: 1px solid var(--hair); margin: 16px 0; }
   .md pre {
     background: var(--panel); border: 1px solid var(--hair); border-radius: 8px;
     padding: 12px 14px; overflow-x: auto; font-size: 13px; line-height: 1.7;
@@ -1117,7 +1121,13 @@ function rdrMd(content) {
   var flushList = function () {
     if (!list) return;
     var lis = [];
-    for (var i = 0; i < list.length; i++) lis.push('<li>' + rdrInline(list[i], true) + '</li>');
+    for (var i = 0; i < list.length; i++) {
+      var it = typeof list[i] === 'string' ? { text: list[i] } : list[i];
+      var box = it.task
+        ? '<input type="checkbox" class="task-box" disabled' + (it.checked ? ' checked' : '') + '>'
+        : '';
+      lis.push('<li' + (it.task ? ' class="task"' : '') + '>' + box + rdrInline(it.text, true) + '</li>');
+    }
     html.push('<' + listTag + '>' + lis.join('') + '</' + listTag + '>');
     list = null; listTag = null;
   };
@@ -1137,6 +1147,18 @@ function rdrMd(content) {
     if (h) {
       flushPara(); flushList();
       html.push('<h' + h[1].length + '>' + rdrInline(h[2], true) + '</h' + h[1].length + '>');
+      i += 1; continue;
+    }
+    if (/^(-{3,}|\\*{3,}|_{3,})\\s*$/.test(line)) {
+      flushPara(); flushList();
+      html.push('<hr>');
+      i += 1; continue;
+    }
+    var task = /^[-*]\\s+\\[([ xX])\\]\\s+(.*)$/.exec(line);
+    if (task) {
+      flushPara();
+      if (listTag !== 'ul') { flushList(); list = []; listTag = 'ul'; }
+      list.push({ text: task[2], task: true, checked: task[1].toLowerCase() === 'x' });
       i += 1; continue;
     }
     var ul = /^[-*]\\s+(.*)$/.exec(line);

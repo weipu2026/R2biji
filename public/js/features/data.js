@@ -68,7 +68,9 @@ export async function openTrash(ctx) {
         t.textContent = note.title || '无标题';
         const meta = document.createElement('div');
         meta.className = 'trash-meta';
-        meta.textContent = `${catName} · 删除于 ${F.relTime(note.deletedAt)}`;
+        const leftDays = F.trashDaysLeft(note.deletedAt);
+        const leftText = leftDays > 0 ? `还剩 ${leftDays} 天` : '今天到期';
+        meta.textContent = `${catName} · 删除于 ${F.relTime(note.deletedAt)} · ${leftText}`;
         info.append(t, meta);
         const ops = document.createElement('div');
         ops.className = 'trash-ops';
@@ -155,15 +157,14 @@ export async function openPwGenerator(ctx) {
       opts.append(lenLabel, symLabel);
 
       const out = document.createElement('input');
-      out.className = 'modal-input';
+      // 等宽与字号走 .gen-out(style.css):原先写在内联 style 上,CSP 是 style-src 'self',
+      // 内联 style 属性会被拦掉 —— 靠 CSSOM 侥幸生效,但口径上应一律写进样式表
+      out.className = 'modal-input gen-out';
       out.readOnly = true;
       out.setAttribute('aria-label', '生成的密码');
-      out.style.fontFamily = 'var(--mono)';
-      out.style.fontSize = '15px';
 
       const ops = document.createElement('div');
-      ops.className = 'modal-btns';
-      ops.style.justifyContent = 'flex-start';
+      ops.className = 'modal-btns gen-ops';
       const regen = document.createElement('button');
       regen.className = 'btn ghost';
       regen.textContent = '换一个';
