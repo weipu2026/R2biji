@@ -255,8 +255,14 @@ async function readZipEntries(input) {
 
   let eocd = -1;
   const from = Math.max(0, bytes.length - 22 - 0xffff);
+  /* ★ 从后往前扫到的第一个 0x06054b50 不一定真是 EOCD(数据区里撞上这 4 个字节
+   *   完全可能)。规范给了判据:EOCD 之后只剩注释,所以「22 + 注释长度」必须
+   *   **正好**收到文件末尾,不满足就继续往前找。与 public/js/zip.js 同口径
+   *   (2026-10-17 审计 P1:阅读站是 zip.js 的旧拷贝,三条严格判据全缺)。 */
   for (let i = bytes.length - 22; i >= from; i--) {
-    if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+    if (dv.getUint32(i, true) !== 0x06054b50) continue;
+    if (i + 22 + dv.getUint16(i + 20, true) !== bytes.length) continue;
+    eocd = i; break;
   }
   if (eocd < 0) throw new Error('不是 zip 文件(找不到结尾记录)');
 
@@ -267,6 +273,9 @@ async function readZipEntries(input) {
 
   const out = [];
   const warnings = [];
+  /* 同名条目一律报错:恢复工具不能替用户猜哪份才是真的 —— 下面解密用 Map
+   * (后者覆盖前者),而摘要表用 find(取第一条),两者会指向不同文件。 */
+  const seen = new Set();
   let p = cdOffset;
 
   for (let i = 0; i < count; i++) {
@@ -314,7 +323,15 @@ async function readZipEntries(input) {
       warnings.push(`条目「${name}」校验失败(内容损坏),已跳过`);
       continue;
     }
+    if (seen.has(name)) throw new Error(`zip 条目重复:${name}`);
+    seen.add(name);
     out.push({ name, bytes: data });
+  }
+  /* ★ 中央目录必须**刚好**用尽(2026-10-17 审计 P1):EOCD 的 count 若被改小
+   *   (或包被截断),上面的循环会提前收工,把少读的条目当作不存在 ——
+   *   应急恢复时表现为「静默少恢复几个文件」,比直接报错坏得多。 */
+  if (p !== cdOffset + cdSize) {
+    throw new Error(`zip 结构损坏(中央目录与条目数不符:读到 ${p - cdOffset} 字节,声明 ${cdSize} 字节)`);
   }
   return { entries: out, warnings };
 }
@@ -630,7 +647,11 @@ async function decryptBackupPackage(zipBytes, password) {
 /** 结果 → 导出 zip 的条目列表(README + notes/*.md + 全量 JSON + attachments/*) */
 function buildExportEntries(result) {
   const entries = [];
-  const dump = { exportedAt: new Date().toISOString(), tool: 'R2biji 应急解密', categories: {} };
+  /* ★ categories 必须无原型(2026-10-17 审计 P2):分类名可以是 __proto__,
+   *   在普通对象上 dump.categories["__proto__"] = {...} 改的是**原型**,
+   *   JSON.stringify 直接把它丢掉 —— 而 README 明写这份 JSON 是「完整明文备底」,
+   *   丢一整类就是备份不完整。 */
+  const dump = { exportedAt: new Date().toISOString(), tool: 'R2biji 应急解密', categories: Object.create(null) };
   for (const c of result.categories) {
     dump.categories[c.name] = { notes: c.data.notes, trash: c.data.trash };
     entries.push({ name: `notes/${sanitizeEntryName(c.name)}.md`, bytes: te.encode(categoryToMd(c.name, c.data)) });
@@ -1091,7 +1112,11 @@ function rdrInlineCore(text) {
 function rdrSecretSpan(m) {
   var n = m[2].replace(/\\s+/g, '').length || 1;
   if (n > 24) n = 24;
-  return '<span class="secret masked" title="点击显示 / 再点隐藏">'
+  /* 键盘可达(2026-10-17 审计 P2,与主站 render.js 同口径):tabindex + button 语义,
+   *   Enter/空格 由下方 keydown 处理,aria-expanded 由 rdrToggleSecret 同步。
+   *   ⚠️ aria-label 用中性文案:可访问名里绝不能带上真值本身。 */
+  return '<span class="secret masked" tabindex="0" role="button" aria-expanded="false"'
+    + ' aria-label="敏感内容,按回车显示或隐藏" title="点击显示 / 再点隐藏(30 秒无操作自动遮回)">'
     + '<span class="secret-raw">' + rdrEsc(m[1] + m[2]) + '</span>'
     + '<span class="secret-stars" aria-hidden="true">' + new Array(n + 1).join('\\u2022') + '</span>'
     + '</span>';
@@ -1423,14 +1448,31 @@ if (typeof document !== 'undefined') {
   function rdrToggleSecret(e) {
     var el = e.target && e.target.closest ? e.target.closest(".secret") : null;
     if (!el) return;
+    /* 遮罩态与 aria-expanded 必须始终同向:30 秒自动遮回时也要同步,
+     * 否则读屏器会一直播报「已展开」而画面早已遮住(2026-10-17 审计 P2)。 */
+    function syncAria() {
+      if (el.setAttribute) {
+        el.setAttribute("aria-expanded", el.classList.contains("masked") ? "false" : "true");
+      }
+    }
     if (el.classList.contains("masked")) {
       el.classList.remove("masked");
-      st.maskTimers.push(setTimeout(function () { el.classList.add("masked"); }, 30000));
+      st.maskTimers.push(setTimeout(function () { el.classList.add("masked"); syncAria(); }, 30000));
     } else {
       el.classList.add("masked");
     }
+    syncAria();
   }
   $('view').addEventListener('click', rdrToggleSecret);
+  /* 键盘可达(2026-10-17 审计 P2):判据同主站 shell.js —— 只认事件源就是敏感块
+   *   本身,行内将来若有别的可聚焦元素,别抢它的键。 */
+  $('view').addEventListener('keydown', function (e) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var t = e.target && e.target.closest ? e.target.closest(".secret") : null;
+    if (!t || e.target !== t) return;
+    e.preventDefault();
+    rdrToggleSecret(e);
+  });
 }
 /*READER-SCRIPT-END*/
 <\/script>

@@ -345,6 +345,104 @@ function zipDeflate(entries) {
   return out;
 }
 
+/* ---------- 2026-10-17 审计:zip 三条严格判据 + __proto__ 导出 ---------- */
+
+test('★ EOCD 必须按「22 + 注释长度 == 文件尾」定位:注释里的 PK\\x05\\x06 不得冒充结尾记录', async () => {
+  /* 从后往前扫到的第一个签名不一定是 EOCD —— 注释里撞上这 4 个字节完全可能。
+   * 旧实现只认签名,会把这个伪记录当 EOCD:count/cdSize/cdOffset 全 0 →
+   * 静默返回 0 个条目,用户以为备份里什么都没有。 */
+  const base = recover.zipWriteEntries([
+    { name: 'vault.json', bytes: new TextEncoder().encode('{"magic":"JMBIJI"}') },
+    { name: 'a.txt', bytes: new TextEncoder().encode('hi') },
+  ]);
+  const comment = new Uint8Array(40);
+  comment.set([0x50, 0x4b, 0x05, 0x06], 0); // 伪 EOCD 签名(其余字节全 0)
+  const out = new Uint8Array(base.length + comment.length);
+  out.set(base, 0);
+  out.set(comment, base.length);
+  // 真 EOCD 的 commentLen 字段改成 40
+  new DataView(out.buffer).setUint16(base.length - 22 + 20, comment.length, true);
+
+  const { entries } = await recover.readZipEntries(out);
+  assert.deepEqual(entries.map((e) => e.name), ['vault.json', 'a.txt'],
+    '必须跳过注释里的伪签名,按真 EOCD 读出全部条目');
+});
+
+test('★ EOCD 的条目数被改小:必须报错,不能静默少恢复文件(P1-2)', async () => {
+  const mk = () => recover.zipWriteEntries([
+    { name: 'a.txt', bytes: new TextEncoder().encode('A') },
+    { name: 'b.txt', bytes: new TextEncoder().encode('B') },
+  ]);
+  const zip = mk();
+  new DataView(zip.buffer, zip.byteOffset, zip.byteLength).setUint16(zip.length - 22 + 10, 1, true);
+  await assert.rejects(() => recover.readZipEntries(zip), /中央目录与条目数不符/,
+    '★ count 改小后循环会提前收工 —— 少读的条目必须报错,不能当作不存在');
+
+  // 正对照:未改动能读回两条
+  assert.deepEqual((await recover.readZipEntries(mk())).entries.map((e) => e.name), ['a.txt', 'b.txt']);
+});
+
+test('★ 同名条目:必须报错,不能替用户猜哪份是真的(P1-2)', async () => {
+  const zip = recover.zipWriteEntries([
+    { name: 'dup.txt', bytes: new TextEncoder().encode('first') },
+    { name: 'dup.txt', bytes: new TextEncoder().encode('second') },
+  ]);
+  await assert.rejects(() => recover.readZipEntries(zip), /zip 条目重复/,
+    '解密用 Map(后者覆盖)、摘要表用 find(取第一条)→ 两者会指向不同文件');
+
+  const ok = recover.zipWriteEntries([
+    { name: 'a.txt', bytes: new TextEncoder().encode('first') },
+    { name: 'b.txt', bytes: new TextEncoder().encode('second') },
+  ]);
+  assert.deepEqual((await recover.readZipEntries(ok)).entries.map((e) => e.name), ['a.txt', 'b.txt']);
+});
+
+test('★ buildExportEntries:__proto__ 分类必须完整写进 all-notes.json(P2-6)', () => {
+  /* 普通对象上 dump.categories["__proto__"] = {...} 改的是**原型**,
+   * JSON.stringify 直接丢掉 —— 而 README 明写这份 JSON 是「完整明文备底」。 */
+  const result = {
+    vaultInfo: { magic: 'JMBIJI' },
+    categories: [{
+      name: '__proto__',
+      data: {
+        notes: [{ id: 'p1', title: '原型笔记', content: '内容', createdAt: 1, updatedAt: 1, attachments: [] }],
+        trash: [],
+      },
+    }],
+    attachments: [], blobs: new Map(), failures: [], warnings: [],
+  };
+  const entries = recover.buildExportEntries(result);
+  assert.ok(entries.some((e) => e.name === 'notes/__proto__.md'), '每个分类都要有 .md');
+  const dumpEntry = entries.find((e) => e.name === 'notes/all-notes.json');
+  assert.ok(dumpEntry, '必须产出 all-notes.json');
+  const dump = JSON.parse(new TextDecoder().decode(dumpEntry.bytes));
+  assert.ok(Object.prototype.hasOwnProperty.call(dump.categories, '__proto__'),
+    '__proto__ 必须是**自有键**(普通对象赋值会改成原型,JSON.stringify 直接丢掉)');
+  assert.equal(dump.categories['__proto__'].notes[0].title, '原型笔记');
+});
+
+test('★ 阅读站敏感块:可聚焦 + role + aria-expanded + 中性 aria-label(P2-7)', () => {
+  const at = html.indexOf('function rdrSecretSpan');
+  assert.ok(at > 0, '必须能定位敏感块渲染函数');
+  const end = html.indexOf('/* ★ 必须**按行**判定', at);
+  assert.ok(end > at, '必须能定位函数体边界');
+  const fn = html.slice(at, end);
+
+  assert.match(fn, /tabindex="0"/, '必须可聚焦,否则键盘用户永远看不到敏感值');
+  assert.match(fn, /role="button"/, '语义必须是按钮');
+  assert.match(fn, /aria-expanded="false"/, '初始态必须声明折叠');
+  assert.match(fn, /aria-label="[^"]+"/, '必须有无障碍名');
+  assert.ok(!/aria-label="[^"]*"\s*\+\s*rdrEsc/.test(fn),
+    '★ aria-label 里绝不能拼真值(读屏器会把敏感内容念出来)');
+
+  // 键盘入口:只认事件源就是敏感块本身
+  const kd = html.indexOf("$('view').addEventListener('keydown'", at);
+  assert.ok(kd > at, '必须有 keydown 处理');
+  const kdSeg = html.slice(kd, kd + 400);
+  assert.match(kdSeg, /e\.key !== "Enter" && e\.key !== " "/, 'Enter / 空格都要能触发');
+  assert.match(kdSeg, /e\.target !== t/, '子元素上的按键不得抢走(动画层/星号层除外)');
+});
+
 function recoverZipCrc(bytes) {
   // 复用 recover.html 内联脚本里的 crc32 —— 不导出,这里自己算
   const table = (() => {

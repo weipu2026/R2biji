@@ -292,6 +292,8 @@ test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据
   const fEnd = readerCode.indexOf("$('view').addEventListener");
   assert.ok(fStart > 0 && fEnd > fStart, '阅读站点击处理器必须具名(rdrToggleSecret)且有绑定处');
   const toggleSrc = readerCode.slice(fStart, fEnd);
+  assert.match(toggleSrc, /setTimeout\(function \(\) \{ el\.classList\.add\("masked"\); syncAria\(\); \}, 30000\)/,
+    '30 秒自动遮回也必须同步 aria-expanded(否则读屏器一直播报「已展开」)');
   const rd = await import("data:text/javascript," + encodeURIComponent(
     'const st = { maskTimers: [] };\n' + toggleSrc + '\nexport { rdrToggleSecret, st };',
   ));
@@ -302,6 +304,9 @@ test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据
       add: (c) => el._cls.add(c),
       remove: (c) => el._cls.delete(c),
     };
+    /* aria-expanded 的落点(真实 DOM 用 setAttribute,替身必须同样提供) */
+    el.attrs = {};
+    el.setAttribute = (k, v) => { el.attrs[k] = String(v); };
     el.closest = (sel) => {
       const want = sel.replace(".", "");
       let n = el;
@@ -318,9 +323,11 @@ test('★ 阅读站敏感行点击:双层结构下必须点得开(closest 判据
     rd.rdrToggleSecret({ target: stars });
     assert.equal(secret.classList.contains('masked'), false,
       '★ 点星号必须显形(旧实现直接判 e.target 类名 → 永远不动,值点不出来)');
+    assert.equal(secret.attrs['aria-expanded'], 'true', '显形后 aria-expanded 必须同向');
     // 显形态:点真值层 → 遮回
     rd.rdrToggleSecret({ target: raw });
     assert.equal(secret.classList.contains('masked'), true, '显形态点真值层 → 必须遮回');
+    assert.equal(secret.attrs['aria-expanded'], 'false', '遮回后 aria-expanded 必须同向');
     // 不在 .secret 里的点击必须被忽略(不能误伤别的元素)
     const other = mk('something-else');
     rd.rdrToggleSecret({ target: other });
