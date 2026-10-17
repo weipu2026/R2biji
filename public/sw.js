@@ -68,6 +68,12 @@ const ASSETS = [
   './js/features/shell.js',
   './manifest.webmanifest',
   './icon.svg',
+  // 图标(PNG):iOS 主屏 / PWA 安装都要它们。漏登记的后果是离线时图标 404 ——
+  // 外壳 js/css/html 都在清单里,唯独图标不在,「离线可用」其实缺一块(2026-10-17 自查)
+  './apple-touch-icon.png',
+  './icon-192.png',
+  './icon-512.png',
+  './icon-maskable-512.png',
 ];
 
 self.addEventListener('install', (e) => {
