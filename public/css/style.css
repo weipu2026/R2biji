@@ -953,7 +953,12 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   border: none;
   border-bottom: 1px solid var(--border);
   background: transparent;
-  padding: 2px 0 12px;
+  /* ★ 2026-10-18 补左右内距。正文框聚焦时画的是「贴边 2px 内框」,而文字此前从
+   *   容器左边界起排 → 首字笔画/光标被那条线盖住(用户报:「深蓝边框与左侧文字
+   *   部分重叠,光标在最左侧则看不到」)。标题同宽同列,一并补到 12px 保持对齐。
+   *   12px = 工具栏卡片的 1(border) + 3(padding) + 8(按钮 padding),正好与工具栏
+   *   内第一个字符同列 —— 文字类元素缩进 12px、控件/卡片贴边。 */
+  padding: 2px 12px 12px;
   outline: none;
 }
 .edit-title:focus { border-color: var(--accent); }
@@ -965,7 +970,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   outline: none;
   resize: none;
   background: transparent;
-  padding: 14px 0;
+  /* ★ 2026-10-18 左右 12px 内距:与 .edit-title「文字类元素缩进 12px」同一规范。
+   *   此前是 `14px 0`,文字紧贴容器边界,.edit-body:focus 的 inset 2px 框直接压在
+   *   首列文字上(截图复现:每一行的第一个字左边缘都被吃掉 2px)。
+   *   box-sizing 为 border-box,加 padding 不改外框尺寸,换行宽度只少 24px。 */
+  padding: 14px 12px;
   line-height: 1.9;
   font-family: var(--mono);
   font-size: 14px;

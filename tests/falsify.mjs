@@ -1757,6 +1757,20 @@ const MUTANTS = [
     from: '  const todo = Object.create(null);',
     to: '  const todo = {}; // MUTANT',
     expect: '__proto__ 分类保存后',
+  },
+  {
+    label: '.edit-body 左右内距改回 0(聚焦 2px 内框压住每行首字)',
+    file: 'public/css/style.css',
+    from: '  padding: 14px 12px;',
+    to: '  padding: 14px 0; // MUTANT',
+    expect: 'A10:编辑框必须留水平内距',
+  },
+  {
+    label: '.edit-title 左右内距改回 0(标题与正文不再同一文字列)',
+    file: 'public/css/style.css',
+    from: '  padding: 2px 12px 12px;',
+    to: '  padding: 2px 0 12px; // MUTANT',
+    expect: 'A10:编辑框必须留水平内距',
   },
 ];
 

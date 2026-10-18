@@ -272,6 +272,44 @@ test('A9:.edit-body 聚焦反馈必须达标(整圈 2px 黛蓝内框,不再用�
   assert.doesNotMatch(css, /\.edit-body:focus-within/, 'textarea 无子元素,:focus-within 恒等价于 :focus(冗余)');
 });
 
+test('A10:编辑框必须留水平内距(否则聚焦内框压住首列文字)', () => {
+  /* ★ 2026-10-18 用户反馈:点进正文后,深蓝 2px 内框与每一行的首字重叠,光标落在最左时看不见。
+   *   根因:.edit-body / .edit-title 的左右 padding 都是 0,文字从容器左边界起排,而
+   *   .edit-body:focus 画的 inset 2px 框正落在边界上 → 每行首字左边缘被吃掉 2px。
+   *   判据取**解析出的数值**而不是字符串:以后改成 10px、或拆成 padding-left/right
+   *   都不该误红;同时要求标题与正文同值,否则两行不再落在同一文字列(视觉上比压字更糊)。
+   *   ⚠️ 只查「规则块里有没有 padding」会被 `padding: 14px 0` 喂成假绿 —— 必须展开简写。 */
+  const padLR = (sel) => {
+    const blk = new RegExp(sel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\{([^}]*)\\}').exec(css);
+    if (!blk) return null;
+    /* 必须先剥掉块内注释:本文件的注释就写在 padding 上方,注释闭合符紧跟属性时
+     * `(?:^|;)\s*padding` 不命中(实测把这条断言自己喂成假红);注释里写
+     * `padding: 0` 之类的举例也会被误当成真声明。 */
+    const body = blk[1].replace(/\/\*[\s\S]*?\*\//g, '');
+    const one = (name) => {
+      const m = new RegExp('(?:^|;)\\s*' + name + '\\s*:\\s*([\\d.]+)px').exec(body);
+      return m ? Number(m[1]) : null;
+    };
+    const l = one('padding-left');
+    const r = one('padding-right');
+    if (l != null || r != null) return [l, r];
+    const m = /(?:^|;)\s*padding\s*:\s*([^;}]+)/.exec(body);
+    if (!m) return null;
+    const v = m[1].trim().split(/\s+/).map((x) => (/^[\d.]+px$/.test(x) ? Number(parseFloat(x)) : NaN));
+    if (v.length === 1) return [v[0], v[0]];
+    return [v[1], v[1]]; // 2/3/4 值简写:第二个值是左右
+  };
+
+  for (const sel of ['.edit-body', '.edit-title']) {
+    const lr = padLR(sel);
+    assert.ok(lr, `${sel} 必须能解析出左右内距`);
+    assert.ok(lr[0] >= 8 && lr[1] >= 8,
+      `${sel} 左右内距都必须 ≥8px(实际 ${lr.join('/')}px):焦点框 2px 画在边框上,内距为 0 时压住首字`);
+  }
+  assert.deepEqual(padLR('.edit-body'), padLR('.edit-title'),
+    '标题与正文必须同内距,否则两行不在同一文字列');
+});
+
 test('P3:--muted 落在深底上的次要文字提到 --text(纸面底之外仍要可读)', () => {
   const catCount = /\.cat-item:hover \.cat-count,\n\.cat-item\.pinned:not\(\.active\) \.cat-count\s*\{([^}]*)\}/.exec(css);
   assert.ok(catCount, '.cat-count 的悬停/置顶态必须有单独规则');
