@@ -243,10 +243,22 @@ function bindEvents(ctx) {
     e.preventDefault();
     ctx.addAttachments(files);
   });
+  /* ★ 2026-10-18 审计 H1:清理要**解密全部分类**,是数秒到数十秒的长任务,而此前
+   *   这里既无忙态也无防重入 —— 用户点完「确定」盯着毫无变化的界面,会以为卡死而
+   *   刷新或重复点击;重复点击会让两次清理并发枚举/删除 blob,正好放大 DESIGN §11.14
+   *   承认的「秒级残余窗口」。
+   *   与导出/恢复同一套口径:busy 状态 + 禁用按钮,结束用 refreshSaveStatus 收尾。 */
   $('btnCleanBlobs').addEventListener('click', async () => {
     if (!ctx.store.get('lib')) return;
-    const yes = await ctx.modal({ type: 'confirm', title: '清理未引用图片', text: '将解密全部分类并删除没被任何笔记引用的图片文件。继续?' });
+    const yes = await ctx.modal({
+      type: 'confirm', title: '清理未引用图片',
+      text: '将解密全部分类并删除没被任何笔记引用的图片文件。继续?',
+      okLabel: '开始清理',   // 别让这颗按钮写成「删除」:它不是删除操作
+    });
     if (!yes) return;
+    const cleanBtn = $('btnCleanBlobs');
+    cleanBtn.disabled = true;                  // 防重入:并发清理会放大秒级残余窗口
+    ctx.setStatus('正在清理未引用图片…', 'busy');
     try {
       const removed = await ctx.store.get('lib').cleanupOrphanBlobs();
       ctx.renderCategoryList(); // 清理前会重新拉一次清单,界面跟着对齐
@@ -255,6 +267,9 @@ function bindEvents(ctx) {
       // 清理是 fail closed 的:读不全就一张不删。这条提示必须看得清、看得久,
       // 否则用户会以为「点过了就等于清干净了」。
       ctx.toast(`清理已中止:${e.message}`, 'error');
+    } finally {
+      cleanBtn.disabled = false;
+      ctx.refreshSaveStatus();   // 权威终态:把 busy 换回 已保存 / 有未保存更改
     }
   });
   $('btnExport').addEventListener('click', () => ctx.exportFullBackup());

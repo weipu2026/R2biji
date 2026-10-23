@@ -180,6 +180,10 @@ export async function lockNow(ctx, { broadcast = true, confirmDiscard = true } =
       type: 'confirm', danger: true,
       title: '还有未保存的改动',
       text: `${S.get('dirty').size} 个分类的改动尚未保存成功,锁定将放弃这些改动(服务器上的版本不受影响)。确定锁定吗?`,
+      /* ★ 主按钮不能是「删除」(2026-10-18 审计 H3):这颗按钮是 danger 样式,
+       *   而 lock.js 是**唯一**用 danger:true 弹非删除确认框的地方 —— 文案沿用
+       *   mkBtn 的默认值时会显示红色的「删除」,用户会以为锁定会删数据。 */
+      okLabel: '放弃并锁定',
     });
     if (!yes) return;
   }

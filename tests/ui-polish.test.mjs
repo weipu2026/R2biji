@@ -318,8 +318,39 @@ test('P3:--muted 落在深底上的次要文字提到 --text(纸面底之外仍�
     '搜索结果摘要悬停时底变 --hover,必须提到 --text');
 });
 
+test('A11:锁屏的动态提示必须进读屏播报(此前只写不念,H2)', () => {
+  /* 锁屏是全应用最关键的入口,而 #pwHint(密码强度)与 #lockErr(密码错误/库不存在)
+   * 此前都是纯 textContent 静默写入 —— 读屏用户输错主密码按「解锁」,屏幕上出现红条
+   * 而耳机里没有任何声音。同文件的搜索面板/toast 早就挂了 live region,这是漏网的。
+   * 判据取**标签自身**的属性,不是「文件里出现过 aria-live」。 */
+  const html = read('index.html');
+  const hint = /<div id="pwHint"[^>]*>/.exec(html);
+  assert.ok(hint, '#pwHint 必须存在');
+  assert.match(hint[0], /aria-live="polite"/, '强度提示要 polite:随输入连续变化,不该打断用户');
+  const err = /<div id="lockErr"[^>]*>/.exec(html);
+  assert.ok(err, '#lockErr 必须存在');
+  assert.match(err[0], /role="alert"/, '密码错误/库不存在要 alert:assertive 立即播报');
+});
+
 test('P3:编辑态附件删除按钮纳入统一焦点圈', () => {
   assert.match(css, /\.att-del:focus-visible\s*\{[^}]*outline:\s*2px/, '.att-del 必须有焦点圈(别只剩 UA 默认圈)');
+});
+
+test('A14:清理未引用图片必须有忙态 + 防重入 + 权威终态(秒级操作不能静默)', () => {
+  /* 清理要解密全部分类再逐个删 blob,是秒级操作:期间界面没有任何变化,用户
+   * 会以为「点过了就等于清干净了」。与导出/恢复同一套口径:busy + 禁用按钮,
+   * 结束用 refreshSaveStatus 收尾。
+   * 判据取**处理器整段**,不是「文件里出现过 setStatus」—— 掏空 finally 只留
+   * 函数名,后者照样绿(2026-10-11 起本文件就吃过这个亏)。 */
+  const shell = read('js/features/shell.js');
+  const seg = /\$\('btnCleanBlobs'\)\.addEventListener\('click', async \(\) => \{([\s\S]*?)\n  \}\);/.exec(shell);
+  assert.ok(seg, '必须能定位到清理按钮的处理器(改名/缩进一变,这条就该红)');
+  const body = seg[1];
+  assert.match(body, /cleanBtn\.disabled = true/, '必须防重入:并发清理会放大秒级残余窗口');
+  assert.match(body, /setStatus\('正在清理未引用图片…', 'busy'\)/, '必须进忙态');
+  assert.match(body, /finally \{[\s\S]*?cleanBtn\.disabled = false/, 'finally 必须解除禁用(否则按钮永久失效)');
+  assert.match(body, /finally \{[\s\S]*?refreshSaveStatus\(\)/,
+    'finally 必须用权威终态收尾(把 busy 换回已保存 / 有未保存更改)');
 });
 
 test('P3:触屏两列图钉保留 2px 补偿', () => {

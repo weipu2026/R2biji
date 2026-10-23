@@ -165,6 +165,27 @@ test('confirm:取消 → false', async () => {
   assert.equal(await p, false);
 });
 
+test('confirm:okLabel 覆盖主按钮文案(锁定确认框不能写红色的「删除」)', async () => {
+  /* 2026-10-18 审计 H3:lock.js 是唯一用 danger:true 弹**非删除**确认框的地方,
+   * 文案沿用默认值时会显示红色「删除」—— 用户会合理怀疑「锁定会删数据」而不敢点。
+   * 判据落在按钮文案上:传了 okLabel 就必须用它,且不能再出现「删除」。 */
+  const { body } = installDom();
+  const p = modal({ type: 'confirm', danger: true, title: '还有未保存的改动', okLabel: '放弃并锁定' });
+  const b = btn(body, '放弃并锁定');
+  assert.ok(b, '传了 okLabel 就必须用它当主按钮文案');
+  assert.match(b.className, /btn danger/, '仍是 danger 样式:这是破坏性动作,只是文案不再是「删除」');
+  assert.equal(btn(body, '删除'), undefined, '不能再出现「删除」——锁定不是删除');
+  b.click();
+  assert.equal(await p, true, '返回值语义不变(仍是确认)');
+});
+
+test('confirm 正对照:不传 okLabel 时 danger 仍是「删除」(删除类确认框别被带偏)', async () => {
+  const { body } = installDom();
+  modal({ type: 'confirm', danger: true, title: '删除分类' });
+  assert.ok(btn(body, '删除'), '删除场景必须保持「删除」文案');
+  assert.equal(btn(body, '确定'), undefined);
+});
+
 /* ---------------- conflict:三选一 ---------------- */
 
 test('conflict:三个按钮各自返回对应动作', async () => {

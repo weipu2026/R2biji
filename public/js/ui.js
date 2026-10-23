@@ -130,6 +130,10 @@ const ctx = {
   downloadUrl,
   saveAll,
   resetStatusPriority,
+  /* 长任务的忙态反馈(清理未引用图片等):setStatus 只负责显示与优先级,
+   * refreshSaveStatus 负责把状态栏收回权威终态(与导出/恢复同一套口径)。 */
+  setStatus,
+  refreshSaveStatus,
   stopIdleTimer,
   enterApp,
   api: API,
@@ -270,7 +274,7 @@ export function toast(msg, kind = 'info') {
  * 导出仅为了可测:这是唯一一处「按钮 → 返回值」的映射,写错了不会有任何报错,
  * 只会静默失效(见下面 prompt 分支的注释)。tests/dialog.test.mjs 用极简 DOM 替身覆盖它。
  */
-export function modal({ type, title, label, value = '', text = '', danger = false, password = false, build = null }) {
+export function modal({ type, title, label, value = '', text = '', danger = false, password = false, build = null, okLabel = '' }) {
   return new Promise((resolve) => {
     const dlg = $('modal');
     const body = $('modalBody');
@@ -370,7 +374,10 @@ export function modal({ type, title, label, value = '', text = '', danger = fals
       mkBtn('取消', 'btn ghost', null).addEventListener('click', () => settle(null));
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { dlg.close(); settle(input.value); } });
     } else if (type === 'confirm') {
-      mkBtn(danger ? '删除' : '确定', danger ? 'btn danger' : 'btn primary', true);
+      /* okLabel:确认框的语义常常不是「删除」。锁定确认框、清理确认框都曾被这颗
+       * 按钮写成红色的「删除」(2026-10-18 审计 H3)—— 用户会合理怀疑「锁定会删数据」
+       * 而不敢点。留空时按 danger 退回「删除 / 确定」。 */
+      mkBtn(okLabel || (danger ? '删除' : '确定'), danger ? 'btn danger' : 'btn primary', true);
       mkBtn('取消', 'btn ghost', false);
     } else if (type === 'conflict') {
       mkBtn('用我的版本覆盖', 'btn danger', 'mine');

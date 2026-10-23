@@ -44,7 +44,9 @@
           <input type="password" id="pwConfirm" placeholder="再输一遍主密码" aria-label="再输一遍主密码" autocomplete="new-password" autocapitalize="off" spellcheck="false">
         </div>
         <div class="pw-wrap"><input type="password" id="pwInput" placeholder="主密码" aria-label="主密码" autocomplete="current-password" autocapitalize="off" spellcheck="false"><button type="button" id="pwToggle" class="pw-toggle" title="显示密码" aria-label="显示密码"></button></div>
-        <div id="pwHint" class="pw-hint" hidden></div>
+        <!-- aria-live:密码强度提示是「用户输入后才出现」的信息。锁屏是全应用最关键
+             的入口,读屏用户听不到播报就等于没有提示(2026-10-18 审计 H2)。 -->
+        <div id="pwHint" class="pw-hint" aria-live="polite" hidden></div>
         <label class="remember-row">
           <input type="checkbox" id="rememberDevice" checked>
           <span>在此设备上记住(下次打开直接进入)</span>
@@ -58,7 +60,8 @@
         <span>正在连接笔记库…</span>
       </div>
 
-      <div id="lockErr" class="lock-err" hidden></div>
+      <!-- role=alert:主密码输错 / 库不存在必须立刻播报,而不是只写一条红字在屏幕上 -->
+      <div id="lockErr" class="lock-err" role="alert" hidden></div>
 
       <p class="lock-hint">主密码不存储、不可找回;忘记 = 数据无法恢复</p>
     </div>
