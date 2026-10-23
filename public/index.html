@@ -117,11 +117,16 @@
           <div class="foot-icons">
             <button id="btnChangePw" class="icon-btn foot-icon" title="修改主密码" aria-label="修改主密码"></button>
             <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份"></button>
-            <button id="btnImport" class="icon-btn foot-icon" title="从备份恢复" aria-label="从备份恢复"></button>
+            <button id="btnImport" class="icon-btn foot-icon" title="从备份恢复(.zip)或导入 .md" aria-label="从备份恢复或导入 Markdown"></button>
+            <!-- 键盘快捷键清单。已有 9 个快捷键但此前没有任何地方集中展示,新用户全靠试;
+                 桌面端再给一个 ? 的全局入口(见 shell.js)。 -->
+            <button id="btnHelpKeys" class="icon-btn foot-icon" title="键盘快捷键(按 ? 也可以)" aria-label="键盘快捷键"></button>
             <button id="btnCleanBlobs" class="icon-btn foot-icon" title="清理未引用图片" aria-label="清理未引用图片"></button>
             <button id="btnDelCat" class="icon-btn foot-icon danger" title="删除当前分类(需二次确认,删除前自动备份)" aria-label="删除当前分类"></button>
           </div>
-          <input id="importInput" type="file" accept=".zip,application/zip" hidden>
+          <!-- accept 同时收 .zip 与 .md/.txt:zip 走「从备份恢复」,md/txt 走「批量导入」
+             (按扩展名在 change 里分流,见 shell.js)。图标由 shell.js 注入。 -->
+          <input id="importInput" type="file" accept=".zip,.md,.markdown,.txt,application/zip,text/markdown,text/plain" multiple hidden>
         </div>
       </aside>
 

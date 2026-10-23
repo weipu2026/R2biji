@@ -1094,6 +1094,76 @@ test('★ 跨分类移动:目标先写、源后删;目标冲突时源一动不�
     '★ 冲突时源分类一动不动:笔记一篇都不能少(这是「先写目标」换来的安全性)');
 });
 
+/* ---------- 2026-10-18 批量导入 .md ----------
+ * 从 Obsidian / Notion / Typora 迁入是「导入」最自然的用法,而此前只支持 .zip 备份包。
+ * 钉四件事:一次条件写落盘、标题口径、重复 id 跳过、冲突回滚。 */
+test('★ 批量导入 .md:一次条件写追加多篇;重复 id 跳过;冲突时内存回滚', async () => {
+  freshEnv();
+  API.clearToken();
+  const PW = '批量导入密码abc';
+  const { json, dek, authKeyHex } = await V.createVault(PW, ITER);
+  const created = await API.createVaultJson(JSON.stringify(json));
+  API.setToken(authKeyHex);
+  const lib = new Library(await V.deriveAllKeys(dek), json, dek, created.etag);
+  await lib.rescan();
+  await lib.createCategory('导入箱');
+  const cat = lib.categoryInfo('导入箱');
+  cat.data.notes.push({ id: 'old', title: '原有', content: 'x', order: 1000, createdAt: 1, updatedAt: 1, attachments: [] });
+  assert.deepEqual(await lib.saveCategory('导入箱'), { ok: true });
+  await lib.loadCategory('导入箱');   // 建立 lastSeenEtag(冲突路径要靠它)
+
+  /* 三份「文件」→ 三篇笔记(与 UI 侧 importMdFiles 同一套路:先建对象,再按目标
+   * 分类自己的号段把 order 依次排到末尾) */
+  const files = [
+    ['a.md', '# 服务器 A\n\n地址:https://a.example\n密码: p1'],
+    ['b.md', '没有标题行,标题应该取自文件名'],
+    ['c.md', '# 重复'],
+  ];
+  const notes = files.map(([name, text], i) => ({
+    ...F.mdFileToNote(text, name),
+    id: `imp${i}`, order: 0, createdAt: 1, updatedAt: 1, attachments: [],
+  }));
+  let last = 1000;
+  for (const n of notes) { last = F.orderBetween(last, null); n.order = last; }
+
+  const r = await lib.appendNotesToCategory('导入箱', notes);
+  assert.equal(r.ok, true, '批量导入必须一次落盘(不是每篇一次网络往返)');
+  assert.equal(r.added, 3);
+  assert.equal(cat.data.notes.length, 4, '原有一篇 + 新三篇');
+  /* ★ 按 id 取,不按数组下标:loadCategory/normalizeNoteData 会按 order 重排,
+   *   写下标等于把「排序规则」偷偷纳入断言(2026-10-18 实测踩到)。 */
+  const byId = (id) => cat.data.notes.find((n) => n.id === id);
+  assert.equal(byId('imp0').title, '服务器 A', '标题取首行 #');
+  assert.equal(byId('imp0').content, '地址:https://a.example\n密码: p1', '正文去掉标题行与空行');
+  assert.equal(byId('imp1').title, 'b', '没有 # 标题时取文件名去扩展名');
+  assert.equal(byId('imp1').content, '没有标题行,标题应该取自文件名');
+  assert.ok(byId('imp2').order > byId('imp1').order, 'order 依次递增,不撞号');
+
+  // 重复 id:静默跳过并按 dup 报数 —— 批量场景要能部分成功,不该抛错
+  const r2 = await lib.appendNotesToCategory('导入箱', [notes[0]]);
+  assert.equal(r2.added, 0);
+  assert.equal(r2.dup, 1);
+  assert.equal(cat.data.notes.length, 4, '重复 id 不能多出一篇');
+
+  // 另一台设备读到的结果一致(证明真的落了盘,而不是只改了内存)
+  const b = await unlockAs(PW);
+  await b.rescan();
+  await b.loadCategory('导入箱');
+  assert.deepEqual(b.categoryInfo('导入箱').data.notes.map((n) => n.title),
+    ['原有', '服务器 A', 'b', '重复']);
+
+  // 目标被别端改过 → 报冲突且内存回滚(不留「界面多一篇、云端没有」的假象)
+  b.categoryInfo('导入箱').data.notes.push(
+    { id: 'other', title: '别端加的', content: 'D', order: 9000, createdAt: 1, updatedAt: 1, attachments: [] },
+  );
+  assert.deepEqual(await b.saveCategory('导入箱'), { ok: true });
+  const before = cat.data.notes.length;
+  const r3 = await lib.appendNotesToCategory('导入箱',
+    [{ id: 'impX', title: '迟到的', content: '', order: 0, createdAt: 1, updatedAt: 1, attachments: [] }]);
+  assert.equal(r3.conflict, true, '★ 目标版本已变必须如实报冲突,绝不静默覆盖');
+  assert.equal(cat.data.notes.length, before, '★ 冲突后内存必须回滚');
+});
+
 test('★ __proto__ 作分类名:置顶/篇数/顺序/改名都不丢(P2-6 全链路)', async () => {
   /* 分类本体在 Map 里,正文读写完全正常 —— 丢的只有 vault.json 的 catMeta。
    * 最隐蔽的是「首次写入」:对象上还没有自有 __proto__ 键,meta[name] = entry

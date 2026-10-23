@@ -942,6 +942,23 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 .lightbox { display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .lightbox img { max-width: 100%; max-height: 70vh; border-radius: var(--radius); display: block; }
 
+/* 快捷键帮助面板(侧栏键盘图标 / 按 ? 打开)。
+ * 键位一列等宽右对齐 + 说明一列左对齐:两组文字宽度差一倍,只有等宽数字 +
+ * 固定列宽才能让 4 组的键位落在同一条竖线上(与 .edit-count 的 tabular-nums 同源)。 */
+.keyhelp-group {
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  letter-spacing: .5px; margin: 16px 0 6px;
+}
+.keyhelp-group:first-child { margin-top: 0; }
+.keyhelp-list { display: flex; flex-direction: column; gap: 2px; }
+.keyhelp-row { display: flex; align-items: baseline; gap: 10px; }
+.keyhelp-keys {
+  flex: 0 0 112px; text-align: right;
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+.keyhelp-desc { flex: 1 1 auto; font-size: 13px; color: var(--text); }
+
 /* ---------- 编辑视图:分段式工具栏(一个描边容器,内嵌无框小签) ---------- */
 
 .edit-title {
@@ -1300,6 +1317,10 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
    * 两列都写 8px 会让笔记列图钉偏右 2px(桌面那条补偿在 .pin-slot 定义处,审计 P3)。 */
   .cat-item .pin-slot { margin-right: 8px; }
   .note-item .pin-slot { margin-right: 10px; }
+  /* 帮助面板行间距也归这里管:与其它触屏放大同属「没有 hover,误触代价更高」。
+   * ⚠️ 别再单独开一个 hover:none 块 —— ui-polish 的 A4/P3 用「第一个
+   * hover:none 块」截取规则,新块会抢在原块之前被匹配,把那两条喂成假红。 */
+  .keyhelp-row { padding: 5px 0; }
 }
 
 /* 尊重系统减动效偏好 */

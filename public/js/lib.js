@@ -394,6 +394,50 @@ export class Library {
   }
 
   /**
+   * 一次条件写追加**多篇**笔记(批量导入 .md 用)。
+   *
+   * 为什么不复用 appendNoteToCategory 循环:那会每篇一次 CAS 网络往返 ——
+   * 批量导入 30 个文件就是 30 次串行请求,手机上要等十几秒;而且第 7 个失败时
+   * 前 6 个已落盘,「部分成功」的状态得调用方自己拼。这里合并成一次读 + 一次写。
+   *
+   * 与单篇版共用同一条纪律:
+   *  · 内存先改、失败**回滚**(绝不留「以为存上了」的假象);
+   *  · id 与库内重复的**静默跳过**并按 dup 报数(批量场景要能部分成功,不抛错);
+   *  · 412 冲突时如实返回 conflict,并截掉可能多出来的 snap 引用。
+   * @returns {Promise<{ok?:boolean, conflict?:boolean, skipped?:boolean, added:number, dup:number}>}
+   */
+  async appendNotesToCategory(name, notes) {
+    const dst = this.categories.get(name);
+    if (!dst) throw new LibraryError(`分类不存在:${name}`, 'missing');
+    await this.loadCategory(name);          // 已解密过的分类:零网络请求
+    if (!dst.data) throw new LibraryError(`分类「${name}」当前无法读取`, 'stale');
+    const list = Array.isArray(notes) ? notes.filter((n) => n && typeof n === 'object') : [];
+    const have = new Set(dst.data.notes.map((n) => n.id));
+    const fresh = list.filter((n) => !have.has(n.id));
+    const dup = list.length - fresh.length;
+    if (!fresh.length) return { added: 0, dup, skipped: true };
+    const before = dst.data.notes.length;
+    dst.data.notes.push(...fresh);
+    let res;
+    try {
+      res = await this.saveCategory(name);
+    } catch (e) {
+      dst.data.notes.length = before;       // 回滚内存:绝不留「以为存上了」的假象
+      throw e;
+    }
+    if (!res?.ok) {
+      /* ★ 顺序:先取出被追加的那几篇,再截断数组(与单篇版同一处修复模式,
+       *   2026-10-12 审计:先截断再读,下面这段防孤儿处理从未执行过)。 */
+      const added = dst.data.notes.slice(before);
+      dst.data.notes.length = before;
+      for (const a of added) {
+        if (Array.isArray(a.snaps) && a.snaps.length) a.snaps = a.snaps.slice(0, a.snaps.length - 1);
+      }
+    }
+    return { ...(res ?? { skipped: true }), added: fresh.length, dup };
+  }
+
+  /**
    * 一次条件写里更新**多个**分类的篇数(侧栏徽章的数据源)。
    *
    * 为什么要有批量版:跨分类移动会同时改变两个分类的篇数。逐个调 setCatCount

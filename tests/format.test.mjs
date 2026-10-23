@@ -11,6 +11,7 @@ import {
   statusAllowsOverride, STATUS_RANK,
   pushSnap, normalizeSnaps, SNAP_KEEP, SNAP_WINDOW_MS,
   notePreview,
+  mdFileToNote, MD_TITLE_MAX,
   trashDaysLeft, offlineBlobMessage, TRASH_DAYS,
 } from '../public/js/format.js';
 
@@ -509,6 +510,32 @@ test('trashDaysLeft:到期时刻 = deletedAt + TRASH_DAYS 天,负值不外传', 
   assert.equal(trashDaysLeft(now - TRASH_DAYS * DAY, now), 0, '正好到期 → 0');
   assert.equal(trashDaysLeft(now - 40 * DAY, now), 0, '已过期 → 0,不得是负数(UI 会念出「还剩 -10 天」)');
   assert.equal(trashDaysLeft(undefined, now), 0, '脏数据兜底 0,不抛');
+});
+
+test('mdFileToNote:首行 # 当标题并去掉,无 # 用文件名', () => {
+  assert.deepEqual(mdFileToNote('# 服务器 A\n\n地址:https://a.example\n密码: p1', 'a.md'),
+    { title: '服务器 A', content: '地址:https://a.example\n密码: p1' },
+    '标题行与其后的空行都不算正文 —— 否则导入后正文第一行重复一遍标题');
+  assert.deepEqual(mdFileToNote('没有标题行\n第二行', '我的笔记.md'),
+    { title: '我的笔记', content: '没有标题行\n第二行' },
+    '没有一级标题时标题取文件名去扩展名:那才是用户在文件管理器里认得的名字');
+});
+
+test('mdFileToNote:BOM / CRLF / 空文件 / 非法字符 / 超长标题', () => {
+  // BOM:Windows 记事本会写,不剥掉它会成为正文第一个字符
+  assert.equal(mdFileToNote('\uFEFF# 标题\n正文', 'x.md').content, '正文');
+  // CRLF 归一成 LF:导入的正文要与站内手打出来的字节形态一致
+  assert.deepEqual(mdFileToNote('# t\r\n第一行\r\n第二行', 'x.md'),
+    { title: 't', content: '第一行\n第二行' });
+  // 空文件:标题退回文件名、正文为空,不抛错 —— 批量导入要能部分成功
+  assert.deepEqual(mdFileToNote('', 'empty.md'), { title: 'empty', content: '' });
+  // 标题里的非法文件字符要清洗(与 exportNoteMd 同一口径),否则下载名会坏
+  assert.equal(mdFileToNote('# a/b:c*d?', 'x.md').title, 'a_b_c_d_');
+  // 超长标题截断:标题同时进侧栏行文本与下载文件名
+  const long = mdFileToNote(`# ${'标'.repeat(MD_TITLE_MAX + 50)}`, 'x.md');
+  assert.equal(long.title.length, MD_TITLE_MAX);
+  // 标题整行空白 → 退回文件名(不能让标题变成空串)
+  assert.equal(mdFileToNote('#   \n正文', 'fallback.md').title, 'fallback');
 });
 
 test('offlineBlobMessage:只在「确定离线」时换文案,方向不能反', () => {

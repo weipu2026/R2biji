@@ -23,6 +23,8 @@
  *      它不改变依赖来源(所有 DOM 访问仍然只经由 ctx.dom)。
  * ============================================================ */
 
+import * as F from '../format.js';
+
 /* ================= 启动流程 ================= */
 
 /**
@@ -273,11 +275,29 @@ function bindEvents(ctx) {
     }
   });
   $('btnExport').addEventListener('click', () => ctx.exportFullBackup());
+  /* 快捷键帮助:侧栏这枚键盘图标 + 桌面端按 ?。已有 9 个快捷键,而此前没有任何
+   * 地方集中展示 —— 新用户全靠一个个试出来(2026-10-18 补齐)。 */
+  $('btnHelpKeys').innerHTML = ICON.keyboard;   // HTML 里零 SVG 的口径:图标一律由 shell 注入
+  $('btnHelpKeys').addEventListener('click', () => openKeyHelp(ctx));
   $('btnImport').addEventListener('click', () => $('importInput').click());
+  /* 同一入口两种语义,按扩展名分流(2026-10-18 批量导入):
+   *   .zip            → 从备份恢复(原路径,整包合入)
+   *   .md/.markdown/.txt → 批量导入(按篇建进当前分类)
+   * 混选时两边都跑:zip 走恢复、文本走导入,各自如实报结果 —— 一次选两类文件
+   * 不如让用户自己看到「哪边成功了几篇」。 */
   $('importInput').addEventListener('change', (e) => {
-    const file = e.target.files && e.target.files[0];
+    const files = [...(e.target.files || [])];
     e.target.value = '';
-    if (file) ctx.importFromBackup(file);
+    const zips = files.filter((f) => /\.zip$/i.test(f.name));
+    const texts = files.filter((f) => /\.(md|markdown|txt)$/i.test(f.name));
+    if (zips.length) {
+      if (zips.length > 1) ctx.toast('一次只能恢复一个备份包,已取第一个', 'warn');
+      ctx.importFromBackup(zips[0]);
+    }
+    if (texts.length) importMdFiles(ctx, texts);
+    if (!zips.length && !texts.length && files.length) {
+      ctx.toast('只支持 .zip 备份包与 .md / .txt 文本文件', 'warn');
+    }
   });
 
   $('autoLock').addEventListener('change', () => ctx.saveSettings());
@@ -417,6 +437,19 @@ function bindEvents(ctx) {
       e.preventDefault();
       ctx.exitEditMode();
     }
+    /* ?(Shift+/)= 打开快捷键清单。
+     * ★ 与 J/K 不同,它**不能**在输入框里生效:正文和搜索框里打 ? 是正常字符。
+     *   (J/K 靠 moveNoteSelection 内部判断焦点,而这里必须自己判 —— 抄那段会
+     *    把「搜索框里打 j」一起放行,那是另一个功能。) */
+    if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      const f = document.activeElement;
+      const typing = !!f && (f.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(f.tagName));
+      if (!typing) {
+        e.preventDefault();
+        openKeyHelp(ctx);
+        return;   // 已接管:别再往下走,免得还去命中别的分支
+      }
+    }
     // J / K(或 Alt+↓ / Alt+↑)= 读态切换下一条 / 上一条
     // ★ 必须放行带 ctrl/meta 的组合(2026-09-29 审计 P3):Alt+Ctrl+↓、⌘+Alt+↑ 这类
     //   是系统/浏览器级组合键,以前只要 altKey 为真就接管,等于从它们手里抢按键
@@ -434,6 +467,156 @@ function bindEvents(ctx) {
 
   window.addEventListener('beforeunload', (e) => {
     if (ctx.store.get('dirty').size > 0) { e.preventDefault(); e.returnValue = ''; }
+  });
+}
+
+/* ================= 批量导入 Markdown ================= */
+
+/**
+ * 把一批 .md / .txt 按篇建进当前分类,一次条件写落盘。
+ *
+ * 为什么值得做:此前「导入」只接受 .zip 备份包,从 Obsidian / Notion / Typora
+ * 迁入只能一篇篇手工粘贴 —— 而「导入」正是这类工具的标准入口。
+ *
+ * 标题/正文的解析在 format.js 的纯函数里(可离线单测),本函数只做编排:
+ * 读文件 → 建笔记对象 → 按目标分类自己的 order 号段排到末尾 → 一次 CAS 写。
+ * @param {object} ctx
+ * @param {File[]} files 已按扩展名过滤过的文本文件
+ */
+async function importMdFiles(ctx, files) {
+  const cat = ctx.store.get('activeCat');
+  const lib = ctx.store.get('lib');
+  if (!cat || !lib) { ctx.toast('先选择要导入到哪个分类(左侧列表)', 'warn'); return; }
+  ctx.setStatus('正在导入…', 'busy');
+  const failed = [];
+  const notes = [];
+  for (const f of files) {
+    try {
+      const { title, content } = F.mdFileToNote(await f.text(), f.name);
+      notes.push({
+        id: `n${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}${notes.length}`,
+        title,
+        content,
+        order: 0,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        attachments: [],
+      });
+    } catch (e) {
+      // 单个文件读不出来不能拖垮整批:批量导入要能部分成功
+      failed.push(`${f.name}:${e?.message || '读取失败'}`);
+    }
+  }
+  if (!notes.length) {
+    ctx.refreshSaveStatus();
+    ctx.toast(failed.length ? `没有可导入的文件:${failed[0]}` : '没有可导入的文件', 'error');
+    return;
+  }
+  try {
+    await lib.loadCategory(cat);
+    const info = lib.categoryInfo(cat);
+    // order 按**目标**分类自己的号段算,依次排到末尾(与 moveNoteToCategory 同源);
+    // 非有限值(order 脏数据)要跳过,否则 Math.max 会传染成 NaN 让顺序失效
+    let last = null;
+    if (info?.data) {
+      for (const n of F.sortNotes(info.data.notes)) if (Number.isFinite(n.order)) last = n.order;
+    }
+    for (const n of notes) { last = F.orderBetween(last, null); n.order = last; }
+
+    const r = await lib.appendNotesToCategory(cat, notes);
+    if (r?.ok) {
+      const cnt = info?.data ? info.data.notes.length : notes.length;
+      // 篇数徽章单独对齐一次(与跨分类移动同一处置):失败只是徽章晚一拍,不影响正文
+      lib.setCatCounts({ [cat]: cnt }).then(() => ctx.renderCategoryList()).catch(() => {});
+      ctx.store.get('tabs')?.send({ type: 'cat-saved', name: cat });
+      ctx.renderNoteList();
+      ctx.toast(`已导入 ${r.added} 篇到「${cat}」${r.dup ? `(${r.dup} 篇 id 重复已跳过)` : ''}`);
+    } else if (r?.conflict) {
+      ctx.toast(`「${cat}」刚被其他设备改过,本次导入未生效;请重试`, 'error');
+    } else {
+      ctx.toast('没有可导入的内容', 'warn');
+    }
+  } catch (e) {
+    ctx.toast(`导入失败:${e.message}`, 'error');
+  } finally {
+    ctx.refreshSaveStatus();   // 权威终态收尾:把「正在导入…」换回 已保存 / 有未保存更改
+  }
+  if (failed.length) ctx.toast(`${failed.length} 个文件没读出来:${failed[0]}`, 'error');
+}
+
+/* ================= 快捷键帮助 ================= */
+
+/**
+ * 快捷键清单数据。抽成**导出常量**是为了能离线单测:
+ * 键位重复、文案为空、组名为空,这类「文案漂移」在真机上要逐条按才看得出来。
+ *
+ * 分组按使用场景切,不按修饰键切 —— 用户是带着「我现在想干什么」来的。
+ * 桌面端限定的条目集中在「全局 / 阅读 / 编辑」,触屏手势单独一组并标清:
+ * 手机上照抄一份「用不了的清单」只会让人以为功能缺失。
+ */
+export const KEY_HELP_GROUPS = [
+  {
+    name: '全局', items: [
+      { keys: ['Ctrl', 'S'], desc: '保存(停笔 4 秒也会自动存)' },
+      { keys: ['Ctrl', 'K'], desc: '聚焦搜索框,搜索标题与正文' },
+      { keys: ['Esc'], desc: '收起搜索面板' },
+      { keys: ['Ctrl', 'Shift', 'L'], desc: '立即锁定(老板键:有人走过来时按)' },
+      { keys: ['?'], desc: '打开这份快捷键清单' },
+    ],
+  },
+  {
+    name: '阅读', items: [
+      { keys: ['J'], desc: '下一条笔记' },
+      { keys: ['K'], desc: '上一条笔记' },
+      { keys: ['Alt', '↑ / ↓'], desc: '切换上一条 / 下一条(与 J/K 等价)' },
+      { keys: ['Enter'], desc: '打开左侧列表中聚焦的那一条' },
+    ],
+  },
+  {
+    name: '编辑', items: [
+      { keys: ['Tab'], desc: '插入缩进(不会跳出输入框)' },
+      { keys: ['Ctrl', 'Enter'], desc: '完成编辑并保存' },
+      { keys: ['Ctrl', 'V'], desc: '把剪贴板里的图片直接粘成附件' },
+    ],
+  },
+  {
+    name: '触屏手势(手机 / 平板)', items: [
+      { keys: ['上下滑动'], desc: '划到边界再划一下:翻到上 / 下一篇' },
+      { keys: ['双击正文'], desc: '进入编辑' },
+      { keys: ['点图片'], desc: '放大查看原图' },
+    ],
+  },
+];
+
+/** 弹出快捷键清单。桌面端按 ? 或点侧栏那枚键盘图标都能打开。 */
+async function openKeyHelp(ctx) {
+  await ctx.modal({
+    type: 'custom',
+    title: '键盘快捷键',
+    text: '带 Ctrl 的条目是桌面端快捷键;手机上用最下面那组触屏手势。',
+    build: (body) => {
+      for (const g of KEY_HELP_GROUPS) {
+        const h = document.createElement('div');
+        h.className = 'keyhelp-group';
+        h.textContent = g.name;
+        body.appendChild(h);
+        const list = document.createElement('div');
+        list.className = 'keyhelp-list';
+        for (const it of g.items) {
+          const row = document.createElement('div');
+          row.className = 'keyhelp-row';
+          const kbd = document.createElement('span');
+          kbd.className = 'keyhelp-keys';
+          kbd.textContent = it.keys.join(' + ');
+          const desc = document.createElement('span');
+          desc.className = 'keyhelp-desc';
+          desc.textContent = it.desc;
+          row.append(kbd, desc);
+          list.appendChild(row);
+        }
+        body.appendChild(list);
+      }
+    },
   });
 }
 

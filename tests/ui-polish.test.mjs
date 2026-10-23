@@ -336,6 +336,38 @@ test('P3:编辑态附件删除按钮纳入统一焦点圈', () => {
   assert.match(css, /\.att-del:focus-visible\s*\{[^}]*outline:\s*2px/, '.att-del 必须有焦点圈(别只剩 UA 默认圈)');
 });
 
+test('A12:导入入口按扩展名分流(.zip 走备份恢复、.md/.txt 走批量导入)', () => {
+  /* 判据取**标签自身**与 shell.js 的调用点,不是「文件里出现过 .md」——
+   * accept 里漏了 .md 时文件选择器根本选不到它,而分流写错会让 .md 静默走进
+   * 「从备份恢复」那条路(解包失败才暴露)。 */
+  const html = read('index.html');
+  const inp = /<input id="importInput"[^>]*>/.exec(html);
+  assert.ok(inp, '#importInput 必须存在');
+  assert.match(inp[0], /\.md/, 'accept 必须收 .md');
+  assert.match(inp[0], /multiple/, '批量导入要能一次选多个文件');
+  const shell = read('js/features/shell.js');
+  assert.match(shell, /importMdFiles/, 'shell.js 必须有 .md 导入分支');
+  assert.match(shell, /mdFileToNote/,
+    '标题/正文解析必须走 format.js 的纯函数(可离线单测),不要在 shell 里现写一遍');
+});
+
+test('A13:快捷键帮助必须有入口、有清单、有样式(三处缺一就不算能用)', () => {
+  /* 2026-10-18:已有 9 个快捷键却没有任何集中展示,新用户全靠试。
+   * 判据分三层 —— 入口(按钮与 ? 键)、数据(KEY_HELP_GROUPS)、样式(keyhelp-row),
+   * 任缺一层都会让这个功能「看起来有、实际用不了」。 */
+  const html = read('index.html');
+  const btn = /<button id="btnHelpKeys"[^>]*>/.exec(html);
+  assert.ok(btn, '侧栏必须有快捷键帮助按钮');
+  const shell = read('js/features/shell.js');
+  assert.match(shell, /openKeyHelp/, 'shell.js 必须有打开面板的函数');
+  assert.match(shell, /e\.key === '\?'/, '桌面端必须再给一个 ? 的全局入口');
+  assert.match(shell, /btnHelpKeys'\)\.innerHTML = ICON\.keyboard/,
+    '按钮图标必须由 shell 注入(HTML 里零 SVG 的口径)');
+  assert.match(read('js/ui.js'), /\n\s*keyboard:/, 'ICON 表必须有 keyboard 图标');
+  const css = read('css/style.css');
+  assert.match(css, /\.keyhelp-row\s*\{/, '帮助面板必须有成套样式(否则弹出来是一堆裸文本)');
+});
+
 test('A14:清理未引用图片必须有忙态 + 防重入 + 权威终态(秒级操作不能静默)', () => {
   /* 清理要解密全部分类再逐个删 blob,是秒级操作:期间界面没有任何变化,用户
    * 会以为「点过了就等于清干净了」。与导出/恢复同一套口径:busy + 禁用按钮,

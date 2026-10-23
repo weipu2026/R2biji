@@ -493,3 +493,41 @@ export function assessPassword(pw) {
     msg: `偏弱(约 ${bits} bit):加长到 16 位以上,或混入大小写/数字/符号`,
   };
 }
+
+/* ================= Markdown 文件导入 ================= */
+
+/** 导入标题的长度上限:标题同时进侧栏行文本与下载文件名,太长会撑爆布局。 */
+export const MD_TITLE_MAX = 100;
+
+/**
+ * 把一个 .md / .txt 文件解析成一篇新笔记的 { title, content }。
+ * 纯函数:无 IO、无 DOM —— 批量导入的判据全部落在这一层,便于离线单测。
+ *
+ * 三条口径(都与「用户在文件管理器里看到的」对齐):
+ *  · 首行是 `# 标题` 时,标题取该行,正文取**其余行** —— 否则导入后正文第一行
+ *    会重复一遍标题(Obsidian / Notion / Typora 的导出都是这个形状);
+ *  · 没有一级标题时,标题取**文件名去扩展名**(那才是用户认得的名字),正文为全文;
+ *  · 标题做非法文件字符清洗 + 折空白 + 截断(与 exportNoteMd 同一口径),空则「无标题」。
+ *
+ * @param {string} raw 文件文本(UTF-8;允许带 BOM 与 CRLF)
+ * @param {string} fileName 原始文件名(含扩展名)
+ * @returns {{title:string, content:string}}
+ */
+export function mdFileToNote(raw, fileName) {
+  // BOM:Windows 记事本/部分编辑器会写上,不剥掉它会成为正文的第一个字符
+  let text = String(raw ?? '').replace(/^\uFEFF/, '');
+  // CRLF → LF:导入的正文要与站内手打出来的字节形态一致
+  text = text.replace(/\r\n/g, '\n');
+  const lines = text.split('\n');
+  let title = '';
+  let body = text;
+  const m = /^#\s+(.*)$/.exec(lines[0] || '');
+  if (m) {
+    title = m[1].trim();
+    // 标题行后面的空行不算正文:导入的笔记打开就是内容,不是一扇空白门
+    body = lines.slice(1).join('\n').replace(/^\n+/, '');
+  }
+  if (!title) title = String(fileName ?? '').replace(/\.[^./\\]+$/, '').trim();
+  title = title.replace(/[\\/:*?"<>|]+/g, '_').replace(/\s+/g, ' ').trim().slice(0, MD_TITLE_MAX);
+  return { title: title || '无标题', content: body };
+}
