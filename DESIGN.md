@@ -230,6 +230,58 @@
 - **「锁定」= 退出登录**:清内存 + **清掉本机会话**。不清的话锁定形同虚设(刷新一下就自动进去了)。
 - 自动锁屏可选,**默认关**。它与「记住本设备」目的相反(一个要「离开就得输密码」,
   一个要「打开即用」),默认给后者;开启后空闲到点会锁定并一并清掉本机会话,语义一致。
+  入口 2026-10-24 起收进**设置面板**(见 §7.6)—— 以前是侧栏底部一个裸 `select`,
+  和顶栏主题、编辑态等宽散在三处,新用户永远发现不了。
+
+### 7.6 阅读排版偏好、设置面板、拖拽导入与打印(2026-10-24)
+
+**设置面板**(`features/settings.js`,侧栏图标排最左的齿轮):主题 / 阅读排版 / 编辑等宽 /
+自动锁屏集中一处。用**分段按钮组**(`.set-seg`,当前项 `aria-pressed="true"` 且有底色)而不是
+`select` —— 后者的可发现性差(要点了展开才知道有哪几档),且触屏上系统 picker 各平台长得不一样。
+
+**主题三态**(`theme.js` 的 `setThemeMode` / `themeMode`):浅色 / 深色 / 跟随系统。
+顶栏按钮保持**二态快切**(只落显式浅/深,`toggleTheme`);「跟随系统」只能来自设置面板 ——
+二态按钮在语义上表达不了三态。`system` = 摘掉偏好(`removeItem`)并**立即按系统当前值落一次**,
+之后由常驻的 `matchMedia` 监听跟随变化(监听不再随「有无偏好」开关,偏好判断挪到 handler 内部)。
+
+**阅读排版三变量**(`features/reading.js` → `:root` 的 CSS 变量,刷新后由 boot 应用一次):
+
+| 变量 | 档位 | 默认 |
+|---|---|---|
+| `--read-size` | 14 / 15 / 17px | 15px |
+| `--read-lh` | 1.6 / 1.85 / 2.1 | 1.85 |
+| `--read-measure` | `none`(全宽)/ `36em`(居中) | `none` |
+
+- **默认是全宽**:2026-09-28 用户明确要求的通栏形态,不擅自改默认;居中是**可选**模式。
+  `36em` ≈ 36 个全角字符 ≈ **68–72 个拉丁字符**(1 全角 = 2ch),正落在「长文阅读不甩头」的区间。
+- 标题字号从 px 改 **em**(1.4 / 1.1667 / 1.0333em),字号档缩放时整组标题跟随;
+  `pre code` 同理(13px → .867em)。否则大档下标题相对正文会突兀。
+- 收敛纪律:`normalizeReadingPref` 对**脏值逐项回退默认**(不是整体作废),
+  与 `loadSettings` 对 `autoLockMinutes` 同一条纪律 —— 手改 localStorage / 旧版遗留
+  不该让用户莫名其妙丢光全部偏好。持久化在 `jmbiji.read`,只影响本机,不进同步不进备份。
+
+**打印 / 存 PDF**(阅读态操作条「打印」按钮 → `window.print()`):`@media print` 隐藏全部界面
+(顶栏/侧栏/搜索/遮罩/锁屏/操作条/编辑态/空态/dialog),正文通铺 12pt。
+⚠️ **敏感行强制遮罩上纸**(`.secret .secret-raw{display:none}` + 星号显示):纸会流转,
+明文上纸等于把密码抄在纸上到处发。阅读宽度偏好(居中)**不跟随打印** —— 那是屏幕上的选择。
+
+**页面级拖拽导入**(`shell.js` 的 `classifyImportFiles` / `routeImports`):把 `.zip` /
+`.md` / `.markdown` / `.txt` 拖到页面任意处即导入,与点导入图标**走同一条分流**(规则只有一份,
+两个入口不可能漂移)。三条边界:① 只认拖动**文件**(`dataTransfer.types` 含 `'Files'`),
+拖选区文字/拖链接不弹遮罩;② `dragover` 必须 `preventDefault`,否则浏览器不派发 `drop`;
+③ `dragleave` 只在 `relatedTarget === null`(指针离开窗口)时收遮罩 —— 页面元素间移动会连续触发
+`dragleave`,每次都收会让遮罩狂闪。遮罩自身 `pointer-events: none`,放置目标就是 `document`。
+混选时 zip 走恢复、文本走导入,各自如实报结果;多个 zip 只恢复第一个并说明。
+
+**混版自愈**(2026-10-24 用户线上实测的 BUG:部署后首次访问,新页面 + 旧脚本 → 新按钮没图标、
+点击没反应、**控制台零报错**):`index.html` 的 `data-controls` 声明本版本全部接线点(34 个),
+`bindEvents` 末尾给绑成功的元素打 `data-wired` 标,`start()` 用纯函数 `mixedShellGaps(document)`
+核对「声明了 + 文档里存在 + 没打标」的缺口 —— 有则 sessionStorage 记账一次、清 SW 缓存、
+`location.reload()`(离线不动作:重载只会再拿一份旧缓存)。判据**只朝一个方向开火**:
+声明了却不存在 = 旧 HTML + 新 JS(离线兜底),那是反向混版,绑定处已有 `voidEl` 占位保险,
+不重载(重载也还是旧 HTML)。⚠️ 该机制只能保护**它自己之后**的部署 —— 自愈代码必须先在运行的
+JS 里;机制上线前的那次部署仍需用户刷新一次。`tests/ui-polish.test.mjs` 的 A15 双向对账
+「HTML 声明 ↔ shell.js 绑定」,`tests/shell-guard.test.mjs` 钉判据四态。
 
 ## 8. 保存与同步策略
 
@@ -408,7 +460,9 @@ public/js/
   crypto|format|api|zip|render|search|session|tabsync|vaultlib   底层(零依赖或近零)
   features/
     shell.js         启动编排 + 全部 DOM 事件绑定(唯一知道所有 id 的模块)
-    theme.js         深浅色主题
+    theme.js         深浅色主题(顶栏二态快切 + setThemeMode 三态)
+    reading.js       阅读排版偏好(字号/行距/宽度 → :root CSS 变量,纯函数收敛)
+    settings.js      集中设置面板(主题/阅读/等宽/自动锁屏,分段按钮组)
     search.js        全局搜索
     data.js          回收站 / 密码生成器 / 导出 .md / 剪贴板清理
     lock.js          锁屏 / 记住本设备 / 解锁建库 / resumeSession
@@ -568,3 +622,4 @@ export async function runSearch(ctx) { ... }
 | C1 云端化 | Worker + R2 后端、Bearer 鉴权、CAS 冲突、服务端备份、dev-server、单测 | ✅ 已完成 |
 | C2 部署 | wrangler deploy + ACCESS_KEY + 手机端实测 | 待用户执行 |
 | C3 安全审计 | 全站审计:限流失效修复、访问密钥门 fail closed、CSP 与硬化头、定长比较、翻页、备份命名碰撞、变异测试 | ✅ 已完成 |
+| C4 体验轮(2026-10-24) | 全站审计推荐 A+B:阅读排版偏好(字号/行距/宽度)+ 设置面板收拢、拖拽导入 + 打印出口;并修复「新页面+旧脚本」混版导致的快捷键面板失灵(自愈机制) | ✅ 已完成 |
