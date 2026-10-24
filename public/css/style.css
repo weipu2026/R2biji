@@ -69,6 +69,17 @@
   --paper-shadow: 0 1px 2px rgba(60, 50, 30, .05), 0 8px 28px rgba(60, 50, 30, .07);
   /* 微交互缓动:快出慢收,比 linear 高级一档 */
   --ease: cubic-bezier(.25, .6, .3, 1);
+  /* ── 阅读排版偏好(2026-10-24 A1;features/reading.js 写这三个变量)──
+   * · --read-size 正文字号:小 14 / 中 15 / 大 17
+   * · --read-lh 行距:紧凑 1.6 / 标准 1.85 / 宽松 2.1
+   * · --read-measure 行宽上限:全宽 none / 居中 36em。
+   *   36em ≈ 36 个全角字符 ≈ 68–72ch(拉丁「0」宽的一半即全角)——
+   *   对应用户要的「居中 68–75 字符」,中英混排都落在舒适区。
+   *   默认全宽:2026-09-28 用户明确要求过通栏(原 76ch 上限「回行点」
+   *   让宽屏只读半边),这里只是把选择权交出来,不改默认。 */
+  --read-size: 15px;
+  --read-lh: 1.85;
+  --read-measure: none;
 }
 
 /* 暗色主题:墨蓝纸,不是冷黑也不是暖黑 */
@@ -790,10 +801,11 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 
 /* ---------- Markdown 渲染 ---------- */
 
-/* 阅读正文通栏:不限行宽,宽屏整行读到底(2026-09-28 用户要求;
- * 原 76ch 上限的「回行点」反而让宽屏只读半边,已移除) */
-.read-body .md, .read-body > * { max-width: none; }
-.read-body .md { line-height: 1.85; }
+/* 阅读正文行宽:默认通栏(2026-09-28 用户要求,宽屏整行读到底);
+ * 设置面板可切「居中 36em」(≈68–75 字符的舒适阅读量)。
+ * 变量为 none 时 margin-inline:auto 不产生任何效果,通栏形态零差异。 */
+.read-body .md, .read-body > * { max-width: var(--read-measure); margin-inline: auto; }
+.read-body .md { font-size: var(--read-size); line-height: var(--read-lh); }
 .read-body h1, .read-body h2, .read-body h3 {
   margin: 22px 0 10px;
   line-height: 1.35;
@@ -802,9 +814,10 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   max-width: none;
 }
 .read-body h2 { border-bottom: 1px solid var(--border); padding-bottom: 6px; } /* h2 下发丝线,文档排版惯例 */
-.read-body h1 { font-size: 21px; }
-.read-body h2 { font-size: 17.5px; }
-.read-body h3 { font-size: 15.5px; color: var(--muted); }
+/* em 相对 --read-size:字号切档时整组标题一起缩放(绝对值不会) */
+.read-body h1 { font-size: 1.4em; }
+.read-body h2 { font-size: 1.1667em; }
+.read-body h3 { font-size: 1.0333em; color: var(--muted); }
 /* pre-wrap:普通文本的回车原样显示(渲染器把连续行合成一个 <p>,HTML 默认把 \n
  * 折叠成空格 —— 纯文本笔记曾整段粘连);textContent 不受影响,逐块复制仍带换行 */
 .read-body p { margin: 10px 0; word-break: break-word; white-space: pre-wrap; }
@@ -828,7 +841,7 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
   margin: 12px 0;
   max-width: none;
 }
-.read-body pre code { background: none; border: none; padding: 0; font-size: 13px; line-height: 1.6; }
+.read-body pre code { background: none; border: none; padding: 0; font-size: .867em; line-height: 1.6; } /* .867em ≈ 13px @15px 基准,随字号档缩放 */
 .read-body mark {
   background: var(--mark-bg);
   padding: 0 3px;
@@ -1321,7 +1334,57 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
    * ⚠️ 别再单独开一个 hover:none 块 —— ui-polish 的 A4/P3 用「第一个
    * hover:none 块」截取规则,新块会抢在原块之前被匹配,把那两条喂成假红。 */
   .keyhelp-row { padding: 5px 0; }
+  /* 设置面板分段按钮:与其它触屏放大同属「没有 hover,误触代价更高」。
+   * ⚠️ 必须并进这个块(理由见上:新开 hover:none 块会喂假红给 A4/P3)。 */
+  .set-seg-btn { min-height: 32px; padding: 6px 12px; }
 }
+
+/* ---------- 集中设置面板(2026-10-24 A2)----------
+ * 行式布局:标签左、控件右,两端对齐让标签成一列竖线,扫读时不用逐行找。
+ * 分段按钮替代 <select>:所有选项与当前项(aria-pressed)一屏尽收,
+ * 手机上也不会弹系统选择器 —— 当前值看不见是 select 最大的可发现性问题。 */
+.set-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 7px 0;
+}
+.set-label { flex: 0 0 auto; font-size: 13.5px; color: var(--text); }
+.set-seg {
+  display: flex; flex: 0 0 auto;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  overflow: hidden; background: var(--bg);
+}
+.set-seg-btn {
+  appearance: none; border: none; background: none; cursor: pointer;
+  font: inherit; font-size: 12.5px; color: var(--muted);
+  padding: 5px 10px; min-height: 26px;
+  border-left: 1px solid var(--border);
+}
+.set-seg-btn:first-child { border-left: none; }
+.set-seg-btn[aria-pressed="true"] {
+  background: var(--accent-weak); color: var(--accent); font-weight: 600;
+}
+.set-seg-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---------- 页面级拖拽导入的放置提示(2026-10-24 B1)----------
+ * pointer-events:none:它只是视觉提示,真正的放置目标是 document 本身
+ * (shell.js 的三条 window 监听),遮罩不抢指针事件。 */
+.drop-veil {
+  position: fixed; inset: 0; z-index: 200;
+  pointer-events: none;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(47, 90, 146, .12);
+  backdrop-filter: blur(2px);
+  -webkit-backdrop-filter: blur(2px);
+  animation: fade-in .12s ease-out;
+}
+:root[data-theme="dark"] .drop-veil { background: rgba(127, 167, 217, .14); }
+.drop-card {
+  border: 2px dashed var(--accent); border-radius: var(--radius-lg);
+  background: var(--panel); box-shadow: var(--glass-shadow);
+  padding: 28px 40px; text-align: center;
+}
+.drop-title { font-size: 17px; font-weight: 650; color: var(--text); }
+.drop-sub { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
 
 /* 尊重系统减动效偏好 */
 @media (prefers-reduced-motion: reduce) {
@@ -1350,4 +1413,31 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   .toast:not(.toast-error):not(.toast-warn) { background: rgba(38, 37, 31, .97); }
   :root[data-theme="dark"] .toast:not(.toast-error):not(.toast-warn) { background: rgba(236, 233, 225, .97); }
   .cat-btns, .note-btns, .blk-copy { background: var(--panel); }
+}
+
+/* ---------- 打印 / 存为 PDF(2026-10-24 B2)----------
+ * 「打印」= 把**这一篇**交出去(存档、交给不用这个应用的人)。
+ * 此前没有这条规则,Ctrl+P 会把侧栏、顶栏、一排按钮全印出来。
+ * 敏感行强制遮罩态上纸:即使屏幕上正显形,纸面也只印星号 ——
+ * 纸会流转、会丢,屏幕上的「我正看着它」不构成放行理由。 */
+@media print {
+  .topbar, .sidebar, .side-backdrop, #searchPanel, #toasts, #dropVeil,
+  .lock, .read-actions, #editView, #emptyState, dialog {
+    display: none !important;
+  }
+  body { background: #fff; }
+  .layout, .content, #readView { display: block; }
+  #readView { padding: 0; max-width: none; }
+  /* 纸上通铺:阅读宽度偏好(居中 36em)是屏幕上的选择,打印不跟随 */
+  .read-body .md, .read-body > * { max-width: none; margin: 0; }
+  .read-body .md { font-size: 12pt; line-height: 1.75; }
+  .read-body h1 { font-size: 17pt; }
+  .read-body h2 { font-size: 14pt; border-bottom: 1px solid #999; }
+  .read-body h3 { font-size: 12pt; }
+  .read-body pre, .read-body code { border: none; background: none; padding: 0; }
+  .read-body h2, .read-body p, .read-body ul, .read-body ol { max-width: none; }
+  .secret .secret-raw { display: none; }
+  .secret .secret-stars { display: inline; }
+  .att-chip { border: none; padding: 0; background: none; }
+  @page { margin: 18mm; }
 }

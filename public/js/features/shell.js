@@ -108,8 +108,38 @@ export async function boot(ctx) {
 
 /* ================= 事件绑定 ================= */
 
+/* 反向混版占位元素(2026-10-24):见 bindEvents 里 $ 的说明。 */
+const voidEl = {
+  addEventListener() {}, removeEventListener() {}, setAttribute() {}, removeAttribute() {},
+  insertAdjacentHTML() {}, dispatchEvent() { return false; },
+  classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+  dataset: {}, style: { setProperty() {}, removeProperty() {} },
+  value: '', checked: false, hidden: true, textContent: '', innerHTML: '',
+  focus() {}, click() {}, blur() {}, setRangeText() {},
+  querySelector: () => null, querySelectorAll: () => [],
+  closest: () => null, contains: () => false, getAttribute: () => null,
+};
+
+/* 等宽偏好(编辑态那枚按钮与设置面板共用同一份状态)。
+ * 提升到模块作用域:设置面板要读当前值、改完要同步按钮 aria-pressed,
+ * 状态不能再藏在 bindEvents 的局部变量里(2026-10-24 A2)。 */
+let monoOn = false;
+function applyMono(ctx, on) {
+  monoOn = on;
+  const ta = ctx.dom.byId('editBody');
+  if (ta) ta.classList.toggle('mono', on);
+  const btn = ctx.dom.byId('btnMono');
+  if (btn) btn.setAttribute('aria-pressed', String(on));
+}
+export function getMono() { return monoOn; }
+export function setMono(ctx, on) {
+  applyMono(ctx, on);
+  try { localStorage.setItem('jmbiji.mono', on ? '1' : '0'); } catch { /* 仅本次会话生效 */ }
+}
+
 function bindEvents(ctx) {
-  const $ = (id) => ctx.dom.byId(id);
+  // ⚠️ || voidEl 不是偷懒:离线时旧 HTML 缺控件会在这里抛错并烧掉后半段绑定
+  const $ = (id) => ctx.dom.byId(id) || voidEl;
   const ICON = ctx.icons;
 
   // 建库时实时反馈密码强度(解锁态不提示:那是既有密码,提示也无从改)
@@ -203,23 +233,12 @@ function bindEvents(ctx) {
   $('btnCopyAll').addEventListener('click', () => ctx.copyWholeNote());
   $('btnDelNote').addEventListener('click', () => ctx.deleteNote());
   $('btnHistory').addEventListener('click', () => ctx.openHistory());
-  // 等宽字体开关:偏好只存本浏览器(localStorage,非敏感),键名随 jmbiji.* 约定,
-  // 存取失败(隐私模式)静默降级为仅本次会话生效 —— 与主题偏好同一套纪律
-  const monoBtn = $('btnMono');
-  if (monoBtn) {
-    const monoApply = (on) => {
-      $('editBody').classList.toggle('mono', on);
-      monoBtn.setAttribute('aria-pressed', String(on));
-    };
-    let monoOn = false;
-    try { monoOn = localStorage.getItem('jmbiji.mono') === '1'; } catch { monoOn = false; }
-    monoApply(monoOn);
-    monoBtn.addEventListener('click', () => {
-      monoOn = !monoOn;
-      monoApply(monoOn);
-      try { localStorage.setItem('jmbiji.mono', monoOn ? '1' : '0'); } catch { /* 仅本次会话生效 */ }
-    });
-  }
+  /* 等宽字体开关:偏好只存本浏览器(localStorage,非敏感),键名随 jmbiji.* 约定,
+   * 存取失败(隐私模式)静默降级为仅本次会话生效 —— 与主题偏好同一套纪律。
+   * 状态与写住在模块级(applyMono / setMono),设置面板共用同一份。 */
+  try { monoOn = localStorage.getItem('jmbiji.mono') === '1'; } catch { monoOn = false; }
+  applyMono(ctx, monoOn);
+  $('btnMono').addEventListener('click', () => setMono(ctx, !monoOn));
   $('btnAddAtt').addEventListener('click', () => $('attInput').click());
   $('attInput').addEventListener('change', (e) => {
     ctx.addAttachments([...e.target.files]);
@@ -280,27 +299,59 @@ function bindEvents(ctx) {
   $('btnHelpKeys').innerHTML = ICON.keyboard;   // HTML 里零 SVG 的口径:图标一律由 shell 注入
   $('btnHelpKeys').addEventListener('click', () => openKeyHelp(ctx));
   $('btnImport').addEventListener('click', () => $('importInput').click());
-  /* 同一入口两种语义,按扩展名分流(2026-10-18 批量导入):
+
+  /* ── 集中设置面板(2026-10-24 A2):侧栏那枚滑杆图标 ── */
+  $('btnSettings').innerHTML = ICON.sliders;
+  $('btnSettings').addEventListener('click', () => ctx.openSettings());
+
+  /* ── 打印(2026-10-24 B2):阅读态操作条那枚打印机 ──
+   * 只负责调浏览器打印;「打印出来只有标题与正文」由 style.css 的
+   * @media print 保证(隐藏侧栏/顶栏/按钮,正文通铺)。 */
+  $('btnPrint').insertAdjacentHTML('afterbegin', ICON.printer + ' ');
+  $('btnPrint').addEventListener('click', () => window.print());
+
+  /* ── 页面级拖拽导入(2026-10-24 B1) ─────────────────────────
+   * 把 .zip / .md 拖到页面任意处即导入,与点导入图标选文件走同一条
+   * 分流(routeImports)。三条边界:
+   *  ① 只认拖动**文件**(dataTransfer.types 含 'Files')—— 拖选区文字、
+   *     拖链接都不弹遮罩,浏览器默认行为完全不受影响;
+   *  ② dragover 必须 preventDefault:不拦的放置目标,浏览器不会派发 drop;
+   *  ③ dragleave 只在 relatedTarget === null(指针离开窗口)时收遮罩 ——
+   *     页面元素之间的移动会连续触发 dragleave,每次都收会让遮罩狂闪。
+   * 遮罩自身 pointer-events:none(见 style.css),放置目标就是 document。 */
+  let dropArmed = false;
+  window.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    if (!dropArmed) { dropArmed = true; $('dropVeil').hidden = false; }
+  });
+  window.addEventListener('dragleave', (e) => {
+    if (e.relatedTarget !== null || !dropArmed) return;
+    dropArmed = false;
+    $('dropVeil').hidden = true;
+  });
+  window.addEventListener('drop', (e) => {
+    if (!dropArmed) return;               // 不是文件拖拽(或遮罩已收起)
+    e.preventDefault();
+    dropArmed = false;
+    $('dropVeil').hidden = true;
+    routeImports(ctx, [...(e.dataTransfer?.files || [])]);
+  });
+  /* 同一入口两种语义,按扩展名分流(2026-10-18 批量导入;2026-10-24 抽成
+   * routeImports 供拖拽放置共用 —— 两条入口的分流规则必须只有一份):
    *   .zip            → 从备份恢复(原路径,整包合入)
    *   .md/.markdown/.txt → 批量导入(按篇建进当前分类)
-   * 混选时两边都跑:zip 走恢复、文本走导入,各自如实报结果 —— 一次选两类文件
-   * 不如让用户自己看到「哪边成功了几篇」。 */
+   * 混选时两边都跑:zip 走恢复、文本走导入,各自如实报结果。 */
   $('importInput').addEventListener('change', (e) => {
     const files = [...(e.target.files || [])];
     e.target.value = '';
-    const zips = files.filter((f) => /\.zip$/i.test(f.name));
-    const texts = files.filter((f) => /\.(md|markdown|txt)$/i.test(f.name));
-    if (zips.length) {
-      if (zips.length > 1) ctx.toast('一次只能恢复一个备份包,已取第一个', 'warn');
-      ctx.importFromBackup(zips[0]);
-    }
-    if (texts.length) importMdFiles(ctx, texts);
-    if (!zips.length && !texts.length && files.length) {
-      ctx.toast('只支持 .zip 备份包与 .md / .txt 文本文件', 'warn');
-    }
+    routeImports(ctx, files);
   });
 
-  $('autoLock').addEventListener('change', () => ctx.saveSettings());
+  // 自动锁屏的原监听($('autoLock').change)随侧栏那个 <select> 一起移除了
+  // (2026-10-24 A2):现在由设置面板调 ctx.saveSettings({autoLockMinutes}),
+  // store.settings 是单一来源,「元素反读」那条路反而多一层不同步风险。
   $('rememberDevice').addEventListener('change', () => ctx.saveRememberPref());
 
   // 深浅色切换:点一次就固定下来(写入偏好,之后不再跟随系统变化)
@@ -461,6 +512,17 @@ function bindEvents(ctx) {
     }
   });
 
+  /* ── 混版自愈打标(2026-10-24)─────────────────────────────
+   * 能执行到这里 = bindEvents 全程无异常 = 上面每一条 $('id').addEventListener
+   * 都成功绑上了。给 HTML 声明的接线点(data-controls)逐个打标,
+   * start() 的 mixedShellGaps 随后核对「存在却没标」的项。
+   * ⚠️ 判据落在** HTML 声明**上而不是 JS 自己的清单:旧 JS 根本不认识
+   *    新按钮,它的清单里没有,只有 HTML 声明的才暴露缺口。 */
+  for (const id of (document.documentElement.dataset.controls || '').split(/\s+/).filter(Boolean)) {
+    const el = ctx.dom.byId(id);
+    if (el) el.dataset.wired = '1';
+  }
+
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && ctx.store.get('dirty').size > 0) ctx.saveAll();
   });
@@ -544,6 +606,35 @@ async function importMdFiles(ctx, files) {
   if (failed.length) ctx.toast(`${failed.length} 个文件没读出来:${failed[0]}`, 'error');
 }
 
+/* ================= 导入分流(文件选择与拖拽放置共用) ================= */
+
+/** 按扩展名把待导入文件分三堆(纯函数,可离线单测)。
+ *  .zip → 备份恢复;.md/.markdown/.txt → 批量导入;其余 → 不支持。
+ *  大小写不敏感(.MD / .Zip 都认)。 */
+export function classifyImportFiles(files) {
+  const zips = [], texts = [], bad = [];
+  for (const f of files || []) {
+    const name = String(f?.name || '');
+    if (/\.zip$/i.test(name)) zips.push(f);
+    else if (/\.(md|markdown|txt)$/i.test(name)) texts.push(f);
+    else bad.push(f);
+  }
+  return { zips, texts, bad };
+}
+
+/** 执行分流(2026-10-24 从 importInput 的 change 里抽出,拖拽放置共用)。 */
+export function routeImports(ctx, files) {
+  const { zips, texts, bad } = classifyImportFiles(files);
+  if (zips.length) {
+    if (zips.length > 1) ctx.toast('一次只能恢复一个备份包,已取第一个', 'warn');
+    ctx.importFromBackup(zips[0]);
+  }
+  if (texts.length) importMdFiles(ctx, texts);
+  if (!zips.length && !texts.length && bad.length) {
+    ctx.toast('只支持 .zip 备份包与 .md / .txt 文本文件', 'warn');
+  }
+}
+
 /* ================= 快捷键帮助 ================= */
 
 /**
@@ -622,9 +713,50 @@ async function openKeyHelp(ctx) {
 
 /* ================= 入口 ================= */
 
+/** 混版自愈判据(纯函数,可离线单测;doc 形如浏览器 document)。
+ *  HTML 的 data-controls 声明了「本版本应该有绑定」的接线点;文档里
+ *  存在、却没被本版本 JS 打上 wired 标的,就是「新 HTML + 旧 JS」混版 ——
+ *  部署后首次访问,index.html 走 network-first 永远最新,而 js 模块走
+ *  stale-while-revalidate 可能还是旧版,旧 JS 不认识新按钮:图标不注入、
+ *  点击没反应、控制台零报错(2026-10-24 用户线上实测,根因即此)。
+ *  只认「存在但没标」:声明了却不存在 = 旧 HTML + 新 JS(离线兜底),
+ *  那是反向混版,绑定处已有 voidEl 保险,不重载(重载也还是旧 HTML)。 */
+export function mixedShellGaps(doc) {
+  const declared = String(doc.documentElement?.dataset?.controls || '').split(/\s+/).filter(Boolean);
+  return declared.filter((id) => {
+    const el = doc.getElementById(id);
+    return !!el && el.dataset?.wired !== '1';
+  });
+}
+
+/** 混版自愈动作:清掉 SW 缓存并重载一次。
+ *  · 同一会话只做一次(sessionStorage 记账):重载后仍是旧 JS(典型:离线)
+ *    也不能反复重载,下次联网访问自然拿到新版;
+ *  · 离线时不动作:重载只会再拿一份旧缓存,白折腾;
+ *  · 清缓存失败也照常重载 —— SWR 的后台回源在首次访问时就已在跑,
+ *    重载时缓存很可能已是新的;真不是新的,网络也会给一份。 */
+async function healMixedShell(gaps) {
+  try { if (sessionStorage.getItem('jmbiji.shellHeal')) return; } catch { /* 隐私模式 */ }
+  try { sessionStorage.setItem('jmbiji.shellHeal', '1'); } catch { /* 忽略 */ }
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  console.info('[JMbiji] 检测到界面资源混版(新页面 + 旧脚本),自动刷新以对齐:', gaps.join(', '));
+  try {
+    if (typeof caches !== 'undefined') {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    }
+  } catch { /* 忽略:照常重载 */ }
+  location.reload();
+}
+
 export async function start(ctx) {
   ctx.initTheme(); // 先定深浅色:锁屏第一屏就应该是用户要的样子
+  ctx.reading.apply(); // 阅读排版偏好(字号/行距/宽度)与主题同一时机落 CSS 变量
   bindEvents(ctx);
+  /* 混版自愈:新 HTML + 旧 JS 时,新控件没人绑(无图标、点击无反应、零报错)。
+   * 核对 HTML 声明清单,有缺口就清缓存重载一次。 */
+  const gaps = mixedShellGaps(document);
+  if (gaps.length) healMixedShell(gaps);
   // 多标签页同步:BroadcastChannel 不可用时 TabSync 会静默降级(store.tabs.enabled === false),
   // 其余功能一律照常 —— 同步是锦上添花,不是必需品。
   ctx.store.set('tabs', new ctx.TabSync({ onMessage: (msg) => ctx.onTabMessage(msg) }));

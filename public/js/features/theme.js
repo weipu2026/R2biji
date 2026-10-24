@@ -36,15 +36,41 @@ function applyTheme(mode, ctx) {
   if (meta) meta.setAttribute('content', THEME_COLOR[mode] || THEME_COLOR.light);
 }
 
-/** 启动时初始化:优先用户显式偏好,否则跟随系统;未显式设置时跟随系统变化。 */
+/** 启动时初始化:优先用户显式偏好,否则跟随系统。
+ *  系统监听**常驻**(不再要求「当前无偏好」):设置面板可以把偏好摘掉
+ *  切回跟随系统,彼时监听若已被摘,「跟随」就名不副实。handler 内部
+ *  再判一次 loadThemePref(),显式偏好在位时自然空转,不会抢。 */
 export function initTheme(ctx) {
   const pref = loadThemePref();
   const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
   applyTheme(pref || (mq && mq.matches ? 'dark' : 'light'), ctx);
-  if (!pref && mq && mq.addEventListener) {
+  if (mq && mq.addEventListener) {
     mq.addEventListener('change', (e) => {
       if (!loadThemePref()) applyTheme(e.matches ? 'dark' : 'light', ctx);
     });
+  }
+}
+
+/** 当前主题模式:'system' 跟随系统 / 'light' / 'dark'(显式偏好)。
+ *  设置面板的分段按钮要靠它回显当前项。 */
+export function themeMode() {
+  const pref = loadThemePref();
+  return pref === 'dark' || pref === 'light' ? pref : 'system';
+}
+
+/** 设置主题模式(设置面板用):三态。
+ *  · 'system' = 摘掉显式偏好、立即按系统当前值落一次,之后跟随变化;
+ *  · 'light' / 'dark' = 写入偏好并应用。
+ *  与 toggleTheme(顶栏二态快切)的分工:快切永远落到显式浅/深,
+ *  想要「跟随系统」只能来这里 —— 二态按钮表达不了三态。 */
+export function setThemeMode(ctx, mode) {
+  if (mode === 'system') {
+    try { localStorage.removeItem(THEME_KEY); } catch { /* 隐私模式:仅本次会话 */ }
+    const mq = typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null;
+    applyTheme(mq && mq.matches ? 'dark' : 'light', ctx);
+  } else if (mode === 'light' || mode === 'dark') {
+    setThemePref(mode);
+    applyTheme(mode, ctx);
   }
 }
 

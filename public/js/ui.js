@@ -14,7 +14,11 @@ import { TabSync, planSavedCategoryAction } from './tabsync.js';
 //   但状态已汇聚到单一容器(后续按 feature 拆分时可直接订阅)。见 store.js 顶部说明。
 import { store, createProxy } from './store.js';
 // ★ 拆出的 feature 模块(每个只依赖 ctx 注入的共享基础设施,不碰本文件私有变量)
-import { initTheme, toggleTheme } from './features/theme.js';
+import { initTheme, toggleTheme, setThemeMode, themeMode } from './features/theme.js';
+import { openSettings } from './features/settings.js';
+import {
+  loadReadingPref, setReadingPref, applyReadingPref, applyReadingPrefFromStorage,
+} from './features/reading.js';
 import { runSearch, closeSearch } from './features/search.js';
 import { scheduleClipboardWipe, refreshExportDue, openTrash, exportNoteMd, openPwGenerator } from './features/data.js';
 import {
@@ -34,7 +38,7 @@ import {
 // 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
 // loadVaultInfo 一并导出:锁屏上点「解锁」时若还没拿到库信息,要先补拉一次
 // 再解(见 lock.js 的 doUnlock),这条路径不能反向 import(会成环)。
-import { boot, loadVaultInfo } from './features/shell.js';
+import { boot, loadVaultInfo, getMono, setMono } from './features/shell.js';
 
 const S = createProxy(store);
 
@@ -76,6 +80,12 @@ const ICON = {
   eyeOff: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 3 18 18"/><path d="M10.6 10.6a3 3 0 0 0 4.2 4.2"/><path d="M9.9 5.2A10.9 10.9 0 0 1 12 5c6.5 0 10 7 10 7a17.6 17.6 0 0 1-3.2 4.2"/><path d="M6.2 6.2A17.6 17.6 0 0 0 2 12s3.5 7 10 7c1.2 0 2.3-.2 3.3-.6"/></svg>',
   /* 快捷键帮助面板的入口图标(侧栏底部)。键盘轮廓 + 四颗键帽,描边风格与其余 28 枚一致。 */
   keyboard: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="22" height="14" x="1" y="6" rx="2"/><path d="M6 10h.01"/><path d="M10 10h.01"/><path d="M14 10h.01"/><path d="M18 10h.01"/><path d="M7 14h10"/></svg>',
+  /* 打印(B2):出纸口 + 纸。放在阅读态操作条,与「复制全文 / .md / 历史」
+     同属「把这一篇交出去」的一组。 */
+  printer: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 6 2 18 2 18 9"/><path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2-2v5a2 2 0 0 1-2 2h-2"/><rect width="12" height="8" x="6" y="14"/></svg>',
+  /* 设置(A2):三条滑杆 = 「可调节」。不用齿轮:15px 下齿轮糊成一团,
+     滑杆的横线条在侧栏一排图标里辨识度更高。 */
+  sliders: '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="21" y1="6" x2="14" y2="6"/><line x1="10" y1="6" x2="3" y2="6"/><line x1="21" y1="12" x2="12" y2="12"/><line x1="8" y1="12" x2="3" y2="12"/><line x1="21" y1="18" x2="16" y2="18"/><line x1="12" y1="18" x2="3" y2="18"/><circle cx="12" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="14" cy="18" r="2"/></svg>',
 };
 
 /* ------------------------------------------------------------
@@ -153,6 +163,16 @@ const ctx = {
   loadSettings,                          // 启动时读自动锁屏偏好
   saveSettings,
   saveRememberPref,
+  /* ── 2026-10-24 A2/B1/B2 新增入口 ── */
+  openSettings: () => openSettings(ctx),          // 集中设置面板
+  setThemeMode: (mode) => setThemeMode(ctx, mode), // 主题三态(面板用)
+  themeMode,                                       // 当前主题模式(面板回显)
+  reading: {                                       // 阅读排版偏好(reading.js)
+    load: loadReadingPref,
+    set: (patch) => setReadingPref(patch),
+    apply: applyReadingPrefFromStorage,            // 启动时落 CSS 变量
+  },
+  mono: { get: getMono, set: (on) => setMono(ctx, on) }, // 等宽偏好(面板与编辑态按钮共用)
   changePassword,
   exportFullBackup,
   importFromBackup,
@@ -1075,12 +1095,14 @@ function loadSettings() {
   const autoLockRaw = Number(S.settings.autoLockMinutes);
   const autoLockMin = [0, 5, 15, 30].includes(autoLockRaw) ? autoLockRaw : 0;
   if (autoLockMin !== autoLockRaw) S.settings = { ...S.settings, autoLockMinutes: autoLockMin };
-  $('autoLock').value = String(autoLockMin);
+  // ⚠️ 原来这里还有一句 $('autoLock').value = ...:侧栏那个 <select> 已在
+  // 2026-10-24 移入设置面板(设置散落三处的可发现性问题),元素整个删掉。
+  // 脏值收敛照旧(防 setTimeout(NaN)=0ms 一点就锁死),只是不再有 DOM 可镜像。
   $('rememberDevice').checked = S.settings.rememberDevice !== false;
 }
-function saveSettings() {
+function saveSettings(patch) {
   // 整体换新(store.js 的硬性要求:凡是有人 subscribe 的字段必须换新对象)
-  S.settings = { ...S.settings, autoLockMinutes: Number($('autoLock').value) || 0 };
+  S.settings = { ...S.settings, ...(patch || {}) };
   try { localStorage.setItem('jmbiji.settings', JSON.stringify(S.settings)); } catch { /* 忽略 */ }
   startIdleTimer();
 }
@@ -1179,8 +1201,7 @@ async function exportFullBackup() {
       },
     });
     downloadBytes(bytes, F.backupArchiveName());
-    S.settings = { ...S.settings, lastExportAt: Date.now() };
-    saveSettings();
+    saveSettings({ lastExportAt: Date.now() });
     $('btnExport').classList.remove('due');
     /* authoritative:true —— 上一句 onProgress 写过 rank=2 的 busy,
      * 非权威的 'ok' 会被 statusAllowsOverride 拒掉 → 状态栏永久卡「导出中 100%」

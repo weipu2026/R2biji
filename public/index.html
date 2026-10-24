@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-controls="pwInput pwBtn pwConfirm btnLock btnMenu sideBackdrop btnAddCat btnRenameCat btnDelCat btnAddNote btnEdit readView btnDone btnSaveNow btnCopyAll btnDelNote btnHistory btnMono btnAddAtt attInput btnChangePw btnTrash btnExportMd readBody editTitle editBody searchBox btnTheme btnHelpKeys btnImport importInput rememberDevice btnSettings btnPrint">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
@@ -105,16 +105,12 @@
         </div>
 
         <div class="side-foot">
-          <label class="foot-row">自动锁屏
-            <select id="autoLock">
-              <option value="0">关闭</option>
-              <option value="5">5 分钟</option>
-              <option value="15">15 分钟</option>
-              <option value="30">30 分钟</option>
-            </select>
-          </label>
+          <!-- 自动锁屏原在此处(一个裸 select)。2026-10-24 移入设置面板:
+               * 设置项散落三处(顶栏主题 / 侧栏底 / 编辑态等宽)没有统一入口,
+               * 新用户永远发现不了。现在统一收在左侧齿轮图标里。 -->
           <button id="btnTrash" class="btn ghost tiny block side-trash" title="查看最近删除的笔记(保留 30 天)">最近删除</button>
           <div class="foot-icons">
+            <button id="btnSettings" class="icon-btn foot-icon" title="设置(主题 / 阅读排版 / 自动锁屏)" aria-label="设置"></button>
             <button id="btnChangePw" class="icon-btn foot-icon" title="修改主密码" aria-label="修改主密码"></button>
             <button id="btnExport" class="icon-btn foot-icon" title="导出全库备份" aria-label="导出全库备份"></button>
             <button id="btnImport" class="icon-btn foot-icon" title="从备份恢复(.zip)或导入 .md" aria-label="从备份恢复或导入 Markdown"></button>
@@ -140,6 +136,7 @@
               <button id="btnCopyAll" class="btn ghost small">复制全文</button>
               <button id="btnExportMd" class="btn ghost small" title="下载为 .md 文件">.md</button>
               <button id="btnHistory" class="btn ghost small" title="查看本笔记的历史版本(每次保存自动留档)">历史</button>
+              <button id="btnPrint" class="btn ghost small" title="打印或存为 PDF(只输出标题与正文,不带界面)">打印</button>
               <button id="btnEdit" class="btn primary small">编辑</button>
               <button id="btnDelNote" class="btn ghost small danger">删除</button>
             </div>
@@ -186,6 +183,16 @@
     <!-- aria-live=polite:搜索结果条数是「用户输入后才出现」的信息,读屏器需要它播报。
          #toasts 有、这里原先漏了 —— 键盘/读屏用户按 Ctrl+K 后听不到「N 条匹配」。 -->
     <div id="searchPanel" class="search-panel" aria-live="polite" aria-atomic="true" hidden></div>
+
+    <!-- 页面级拖拽导入的放置提示(2026-10-24 B1):dragover 时显示、drop /
+         dragleave(离开窗口)时隐藏。pointer-events:none —— 它只是视觉提示,
+         真正的放置目标是 document(见 shell.js 的三条 window 监听)。 -->
+    <div id="dropVeil" class="drop-veil" hidden>
+      <div class="drop-card">
+        <div class="drop-title">松手导入</div>
+        <div class="drop-sub">.zip 备份包 · .md / .txt 文本(可多选,按扩展名自动分流)</div>
+      </div>
+    </div>
   </div>
 
   <dialog id="modal" class="modal"><div id="modalBody"></div></dialog>

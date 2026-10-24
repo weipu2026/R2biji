@@ -34,7 +34,7 @@
  * ⚠️ 写请求(PUT/DELETE)永不缓存:离线写必然失败,由应用层报错并保留 dirty,
  *   绝不允许拿旧数据假装保存成功。
  */
-const CACHE = 'jmbiji-v18';
+const CACHE = 'jmbiji-v19';   // 2026-10-24:新增 reading/settings 两个模块 + 设置/打印/拖拽控件,升版本强制全新预缓存(混版防护,见 start() 的自愈)
 /** 允许离线缓存的**只读密文**接口(理由见文件顶部注释):
  *   /api/vault 库级参数   /api/cats 分类清单   /api/cat?key=xxx 单个分类密文
  *  ⚠️ 白名单必须精确到路径。放宽成 "/api/ 前缀" 会把写请求和别的接口一起卷进来;
@@ -66,6 +66,8 @@ const ASSETS = [
   './js/features/sidebar.js',
   './js/features/note.js',
   './js/features/shell.js',
+  './js/features/reading.js',   // 2026-10-24 A1:阅读排版偏好(设置面板写 CSS 变量)
+  './js/features/settings.js',  // 2026-10-24 A2:集中设置面板
   './manifest.webmanifest',
   './icon.svg',
   // 图标(PNG):iOS 主屏 / PWA 安装都要它们。漏登记的后果是离线时图标 404 ——
