@@ -1935,6 +1935,72 @@ const MUTANTS = [
     to: "  // MUTANT:没有 dragover 监听\n  window.addEventListener('__no_dragover', (e) => {",
     expect: 'A18',
   },
+  /* ── 2026-10-24 复审:三个「单测全绿却没拦住」的真机缺陷 ──
+   * 这批的共同点:旧断言只查「规则/关键词存在」,而这几个 bug 恰恰是
+   * 「写了,但某个情形没想到」。用变异体钉住它们,防止退回。 */
+  {
+    label: '打印时不解 #app 的 100vh 定高(长笔记只出第一屏,后面的静默丢失)',
+    file: 'public/css/style.css',
+    from: '  html, body, #app { height: auto !important; }',
+    to: '  html, body { height: auto !important; } // MUTANT',
+    expect: 'A19',
+  },
+  {
+    label: '深色主题打印不重置配色(白纸 + 近白字 = 一张纸全空)',
+    file: 'public/css/style.css',
+    from: '  :root, :root[data-theme="dark"] {',
+    to: '  :root { // MUTANT',
+    expect: 'A19',
+  },
+  {
+    label: '段级复制按钮上纸(hover 显形时印在正文上)',
+    file: 'public/css/style.css',
+    from: '  .blk-copy { display: none !important; }',
+    to: '  /* MUTANT:blk-copy 未隐藏 */',
+    expect: 'A19',
+  },
+  {
+    label: '拖拽遮罩没有续期心跳(拖到桌面松手 / 按 Esc 后永久卡住)',
+    file: 'public/js/features/shell.js',
+    from: '    if (dropArmed) { clearTimeout(dropTimer); dropTimer = setTimeout(disarmDrop, 1500); }',
+    to: '    if (dropArmed) { clearTimeout(dropTimer); } // MUTANT',
+    expect: 'A20',
+  },
+  {
+    label: '拖拽不判「进应用了吗」(锁屏上也能拖入,还提示先选分类)',
+    file: 'public/js/features/shell.js',
+    from: '    if (!hasFiles(e) || !canAcceptDrop()) return;\n    e.preventDefault();\n    disarmDrop();',
+    to: '    if (!hasFiles(e)) return; // MUTANT\n    e.preventDefault();\n    disarmDrop();',
+    expect: 'A20',
+  },
+  {
+    label: '拖拽没有 blur 兜底(Alt+Tab / 拖去别的应用后留残影)',
+    file: 'public/js/features/shell.js',
+    from: "  window.addEventListener('blur', () => { if (dropArmed) disarmDrop(); });",
+    to: '  /* MUTANT:没有 blur 兜底 */',
+    expect: 'A20',
+  },
+  {
+    label: '分段按钮不记 dataset.value(回显无法反查当前项代表哪个值)',
+    file: 'public/js/features/settings.js',
+    from: '    b.dataset.value = String(o.value);',
+    to: '    // MUTANT:没记 value',
+    expect: 'A21',
+  },
+  {
+    label: '主题回显不盯 data-theme(面板开着时被顶栏改动仍显示旧值)',
+    file: 'public/js/features/settings.js',
+    from: '          themeObserver = new MutationObserver(() => syncSeg(themeSeg, ctx.themeMode()));',
+    to: '          themeObserver = null; // MUTANT',
+    expect: 'A21',
+  },
+  {
+    label: '观察者断开移出 finally(modal 抛异常时泄漏累积)',
+    file: 'public/js/features/settings.js',
+    from: '  } finally {\n    /* 面板关闭即断开。放在 finally 而不是 await 之后的普通语句:modal 抛异常\n     * 时也必须断开,否则观察者留在 documentElement 上、每次切主题白跑一次,\n     * 下次开面板还会再挂一个(泄漏累积)。 */\n    if (themeObserver) themeObserver.disconnect();\n  }',
+    to: '  } finally {\n    // MUTANT:断开移到块外\n  }\n  if (themeObserver) themeObserver.disconnect();',
+    expect: 'A21',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:

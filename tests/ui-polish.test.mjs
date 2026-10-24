@@ -24,6 +24,8 @@ const shellJs = read('js/features/shell.js');
 const lockJs = read('js/features/lock.js');
 const indexHtml = read('index.html');
 const dataJs = read('js/features/data.js');
+const settingsJs = read('js/features/settings.js');
+const readingJs = read('js/features/reading.js');
 
 /* ---------- A1 焦点圈覆盖 ---------- */
 
@@ -650,5 +652,94 @@ test('A18:页面级拖拽有遮罩有监听,打印有按钮有样式', () => {
   assert.match(print[0], /\.sidebar[^{]*\{[^}]*display: none/, '打印必须隐藏侧栏');
   assert.match(print[0], /\.secret \.secret-raw \{ display: none/, '打印必须强制遮罩敏感行(纸会流转)');
   assert.match(print[0], /max-width: none/, '打印必须通铺(不跟随屏幕上的居中偏好)');
+});
+
+/* ============================================================
+ * A19:打印的「可用性」—— 不是「规则存在」,而是「纸上真的完整」
+ * ------------------------------------------------------------
+ * 2026-10-24 复审真机实测(此前 A18 全绿却没拦住):
+ *  ① #app 的 height:100vh 在打印时把文档锁成一屏 → 3360px 正文只出 1 页,
+ *     后面的内容静默丢失。只解 html/body 无效(实测仍 1 页),必须解 #app。
+ *  ② 深色主题的 --text 是 #ece9e1,而 body 背景被刷成 #fff;浏览器默认
+ *     **不打印背景色** → 白纸白字,一张纸全空。必须把整组配色重置回浅色。
+ *  ③ .blk-copy 是 hover 才显形的绝对定位按钮,鼠标停在某段上时它 opacity:1,
+ *     会印到纸上并压住正文。
+ * 这三条都不是「规则写没写」,是「写了但这些情形没想到」。
+ * ============================================================ */
+test('A19:打印必须解掉 100vh 定高、深色配色回到纸上可读、块按钮不上纸', () => {
+  const print = /@media print \{[\s\S]*?\n\}/.exec(css);
+  assert.ok(print, '前提:必须有 @media print 块');
+  const p = print[0];
+
+  /* ① 高度链:只解 html/body 不够,#app 必须一起解(实测只解前者仍是 1 页) */
+  assert.match(p, /#app\s*\{[^}]*height:\s*auto/,
+    '★ 打印必须解掉 #app 的定高,否则长笔记只出第一屏(内容静默丢失)');
+  assert.match(p, /overflow:\s*visible/, '打印必须让 #readView 溢出可见(否则内部滚动区被裁)');
+
+  /* ② 深色配色:必须整体重置,逐个覆写文字色会漏 */
+  assert.match(p, /:root\[data-theme="dark"\]\s*\{/,
+    '★ 深色主题必须有专门的打印配色重置(否则白纸白字)');
+  const darkBlock = /:root\[data-theme="dark"\]\s*\{([\s\S]*?)\}/.exec(p);
+  assert.ok(darkBlock, '深色打印配色块必须可解析');
+  assert.match(darkBlock[1], /--text:\s*#000/, '打印时正文色必须是深色(白纸白字是可用性事故)');
+  assert.match(darkBlock[1], /--bg:\s*#fff/, '打印时底色必须是白');
+
+  /* ③ 块级悬浮按钮 */
+  assert.match(p, /\.blk-copy\s*\{[^}]*display:\s*none/,
+    '★ 段级复制按钮不得上纸(hover 显形时会印出来并压住正文)');
+});
+
+/* ============================================================
+ * A20:拖拽的退出路径 —— 遮罩不能永久卡在屏幕上
+ * ------------------------------------------------------------
+ * 2026-10-24 复审真机实测:拖文件到桌面松手 / 按 Esc 取消 / Alt+Tab 切走,
+ * 浏览器不一定派发 dragleave(relatedTarget === null 也不来)→ 遮罩永久
+ * 盖住整个界面。另外锁屏上拖文件会弹遮罩、还提示「先选择分类」,
+ * 这是在未解锁的界面上承诺能写数据。
+ * ============================================================ */
+test('A20:拖拽要有心跳/失焦兜底,且锁屏态不接拖拽', () => {
+  /* ★ 先剥注释再断言:注释里同样出现这些词,「文件里有过」会喂假绿
+   *   (2026-10-24 反向探针实测:只砍处理器里的心跳时,armDrop 里还有一处
+   *    同名调用 → 旧的宽松断言照样绿)。所以取**dragover 处理器体**再查。 */
+  const noComment = shellJs.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  const dragoverBody = /addEventListener\('dragover',[^]*?\n  \}\)/.exec(noComment);
+  assert.ok(dragoverBody, 'dragover 处理器必须可解析');
+  assert.match(dragoverBody[0], /setTimeout\(disarmDrop/,
+    '★ dragover 里必须有续期心跳(拖动结束不一定会派发 dragleave)');
+  assert.match(shellJs, /addEventListener\('blur'[\s\S]{0,80}disarmDrop/,
+    '窗口失焦必须收遮罩(Alt+Tab / 拖去别的应用)');
+  assert.match(shellJs, /const canAcceptDrop\s*=/,
+    '必须有「进应用了吗」的判据');
+  assert.match(shellJs, /canAcceptDrop\(\)\)\s*return/, 'dragover 必须用该判据拦住锁屏态');
+  const dropHandler = /addEventListener\('drop'[\s\S]*?\n  \}\)/.exec(shellJs);
+  assert.ok(dropHandler, 'drop 处理器必须可解析');
+  assert.match(dropHandler[0], /canAcceptDrop\(\)/,
+    '★ 锁屏态收到 drop 也不能接(未解锁的界面不该承诺能导入)');
+});
+
+/* ============================================================
+ * A21:设置面板的回显必须跟着真实状态走
+ * ------------------------------------------------------------
+ * 2026-10-24 复审真机实测:面板开着时点顶栏那枚主题按钮,主题真的变了,
+ * 但面板里「深色」仍高亮 —— 显示说谎比不显示更糟。同时 seg 必须把值
+ * 存在 dataset 上,否则事后无法从 DOM 反查当前项代表哪个值。
+ * ============================================================ */
+test('A21:设置面板分段按钮带值、主题回显随 data-theme 同步', () => {
+  assert.match(settingsJs, /b\.dataset\.value = String\(o\.value\)/,
+    '★ 分段按钮必须把值存在 dataset 上(否则无法反查当前项)');
+  assert.match(settingsJs, /function syncSeg\(/, '必须有 syncSeg 用于刷新回显');
+  /* ★ 必须落在「new MutationObserver(...).observe(documentElement, {...data-theme})」
+   *   这个整体上:M8 变异把 new 换成 null 时,只查关键词仍会绿。 */
+  const noCommentSet = settingsJs.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  assert.match(noCommentSet, /new MutationObserver\([^)]*\)[\s\S]{0,120}\.observe\(document\.documentElement,\s*\{\s*attributes:\s*true,\s*attributeFilter:\s*\['data-theme'\]\s*\}\)/,
+    '★ 必须真的 new 出观察者并 observe(documentElement, data-theme);面板开着时被顶栏改动才不会显示旧值');
+  assert.match(settingsJs, /themeObserver\.disconnect\(\)/,
+    '观察者必须在面板关闭时断开(否则泄漏累积)');
+  /* ★ 取 finally 块体再断言:M9 把 disconnect 移到 finally 之后时,
+   *   宽松写法会被「块外那行」或注释骗过。 */
+  const finallyBlock = /\} finally \{([\s\S]*?)\n  \}/.exec(noCommentSet);
+  assert.ok(finallyBlock, 'openSettings 必须有 finally 块');
+  assert.match(finallyBlock[1], /themeObserver\.disconnect\(\)/,
+    '断开必须在 finally 块**内部**(modal 抛异常时也要断,否则泄漏累积)');
 });
 
