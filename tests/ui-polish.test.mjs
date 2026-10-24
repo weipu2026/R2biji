@@ -611,6 +611,16 @@ test('A16:阅读字号/行距/宽度走 CSS 变量,标题不写死 px', () => {
   const reading = read('js/features/reading.js');
   assert.match(reading, /export function normalizeReadingPref/, 'reading.js 必须导出收敛函数');
   assert.match(reading, /export function applyReadingPref/, 'reading.js 必须导出应用函数');
+  /* 行宽五档 + px 定宽(2026-10-25 方向 B):设置面板必须真的把五档都画出来,
+   * 「模块里有五档、面板只给两档」这种半截改动在只有单测时查不出来。 */
+  const settingsSrc = read('js/features/settings.js');
+  /* 锚点取「从 row(body,'宽度'…) 到它的 set({measure:v}) 收尾」整段,
+   * 而不是固定字符窗口 —— 档位增删会改变长度,固定窗口会假红。 */
+  const widthSeg = /row\(body, '宽度', seg\([\s\S]*?ctx\.reading\.set\(\{ measure: v \}\)\)\);/.exec(settingsSrc);
+  assert.ok(widthSeg, '设置面板必须有「宽度」这一行');
+  for (const v of ['narrow', 'center', 'broad', 'wider', 'wide']) {
+    assert.match(widthSeg[0], new RegExp("value: '" + v + "'"), '宽度分段缺少档位 ' + v);
+  }
 });
 
 /* ---------- A17 集中设置面板:入口、数据、样式三层齐备 ---------- */

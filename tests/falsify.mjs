@@ -1887,6 +1887,25 @@ const MUTANTS = [
     expect: 'load/set/apply',
   },
   {
+    /* 2026-10-25 方向 B 的核心承诺。退回 em 之后，「720px」变成「36em」——
+     * 字符串看着还是个数,但宽度从此跟着字号走。只有判据落在
+     * 「必须是 ^\d+px$」上才能照出来,单纯比「有值」会全绿。 */
+    label: '行宽退回 em(版心重新跟着字号变)',
+    file: 'public/js/features/reading.js',
+    from: "  center: '720px',   // 标准(老键名保留,值已从 36em 改为 720px)",
+    to: "  center: '36em',    // MUTANT:退回 em",
+    expect: '行宽五档',
+  },
+  {
+    /* 面板的 value 写错一个字母,点下去会静默回退默认 —— 用户以为选了「更宽」,
+     * 实际拿到的是全宽/720px。这类「接错线」只有「把五档逐个点名」才抓得到。 */
+    label: '面板「更宽」档接错线(value 写成不存在的键 wider2)',
+    file: 'public/js/features/settings.js',
+    from: "          { value: 'wider', label: '更宽' },",
+    to: "          { value: 'wider2', label: '更宽' }, // MUTANT:键名不存在",
+    expect: 'A16',
+  },
+  {
     label: 'setReadingPref 不持久化(刷新即丢,设置白改)',
     file: 'public/js/features/reading.js',
     from: '  try { localStorage.setItem(READ_KEY, JSON.stringify(next)); } catch { /* 仅本次会话生效 */ }',
