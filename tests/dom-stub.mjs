@@ -132,6 +132,14 @@ export async function withDom(fn, makeCtx) {
     addEventListener() {},
     removeEventListener() {},
     hidden: false,
+    // 阅读排版偏好的落点(:root 的 CSS 变量)。setProperty 记在 style._p 上,
+    // 用例直接读 document.documentElement.style._p 断言 —— 每套桩独立一份,
+    // 不引入模块级共享可变状态(那份东西会让用例互相污染)。
+    documentElement: { dataset: {}, style: {
+      _p: {},
+      setProperty(k, v) { this._p[k] = v; },
+      removeProperty(k) { delete this._p[k]; },
+    } },
   };
   const build = makeCtx || ((store, byIdFn) => ({
     store,

@@ -563,3 +563,92 @@ test('A12:重载失败不报喜 / 会话已销毁不标脏 / 追加失败先取�
   const m = /const added = dst\.data\.notes\[before\];\s*\n\s*dst\.data\.notes\.length = before;/.exec(libJs);
   assert.ok(m, 'lib.js 必须先取 notes[before] 再截断');
 });
+/* ---------- A15 混版自愈:HTML 声明 ↔ JS 绑定 双向对账 ---------- */
+
+test('A15:data-controls 声明的每个接线点在 shell.js 里都有真实绑定', () => {
+  /* 混版自愈(2026-10-24)的地基:index.html 的 data-controls 列出「本版本
+   * 应该有绑定」的控件,shell.js 的 bindEvents 逐个绑。两份清单必须互为
+   * 印证 —— 声明了却没人绑 = 静默失灵(用户报的快捷键 BUG 同款);
+   * 绑了却没声明 = 自愈判据看不见它,混版时同样不自愈。 */
+  const declared = (/data-controls="([^"]+)"/.exec(indexHtml) || [null, ''])[1].split(/\s+/).filter(Boolean);
+  assert.ok(declared.length >= 30, 'data-controls 应有全部接线点,只解析到 ' + declared.length + ' 个');
+  for (const id of declared) {
+    assert.ok(shellJs.includes("$('" + id + "')"),
+      'data-controls 声明了 #' + id + ',但 shell.js 里没有 $(\'' + id + '\') 的绑定');
+    assert.match(indexHtml, new RegExp('id="' + id + '"'),
+      'data-controls 声明了 #' + id + ',但 index.html 里没有这个元素');
+  }
+  /* 本轮新增的两个控件必须在声明里(漏声明 = 自愈对它们瞎掉) */
+  for (const id of ['btnSettings', 'btnPrint']) {
+    assert.ok(declared.includes(id), '#' + id + ' 是本轮新增控件,必须进 data-controls');
+  }
+  /* 打标循环与 boot 核对:判据落在「代码真的在那儿」上,不是字符串出现过 */
+  assert.match(shellJs, /for \(const id of \(document\.documentElement\.dataset\.controls[\s\S]*?el\.dataset\.wired = '1'/,
+    'bindEvents 末尾必须存在混版打标循环');
+  assert.match(shellJs, /mixedShellGaps\(document\)/, 'start() 必须跑一次混版核对');
+  assert.match(shellJs, /healMixedShell\(gaps\)/, '有缺口必须走自愈动作');
+});
+
+/* ---------- A16 阅读排版:变量层通通落地 ---------- */
+
+test('A16:阅读字号/行距/宽度走 CSS 变量,标题不写死 px', () => {
+  for (const v of ['--read-size: 15px', '--read-lh: 1.85', '--read-measure: none']) {
+    assert.ok(css.includes(v), ':root 缺少 ' + v + '(默认值)');
+  }
+  const mdRule = /\.read-body \.md \{[^}]*\}/.exec(css);
+  assert.ok(mdRule, '找不到 .read-body .md 规则');
+  assert.match(mdRule[0], /font-size: var\(--read-size\)/, '正文必须引用 --read-size');
+  assert.match(mdRule[0], /line-height: var\(--read-lh\)/, '正文必须引用 --read-lh');
+  const measureRule = /\.read-body \.md, \.read-body > \* \{[^}]*\}/.exec(css);
+  assert.ok(measureRule, '找不到行宽规则');
+  assert.match(measureRule[0], /max-width: var\(--read-measure\)/, '行宽必须引用 --read-measure');
+  /* 标题改 em(相对字号):绝对值不会随档缩放,「大」档就名不副实 */
+  assert.doesNotMatch(css, /\.read-body h1 \{ font-size: \d+px/, 'h1 不得再写死 px');
+  assert.match(css, /\.read-body h1 \{ font-size: 1\.4em/, 'h1 应为 1.4em(21px @15px 基准)');
+  /* 模块侧:取值表 + 收敛函数 + 应用函数 */
+  const reading = read('js/features/reading.js');
+  assert.match(reading, /export function normalizeReadingPref/, 'reading.js 必须导出收敛函数');
+  assert.match(reading, /export function applyReadingPref/, 'reading.js 必须导出应用函数');
+});
+
+/* ---------- A17 集中设置面板:入口、数据、样式三层齐备 ---------- */
+
+test('A17:设置面板有入口、有分段控件、有样式', () => {
+  assert.match(indexHtml, /id="btnSettings"/, 'index.html 必须有设置按钮');
+  assert.match(shellJs, /\$\('btnSettings'\).innerHTML = ICON\.sliders/, '设置按钮的图标必须由 shell 注入');
+  assert.match(shellJs, /\$\('btnSettings'\).addEventListener\('click', \(\) => ctx\.openSettings\(\)\)/, '设置按钮必须打开面板');
+  assert.match(uiJs, /sliders:/, 'ICON 表必须有 sliders(设置图标)');
+  const settings = read('js/features/settings.js');
+  assert.match(settings, /className = 'set-seg'/, '面板必须用分段按钮组(可发现性优于 select)');
+  assert.match(settings, /setAttribute\('aria-pressed'/, '分段按钮必须标 aria-pressed(读屏器播报当前项)');
+  assert.match(settings, /ctx\.reading\.load\(\)/, '阅读偏好必须从 reading.js 读当前值');
+  assert.match(settings, /ctx\.saveSettings\(\{ autoLockMinutes/, '自动锁屏必须走 saveSettings 补丁式写入');
+  for (const sel of ['.set-row', '.set-seg', '.set-seg-btn[aria-pressed="true"]']) {
+    assert.ok(css.includes(sel), 'style.css 缺少 ' + sel);
+  }
+  /* 侧栏那个裸 select 必须真的移走了(散落三处正是审计记的问题) */
+  assert.doesNotMatch(indexHtml, /id="autoLock"/, '自动锁屏不应再留在侧栏');
+  assert.match(uiJs, /saveSettings\(patch\)/, 'saveSettings 必须改成补丁式签名');
+});
+
+/* ---------- A18 拖拽导入 + 打印出口 ---------- */
+
+test('A18:页面级拖拽有遮罩有监听,打印有按钮有样式', () => {
+  assert.match(indexHtml, /id="dropVeil"/, 'index.html 必须有拖拽遮罩');
+  assert.match(indexHtml, /id="btnPrint"/, '阅读态必须有打印按钮');
+  assert.match(shellJs, /window\.addEventListener\('dragover'/, '必须监听 dragover(否则浏览器不收 drop)');
+  assert.match(shellJs, /window\.addEventListener\('drop'/, '必须监听 drop');
+  assert.match(shellJs, /routeImports\(ctx, \[\.\.\.\(e\.dataTransfer/, 'drop 必须走同一条分流');
+  assert.match(shellJs, /\$\('btnPrint'\).addEventListener\('click', \(\) => window\.print\(\)\)/, '打印按钮必须调 window.print()');
+  const veil = /\.drop-veil \{[^}]*\}/.exec(css);
+  assert.ok(veil, 'style.css 必须有 .drop-veil 规则');
+  assert.match(veil[0], /pointer-events: none/, '遮罩不得抢指针事件(放置目标是 document)');
+  /* 打印:chrome 全收、正文通铺、敏感行强制遮罩上纸 */
+  const print = /@media print \{[\s\S]*?\n\}/.exec(css);
+  assert.ok(print, 'style.css 必须有 @media print 块');
+  assert.match(print[0], /\.topbar[^{]*\{[^}]*display: none/, '打印必须隐藏顶栏');
+  assert.match(print[0], /\.sidebar[^{]*\{[^}]*display: none/, '打印必须隐藏侧栏');
+  assert.match(print[0], /\.secret \.secret-raw \{ display: none/, '打印必须强制遮罩敏感行(纸会流转)');
+  assert.match(print[0], /max-width: none/, '打印必须通铺(不跟随屏幕上的居中偏好)');
+});
+

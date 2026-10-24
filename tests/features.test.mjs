@@ -35,7 +35,9 @@ const CTX_KEYS = ['dom', 'icons', 'toast', 'modal', 'store', 'markDirty', 'copyT
   'addCategory', 'renameCategory', 'deleteCategory', 'openCategory', 'renameLastReadCat',
   'enterEditMode', 'exitEditMode', 'collectEditChanges', 'addAttachments',
   'copyWholeNote', 'deleteNote', 'moveNoteSelection', 'bindReadSwipe',
-  'runSearch', 'closeSearch', 'toggleTheme', 'initTheme', 'openTrash', 'openPwGenerator', 'exportNoteMd'];
+  'runSearch', 'closeSearch', 'toggleTheme', 'initTheme', 'openTrash', 'openPwGenerator', 'exportNoteMd',
+  // 2026-10-24 A2/B1/B2 新增入口
+  'openSettings', 'setThemeMode', 'themeMode', 'reading', 'mono'];
 
 function featureFiles() {
   if (!existsSync(FEATURES)) return [];
