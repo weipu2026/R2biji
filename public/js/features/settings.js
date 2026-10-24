@@ -45,6 +45,9 @@ function seg(current, options, onPick) {
     b.type = 'button';
     b.className = 'set-seg-btn';
     b.textContent = o.label;
+    /* 值存在 dataset 上:syncSeg 靠它把「当前项」刷对 —— 只记「是否相等」
+     * 的话,事后无法从 DOM 反查某一项代表哪个值。 */
+    b.dataset.value = String(o.value);
     b.setAttribute('aria-pressed', String(String(o.value) === String(current)));
     b.addEventListener('click', () => {
       for (const x of wrap.children) x.setAttribute('aria-pressed', String(x === b));
@@ -55,56 +58,82 @@ function seg(current, options, onPick) {
   return wrap;
 }
 
+/** 把分段按钮组的当前项刷成 current(用于「面板开着时状态被别处改了」)。 */
+function syncSeg(wrap, current) {
+  for (const b of wrap.children) {
+    b.setAttribute('aria-pressed', String(b.dataset.value === String(current)));
+  }
+}
+
 /** 打开设置面板。ctx 需要:modal / store / saveSettings(patch) /
  *  setThemeMode / themeMode / reading{load,set} / mono{get,set}。 */
 export async function openSettings(ctx) {
-  await ctx.modal({
-    type: 'custom',
-    title: '设置',
-    text: '偏好只存在本浏览器(localStorage),不参与加密、不随笔记库同步。',
-    build: (body) => {
-      /* ── 外观 ── */
-      group(body, '外观');
-      row(body, '主题', seg(ctx.themeMode(), [
-        { value: 'system', label: '跟随系统' },
-        { value: 'light', label: '浅色' },
-        { value: 'dark', label: '深色' },
-      ], (v) => ctx.setThemeMode(v)));
+  /* 主题行的回显要跟着顶栏那枚二态按钮走:设置是 modal(<dialog> showModal
+   * 进 top layer),面板盖住界面,但键盘 Tab 仍可能触达顶栏按钮;而且
+   * 用户完全可能先开面板、发现太亮、直接去点顶栏那枚月亮/太阳。
+   * 若只在 build 时读一次,回来会看到「深色」仍高亮、事实却是浅色 ——
+   * 显示说谎比不显示更糟。用 MutationObserver 盯 data-theme
+   * (applyTheme 是唯一写入点),面板关闭时断开。 */
+  let themeObserver = null;
+  try {
+    await ctx.modal({
+      type: 'custom',
+      title: '设置',
+      text: '偏好只存在本浏览器(localStorage),不参与加密、不随笔记库同步。',
+      build: (body) => {
+        /* ── 外观 ── */
+        group(body, '外观');
+        const themeSeg = seg(ctx.themeMode(), [
+          { value: 'system', label: '跟随系统' },
+          { value: 'light', label: '浅色' },
+          { value: 'dark', label: '深色' },
+        ], (v) => ctx.setThemeMode(v));
+        row(body, '主题', themeSeg);
+        if (typeof MutationObserver === 'function') {
+          themeObserver = new MutationObserver(() => syncSeg(themeSeg, ctx.themeMode()));
+          themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+        }
 
-      /* ── 阅读(字号 / 行距 / 宽度 → reading.js 的三个 CSS 变量) ── */
-      group(body, '阅读');
-      const read = ctx.reading.load();
-      row(body, '字号', seg(read.size, [
-        { value: 's', label: '小' },
-        { value: 'm', label: '中' },
-        { value: 'l', label: '大' },
-      ], (v) => ctx.reading.set({ size: v })));
-      row(body, '行距', seg(read.lh, [
-        { value: 'tight', label: '紧凑' },
-        { value: 'std', label: '标准' },
-        { value: 'loose', label: '宽松' },
-      ], (v) => ctx.reading.set({ lh: v })));
-      row(body, '宽度', seg(read.measure, [
-        { value: 'wide', label: '全宽' },
-        { value: 'center', label: '居中' },
-      ], (v) => ctx.reading.set({ measure: v })));
+        /* ── 阅读(字号 / 行距 / 宽度 → reading.js 的三个 CSS 变量) ── */
+        group(body, '阅读');
+        const read = ctx.reading.load();
+        row(body, '字号', seg(read.size, [
+          { value: 's', label: '小' },
+          { value: 'm', label: '中' },
+          { value: 'l', label: '大' },
+        ], (v) => ctx.reading.set({ size: v })));
+        row(body, '行距', seg(read.lh, [
+          { value: 'tight', label: '紧凑' },
+          { value: 'std', label: '标准' },
+          { value: 'loose', label: '宽松' },
+        ], (v) => ctx.reading.set({ lh: v })));
+        row(body, '宽度', seg(read.measure, [
+          { value: 'wide', label: '全宽' },
+          { value: 'center', label: '居中' },
+        ], (v) => ctx.reading.set({ measure: v })));
 
-      /* ── 编辑(等宽:与编辑态那枚按钮同一份 localStorage 偏好) ── */
-      group(body, '编辑');
-      row(body, '等宽字体', seg(ctx.mono.get() ? '1' : '0', [
-        { value: '0', label: '关' },
-        { value: '1', label: '开' },
-      ], (v) => ctx.mono.set(v === '1')));
+        /* ── 编辑(等宽:与编辑态那枚按钮同一份 localStorage 偏好) ── */
+        group(body, '编辑');
+        row(body, '等宽字体', seg(ctx.mono.get() ? '1' : '0', [
+          { value: '0', label: '关' },
+          { value: '1', label: '开' },
+        ], (v) => ctx.mono.set(v === '1')));
 
-      /* ── 安全(自动锁屏:store.settings 的单一来源,面板只写不改语义) ── */
-      group(body, '安全');
-      const min = ctx.store.get('settings').autoLockMinutes;
-      row(body, '自动锁屏', seg(String(min), [
-        { value: '0', label: '关闭' },
-        { value: '5', label: '5 分钟' },
-        { value: '15', label: '15 分钟' },
-        { value: '30', label: '30 分钟' },
-      ], (v) => ctx.saveSettings({ autoLockMinutes: Number(v) || 0 })));
-    },
-  });
+        /* ── 安全(自动锁屏:store.settings 的单一来源,面板只写不改语义) ── */
+        group(body, '安全');
+        const min = ctx.store.get('settings').autoLockMinutes;
+        row(body, '自动锁屏', seg(String(min), [
+          { value: '0', label: '关闭' },
+          { value: '5', label: '5 分钟' },
+          { value: '15', label: '15 分钟' },
+          { value: '30', label: '30 分钟' },
+        ], (v) => ctx.saveSettings({ autoLockMinutes: Number(v) || 0 })));
+      },
+    });
+  } finally {
+    /* 面板关闭即断开。放在 finally 而不是 await 之后的普通语句:modal 抛异常
+     * 时也必须断开,否则观察者留在 documentElement 上、每次切主题白跑一次,
+     * 下次开面板还会再挂一个(泄漏累积)。 */
+    if (themeObserver) themeObserver.disconnect();
+  }
 }

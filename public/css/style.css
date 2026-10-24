@@ -1426,8 +1426,49 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     display: none !important;
   }
   body { background: #fff; }
-  .layout, .content, #readView { display: block; }
-  #readView { padding: 0; max-width: none; }
+  /* ★★ 打印必须解除屏幕布局的两道「锁」(2026-10-24 审计 A-BUG-1)。
+   * 屏幕布局靠 #app 满视口(height:100vh)+ 内部各自滚动,打印时这会把整个
+   * 文档锁成一屏高:readView 内部滚动的内容永远进不了第 2 页 —— 打印长笔记
+   * 只出第一屏,后面的内容静默丢失(实测 3360px 正文只出 1 页)。
+   *
+   * ★ 这**三条是一组冗余保险,不是三条各自必要**(2026-10-24 复审实测,
+   *   逐个变异量出来的,别再照抄「某一条是唯一根因」的说法):
+   *     · 只留第 1 条(height:auto)      → 多页 ✓ 单独就够
+   *     · 只留第 2 条(display:block…)   → 多页 ✓ 单独就够
+   *     · 只留第 3 条(overflow:visible) → 仍是 1 页 ✗ 单独不够
+   *     · 三条全撤                        → 1 页 ✗
+   *   也就是说 1 与 2 互为兜底:任何一条在位都能分页,这正是我们要的 ——
+   *   将来谁只删掉其中一条,分页不会因此塌掉。真正不能发生的是
+   *   **1 与 2 同时不在**,那会静默回到 1 页;S0 的「打印长笔记必须分多页」
+   *   就是钉这个的(实测:三条全撤 → pages=1 翻红;只撤其中一条 → 仍绿)。
+   *   第 3 条(overflow:visible)管的是「滚动盒不裁剪」,与分页正交,保留。
+   * 只解 html/body 不解 #app 时实测仍是 1 页(百分比链的锚在 html/body,
+   * 而咬死高度的那一层是 #app)。 */
+  html, body, #app { height: auto !important; }
+  .layout, .content, #readView { display: block; height: auto; flex: none; }
+  #readView { padding: 0; max-width: none; overflow: visible; }
+  /* ★★ 深色主题必须强制回到浅色变量组(2026-10-24 审计 A-BUG-2)。
+   * 下面把 body 背景刷成白纸,但深色主题的 --text 是 #ece9e1(亮度 0.914)——
+   * 浏览器默认**不打印背景色**(printBackground=false 是绝大多数人的默认),
+   * 于是白纸 + 近白字 = 打印出来是一片空白。实测深色态正文色
+   * rgb(236,233,225) 落在 #fff 上亮度 0.914,几乎不可见。
+   * 这里不逐个覆写文字色,而是把整组配色变量重置回浅色值 —— 语义元素
+   * (--danger / --mark-bg / --code-bg …)一并跟着回到纸上可读的状态,
+   * 漏一个就有一处不可见。深色变量写在 :root[data-theme="dark"],
+   * 特异性 (0,1,1) 高于 :root (0,1,0),所以必须带 !important 才压得住。 */
+  :root, :root[data-theme="dark"] {
+    --bg: #fff; --panel: #fff; --side: #fff; --edge: #999;
+    --border: #bbb; --border-strong: #888;
+    --text: #000; --muted: #333;
+    --accent: #000; --accent-hover: #000; --accent-weak: #eee;
+    --sel: #eee; --hover: #fff; --hover-weak: transparent;
+    --danger: #000; --danger-weak: #fff; --warn: #000; --warn-bg: #fff;
+    --ok: #000; --ok-bg: #fff;
+    --mark-bg: #f0f0f0; --code-bg: #f5f5f5;
+    --glass-strong: #fff; --glass-border: #fff;
+    --glass-shadow: none; --glass-shadow-sm: none; --paper-shadow: none;
+    --grad1: #fff; --grad2: #fff; --ring: none;
+  }
   /* 纸上通铺:阅读宽度偏好(居中 36em)是屏幕上的选择,打印不跟随 */
   .read-body .md, .read-body > * { max-width: none; margin: 0; }
   .read-body .md { font-size: 12pt; line-height: 1.75; }
@@ -1439,5 +1480,12 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   .secret .secret-raw { display: none; }
   .secret .secret-stars { display: inline; }
   .att-chip { border: none; padding: 0; background: none; }
+  /* ★ 段级「复制本段」按钮不能上纸(2026-10-24 审计 A-BUG-5)。
+   * 它是 position:absolute + opacity:0 的悬浮按钮,靠 .blk:hover 才显形;
+   * 打印时若鼠标恰好停在某一段上,那一段的按钮就是 opacity:1 ——
+   * 纸上会多出一颗小图标,而且绝对定位会压住正文最后一行。
+   * 用 display:none 而不是 opacity:0:后者仍占位、仍可能被某些
+   * 「打印背景图形」设置画出来。 */
+  .blk-copy { display: none !important; }
   @page { margin: 18mm; }
 }

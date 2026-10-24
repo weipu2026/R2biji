@@ -317,26 +317,63 @@ function bindEvents(ctx) {
    *     拖链接都不弹遮罩,浏览器默认行为完全不受影响;
    *  ② dragover 必须 preventDefault:不拦的放置目标,浏览器不会派发 drop;
    *  ③ dragleave 只在 relatedTarget === null(指针离开窗口)时收遮罩 ——
-   *     页面元素之间的移动会连续触发 dragleave,每次都收会让遮罩狂闪。
-   * 遮罩自身 pointer-events:none(见 style.css),放置目标就是 document。 */
+   *     页面元素之间的移动会连续触发 dragleave,每次都收会让遮罩狂闪;
+   *  ④ **dragover 续期**:仅靠 dragleave 收不干净。用户拖到桌面/别的窗口
+   *     松手、或按 Esc 取消拖动时,浏览器**不一定**派发 dragleave(null
+   *     relatedTarget 也没来),遮罩就永久卡在屏幕上盖住整个界面
+   *     (2026-10-24 审计 A-BUG-3,真机复现:blur 后遮罩仍在)。
+   *     所以再加一条与退出路径无关的心跳:拖动期间 dragover 高频重发,
+   *     只要 1.5 秒没再发,就说明这次拖动已经以任何方式结束。
+   *     遮罩收起后 drop 仍能接住(判据改成 dataTransfer 里有没有文件),
+   *     不会因为「收早了」而丢文件。
+   * 遮罩自身 pointer-events:none(见 style.css),放置目标就是 document。
+   * ⑤ **只在进应用后生效**:锁屏/建库/连接中时不接拖拽(2026-10-24 审计
+   *   A-BUG-4)。此前锁屏上拖文件会弹出「松手导入」遮罩、松手还提示
+   *   「先选择要导入到哪个分类」—— 人还没解锁、库还没解密,界面却承诺
+   *   可以导入,既误导也暴露「这里能写数据」。判据用 #app 是否可见
+   *   (进应用 = app 可见),一处判据覆盖锁屏/建库/连接中三种态。 */
   let dropArmed = false;
+  let dropTimer = 0;
+  const canAcceptDrop = () => { const app = document.getElementById('app'); return !!app && !app.hidden; };
+  const disarmDrop = () => {
+    dropArmed = false;
+    clearTimeout(dropTimer);
+    $('dropVeil').hidden = true;
+  };
+  const armDrop = () => {
+    dropArmed = true;
+    $('dropVeil').hidden = false;
+    clearTimeout(dropTimer);
+    /* 拖到一半停住不动时浏览器也会停发 dragover,再动一下就重新显示 ——
+     * 这个 1.5s 只是「拖动结束」的判据,不是「人还在不在看」的判据。 */
+    dropTimer = setTimeout(disarmDrop, 1500);
+  };
+  const hasFiles = (e) => !!e.dataTransfer && [...e.dataTransfer.types].includes('Files');
   window.addEventListener('dragover', (e) => {
-    if (!e.dataTransfer || ![...e.dataTransfer.types].includes('Files')) return;
+    if (!hasFiles(e) || !canAcceptDrop()) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
-    if (!dropArmed) { dropArmed = true; $('dropVeil').hidden = false; }
+    if (dropArmed) { clearTimeout(dropTimer); dropTimer = setTimeout(disarmDrop, 1500); }
+    else armDrop();
   });
   window.addEventListener('dragleave', (e) => {
     if (e.relatedTarget !== null || !dropArmed) return;
-    dropArmed = false;
-    $('dropVeil').hidden = true;
+    disarmDrop();
   });
   window.addEventListener('drop', (e) => {
-    if (!dropArmed) return;               // 不是文件拖拽(或遮罩已收起)
+    /* 判据用「有没有文件」+「进应用了吗」。前者:心跳可能已把遮罩收起,
+     * 但那次拖动的文件是真实要导入的,不能因为遮罩状态而丢掉;
+     * 后者:锁屏/建库/连接中即使收到 drop 也不接(见 ⑤)。 */
+    if (!hasFiles(e) || !canAcceptDrop()) return;
     e.preventDefault();
-    dropArmed = false;
-    $('dropVeil').hidden = true;
+    disarmDrop();
     routeImports(ctx, [...(e.dataTransfer?.files || [])]);
+  });
+  /* 兜底:窗口失去焦点(Alt+Tab / 拖去别的应用)时也收干净。
+   * 心跳已能覆盖绝大多数情况,这两条是「宁可多做一次」的廉价保险。 */
+  window.addEventListener('blur', () => { if (dropArmed) disarmDrop(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden && dropArmed) disarmDrop();
   });
   /* 同一入口两种语义,按扩展名分流(2026-10-18 批量导入;2026-10-24 抽成
    * routeImports 供拖拽放置共用 —— 两条入口的分流规则必须只有一份):
