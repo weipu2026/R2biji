@@ -108,8 +108,11 @@ export async function openSettings(ctx) {
           { value: 'loose', label: '宽松' },
         ], (v) => ctx.reading.set({ lh: v })));
         row(body, '宽度', seg(read.measure, [
+          { value: 'narrow', label: '窄' },
+          { value: 'center', label: '标准' },
+          { value: 'broad', label: '宽' },
+          { value: 'wider', label: '更宽' },
           { value: 'wide', label: '全宽' },
-          { value: 'center', label: '居中' },
         ], (v) => ctx.reading.set({ measure: v })));
 
         /* ── 编辑(等宽:与编辑态那枚按钮同一份 localStorage 偏好) ── */

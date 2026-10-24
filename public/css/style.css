@@ -72,9 +72,10 @@
   /* ── 阅读排版偏好(2026-10-24 A1;features/reading.js 写这三个变量)──
    * · --read-size 正文字号:小 14 / 中 15 / 大 17
    * · --read-lh 行距:紧凑 1.6 / 标准 1.85 / 宽松 2.1
-   * · --read-measure 行宽上限:全宽 none / 居中 36em。
-   *   36em ≈ 36 个全角字符 ≈ 68–72ch(拉丁「0」宽的一半即全角)——
-   *   对应用户要的「居中 68–75 字符」,中英混排都落在舒适区。
+   * · --read-measure 行宽上限:五档(窄 620 / 标准 720 / 宽 820 /
+   *   更宽 900 / 全宽 none),**px 定宽,不随字号档变**。
+   *   2026-10-25 从 em 改为 px:em 相对正文自身的 font-size,用户切字号
+   *   时行宽会跟着从 540 偷偷变成 612px,而版心与字号本是两件事。
    *   默认全宽:2026-09-28 用户明确要求过通栏(原 76ch 上限「回行点」
    *   让宽屏只读半边),这里只是把选择权交出来,不改默认。 */
   --read-size: 15px;
@@ -802,7 +803,8 @@ input, textarea, select { font: inherit; color: inherit; caret-color: var(--acce
 /* ---------- Markdown 渲染 ---------- */
 
 /* 阅读正文行宽:默认通栏(2026-09-28 用户要求,宽屏整行读到底);
- * 设置面板可切「居中 36em」(≈68–75 字符的舒适阅读量)。
+ * 设置面板另有四档定宽(620 / 720 / 820 / 900px),px 定宽所以字号
+ * 切档时版心纹丝不动(2026-10-25 从 em 改来,见 :root 处的说明)。
  * 变量为 none 时 margin-inline:auto 不产生任何效果,通栏形态零差异。 */
 .read-body .md, .read-body > * { max-width: var(--read-measure); margin-inline: auto; }
 .read-body .md { font-size: var(--read-size); line-height: var(--read-lh); }
@@ -1469,7 +1471,7 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
     --glass-shadow: none; --glass-shadow-sm: none; --paper-shadow: none;
     --grad1: #fff; --grad2: #fff; --ring: none;
   }
-  /* 纸上通铺:阅读宽度偏好(居中 36em)是屏幕上的选择,打印不跟随 */
+  /* 纸上通铺:屏幕上的定宽档(620–900px)是阅读偏好,打印不跟随 */
   .read-body .md, .read-body > * { max-width: none; margin: 0; }
   .read-body .md { font-size: 12pt; line-height: 1.75; }
   .read-body h1 { font-size: 17pt; }
