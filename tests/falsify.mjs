@@ -2020,6 +2020,42 @@ const MUTANTS = [
     to: '  } finally {\n    // MUTANT:断开移到块外\n  }\n  if (themeObserver) themeObserver.disconnect();',
     expect: 'A21',
   },
+  /* ── 2026-11-03 清除本机凭据:三样少清一样,都等于留一条能进的路径 ── */
+  {
+    label: '清凭据漏了访问密钥(这台机器的联网门形同不存在)',
+    file: 'public/js/features/shell.js',
+    from: "  try { ctx.api.saveAccessKey(''); } catch { /* 隐私模式:本来就没存下来 */ }",
+    to: '  // MUTANT:不清访问密钥',
+    expect: '三样一起清',
+  },
+  {
+    label: '清凭据漏了裸 DEK(断网可免密直进,连主密码都不用输)',
+    file: 'public/js/features/shell.js',
+    from: '  try { ctx.session.clearSession(); } catch { /* 同上 */ }',
+    to: '  // MUTANT:不清会话',
+    expect: '三样一起清',
+  },
+  {
+    label: '清凭据漏了 SW 缓存(离线仍留着 vault.json 与分类密文)',
+    file: 'public/js/features/shell.js',
+    from: '这里清完才真的清完。 */\n  cachesCleared = await clearShellCaches();',
+    to: '  const cachesCleared = true; // MUTANT:不真清',
+    expect: '三样一起清',
+  },
+  {
+    label: '清缓存在锁定之前(锁内 saveCategory 的白名单 GET 会被 SW 写回缓存,刚清完又被填回密文)',
+    file: 'public/js/features/shell.js',
+    from: '  let dropped = 0;\n  let cachesCleared = false;',
+    to: '  let dropped = 0;\n  let cachesCleared = await clearShellCaches(); // MUTANT:清缓存在锁定之前(复审前的竞态顺序)',
+    expect: '清缓存必须发生在 lockNow 之后',
+  },
+  {
+    label: '清完不锁定(明文仍在内存与 DOM 里,清了等于没清)',
+    file: 'public/js/features/shell.js',
+    from: '    dropped = (await ctx.lockNow({ confirmDiscard: false })) || 0;',
+    to: '    dropped = 0; // MUTANT:不锁定',
+    expect: '三样一起清',
+  },
 ];
 
 /* 自动发现测试文件,不手写清单 —— 手写清单必然漂移:
