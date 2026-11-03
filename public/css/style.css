@@ -1350,6 +1350,8 @@ mark { background: var(--mark-bg); border-radius: 2px; padding: 0 2px; }
   gap: 12px; padding: 7px 0;
 }
 .set-label { flex: 0 0 auto; font-size: 13.5px; color: var(--text); }
+/* 设置项下面的补充说明:小一号、灰色,与 .remember-hint 同一口径。 */
+.set-note { margin: 2px 0 10px; font-size: 11.5px; line-height: 1.5; color: var(--muted); }
 .set-seg {
   display: flex; flex: 0 0 auto;
   border: 1px solid var(--border); border-radius: var(--radius);

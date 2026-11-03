@@ -38,7 +38,7 @@ import {
 // 它的入口 start 由 main.js 直接调用,并把手上的 ctx 传进去。
 // loadVaultInfo 一并导出:锁屏上点「解锁」时若还没拿到库信息,要先补拉一次
 // 再解(见 lock.js 的 doUnlock),这条路径不能反向 import(会成环)。
-import { boot, loadVaultInfo, getMono, setMono } from './features/shell.js';
+import { boot, loadVaultInfo, getMono, setMono, purgeLocalCredentials } from './features/shell.js';
 
 const S = createProxy(store);
 
@@ -173,6 +173,10 @@ const ctx = {
     apply: applyReadingPrefFromStorage,            // 启动时落 CSS 变量
   },
   mono: { get: getMono, set: (on) => setMono(ctx, on) }, // 等宽偏好(面板与编辑态按钮共用)
+  /* 清除本机凭据(手动动作,设置面板「安全」分组那个按钮触发)。
+   * 三样一起清:访问密钥 / 记住的会话(裸 DEK) / SW 缓存 —— 少清一样都会留下
+   * 一条「离线也能进」的路径,理由见 shell.js purgeLocalCredentials 的注释。 */
+  purgeLocalCredentials: () => purgeLocalCredentials(ctx),
   changePassword,
   exportFullBackup,
   importFromBackup,

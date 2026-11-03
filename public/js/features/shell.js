@@ -777,13 +777,96 @@ async function healMixedShell(gaps) {
   try { sessionStorage.setItem('jmbiji.shellHeal', '1'); } catch { /* 忽略 */ }
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
   console.info('[JMbiji] 检测到界面资源混版(新页面 + 旧脚本),自动刷新以对齐:', gaps.join(', '));
-  try {
-    if (typeof caches !== 'undefined') {
-      const keys = await caches.keys();
-      await Promise.all(keys.map((k) => caches.delete(k)));
-    }
-  } catch { /* 忽略:照常重载 */ }
+  await clearShellCaches();
   location.reload();
+}
+
+/* ================= 清除本机凭据(只由用户手动触发) ================= */
+
+/** 清掉全部 Cache Storage(SW 预缓存 + 运行时缓存的密文)。
+ *  两处共用:混版自愈(清完重载)与「清除本机凭据」。
+ *  失败不抛 —— 缓存清不掉不该阻断重载或退出登录;但**要如实返回**,
+ *  由调用方决定怎么提示,绝不静默当成成功。
+ *  @returns {Promise<boolean>} 是否清成功(环境不支持也算 false) */
+export async function clearShellCaches() {
+  try {
+    if (typeof caches === 'undefined') return false;
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+    return true;
+  } catch { return false; }
+}
+
+/**
+ * 清除本机凭据 —— 「这台设备我不再用了」的那一下。
+ *
+ * 用户 2026-11-03 的威胁模型:主密码是常用密码,可能被盗也可能被人猜到;
+ * ACCESS_KEY 是只有他知道的高熵门。所以设备淘汰时清掉本机的 ACCESS_KEY,
+ * 让下一次登录必须**同时**输 ACCESS_KEY 与主密码 —— 知道主密码也进不去。
+ *
+ * ★ 但只清 ACCESS_KEY 挡不住这台机器,三样必须一起清:
+ *   ① 断网仍能进:页面导航走 SW 缓存兜底,/api/vault、/api/cats、/api/cat 也在
+ *      OFFLINE_API_GET 白名单里从缓存回源(sw.js)—— 请求根本不出网,门形同不存在;
+ *   ② localStorage['jmbiji.session'] 存着**裸 DEK**(session.js),离线可免密
+ *      直接进入,连主密码都不用输;
+ *   ③ 就算清了裸 DEK,本地还留着 vault.json 与分类密文 —— 知道主密码的人
+ *      离线仍能解开。
+ *   清完三样,这台机器才真的「什么都不知道」:打开只有锁屏,要访问密钥才能联网,
+ *   要主密码才能解密。
+ *
+ * ★ 只由用户手动触发(设置面板 → 安全 → 本机凭据)。锁定 / 自动锁屏 / 关标签页
+ *   一律不许调它:那会把「记住本设备」变成每屏都要重输两样东西,正是用户
+ *   明确排除的形态。
+ *
+ * 不抛异常 —— 这是「弃用这台设备」的收尾动作,半途炸掉只会留下更糟的中间态;
+ * 但失败必须说出来,静默失败在此处等于谎报「已经清干净了」。
+ * @returns {Promise<{cancelled?:boolean, dropped:number, cachesCleared:boolean}>}
+ */
+export async function purgeLocalCredentials(ctx) {
+  const yes = await ctx.modal({
+    type: 'confirm', danger: true,
+    title: '清除本机凭据',
+    text: '将清除这台设备上的访问密钥、免密登录状态与离线缓存,并立即退出登录。'
+      + '下次在本机登录需同时输入访问密钥与主密码;清除后离线将打不开笔记。',
+    okLabel: '清除并退出',
+  });
+  if (!yes) return { cancelled: true, dropped: 0, cachesCleared: false };
+  // 先尽力把在途改动存上去:紧接着就锁定,没存上的会随会话一起丢。
+  try { await ctx.saveAll(); } catch { /* 存不上也照清 —— 这是弃用设备的动作 */ }
+  try { ctx.api.saveAccessKey(''); } catch { /* 隐私模式:本来就没存下来 */ }
+  try { ctx.session.clearSession(); } catch { /* 同上 */ }
+  let dropped = 0;
+  let cachesCleared = false;
+  try {
+    dropped = (await ctx.lockNow({ confirmDiscard: false })) || 0;
+  } catch (e) {
+    /* 锁定失败也把缓存尽力清掉:半清状态最糟,能清一样是一样。 */
+    cachesCleared = await clearShellCaches();
+    ctx.toast(`本机凭据已清除,但锁定失败(${e?.message || e});明文仍在屏幕上,请手动锁定`, 'error');
+    return { dropped, cachesCleared };
+  }
+  /* ★ 清缓存必须放在 lockNow **之后**(2026-11-03 复审抓到的竞态,不是风格问题):
+   *   lockNow 在有未保存改动时会再跑一轮 saveAll(lock.js),而 saveCategory 缺
+   *   etag 时会 GET /api/cat/<分类>(lib.js) —— 那是 OFFLINE_API_GET 白名单接口,
+   *   SW 的网络优先分支会把成功响应**重新写回缓存**(sw.js)。先清后锁的话,
+   *   刚清空的缓存又被密文填回来,「离线可解密」这条本函数承诺堵死的路径复活。
+   *   锁定收尾(showLock)是纯 DOM,之后本页不再发起任何请求,这里清完才真的清完。
+   *
+   *   已知边界(记录,不为它过度工程化):**其他标签页**在 broadcast 'locked'
+   *   之后的 lockNow 里若还有未保存改动,它的 saveAll 同样会发白名单 GET 并被
+   *   SW 写回缓存 —— 那发生在本页清缓存之后的另一个执行环境里,单页视角堵不住。
+   *   后果上限:本机缓存里残留一份密文,解开它仍需主密码(ACCESS_KEY 与会话
+   *   已清);且下一轮 SW 缓存淘汰/再次「清除」即消失。要彻底干净,清完再
+   *   手动清一次站点数据即可(浏览器设置 → 站点数据)。 */
+  cachesCleared = await clearShellCaches();
+  if (!cachesCleared) {
+    ctx.toast('已退出登录,但离线缓存没能清掉 —— 请关闭浏览器后清理本站点数据', 'warn');
+  } else if (dropped > 0) {
+    ctx.toast(`已清除本机凭据 · ${dropped} 个分类的改动没能存上`, 'warn');
+  } else {
+    ctx.toast('已清除本机凭据,下次在本机登录需重新输入访问密钥与主密码');
+  }
+  return { dropped, cachesCleared };
 }
 
 export async function start(ctx) {

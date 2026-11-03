@@ -131,6 +131,24 @@ export async function openSettings(ctx) {
           { value: '15', label: '15 分钟' },
           { value: '30', label: '30 分钟' },
         ], (v) => ctx.saveSettings({ autoLockMinutes: Number(v) || 0 })));
+
+        /* 本机凭据:清掉这台设备上一切「下次不用输」的状态。
+         * ★ 只在**手动点击**时执行 —— 不挂锁定、不挂自动锁屏、不挂关页面
+         *   (用户 2026-11-03 明确要求「仅限于我手动清除」):那些自动路径会
+         *   把「记住本设备」变成每屏都要重输 ACCESS_KEY + 主密码。 */
+        const purgeBtn = document.createElement('button');
+        purgeBtn.type = 'button';
+        purgeBtn.className = 'btn ghost danger small';
+        purgeBtn.textContent = '清除';
+        /* 走 ctx:feature 之间不互相 import(见 tests/features.test.mjs 的
+         * 「不得 import ui.js / 一律经 ctx 取基础设施」纪律)。 */
+        purgeBtn.addEventListener('click', () => { ctx.purgeLocalCredentials(); });
+        row(body, '本机凭据', purgeBtn);
+        const purgeNote = document.createElement('p');
+        purgeNote.className = 'set-note';
+        purgeNote.textContent = '清除后本机不再保存访问密钥与免密登录状态,离线也打不开;'
+          + '下次在本机登录需同时输入访问密钥与主密码。';
+        body.appendChild(purgeNote);
       },
     });
   } finally {
